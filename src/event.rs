@@ -120,4 +120,28 @@ mod tests {
         let back: Envelope = serde_json::from_str(&s).unwrap();
         assert_eq!(back.source, "opencode");
     }
+
+    #[test]
+    fn event_kind_is_flattened_at_top_level() {
+        let e = Event::new(
+            "claude-code",
+            None,
+            None,
+            EventKind::ToolUse {
+                tool: "Write".into(),
+                phase: "pre".into(),
+                input: serde_json::json!({}),
+                files: vec![],
+                fqdns: vec![],
+            },
+        );
+        let v = serde_json::to_value(&e).unwrap();
+        assert_eq!(v["type"], "tool_use");
+        assert_eq!(v["tool"], "Write");
+        assert!(
+            v.get("kind").is_none(),
+            "kind must be flattened, not nested"
+        );
+        assert!(v.get("id").is_some());
+    }
 }
