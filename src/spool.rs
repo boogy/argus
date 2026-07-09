@@ -25,10 +25,21 @@ pub fn drain() -> Result<Vec<Envelope>> {
             .map_err(anyhow::Error::from)
             .and_then(|s| serde_json::from_str::<Envelope>(&s).map_err(Into::into))
         {
-            Ok(env) => out.push(env),
-            Err(e) => tracing::warn!("dropping bad spool file {path:?}: {e}"),
+            Ok(env) => {
+                // Try to delete FIRST, only push if successful
+                match std::fs::remove_file(&path) {
+                    Ok(()) => out.push(env),
+                    Err(e) => tracing::warn!("failed to delete spool file {path:?}: {e}"),
+                }
+            }
+            Err(e) => {
+                tracing::warn!("dropping bad spool file {path:?}: {e}");
+                // Try to delete, log if it fails
+                if let Err(del_err) = std::fs::remove_file(&path) {
+                    tracing::warn!("failed to delete corrupt spool file {path:?}: {del_err}");
+                }
+            }
         }
-        let _ = std::fs::remove_file(&path);
     }
     Ok(out)
 }
@@ -57,5 +68,19 @@ mod tests {
         let drained = drain().unwrap();
         assert_eq!(drained.len(), 2);
         assert!(drain().unwrap().is_empty());
+    }
+
+    #[test]
+    fn unparseable_spool_file_is_deleted_and_skipped() {
+        let _dir = setup();
+        let dir = crate::paths::spool_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("garbage.jsonl"), "not json").unwrap();
+        let drained = drain().unwrap();
+        assert!(drained.is_empty());
+        assert!(
+            !dir.join("garbage.jsonl").exists(),
+            "corrupt file must be deleted"
+        );
     }
 }
