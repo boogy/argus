@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 mod event;
+mod ipc;
 mod paths;
 
 use clap::{Parser, Subcommand};
