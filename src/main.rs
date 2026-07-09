@@ -3,6 +3,7 @@
 mod event;
 mod ipc;
 mod paths;
+mod spool;
 
 use clap::{Parser, Subcommand};
 
