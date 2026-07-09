@@ -1,0 +1,4 @@
+# Tests mutate process-global env vars (LLM_MONITOR_DATA_DIR, LLM_MONITOR_SOCKET)
+# to isolate per-test state; parallel test threads would race on them.
+[env]
+RUST_TEST_THREADS = "1"
