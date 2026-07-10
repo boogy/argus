@@ -247,6 +247,37 @@ mod tests {
     }
 
     #[test]
+    fn post_tool_use_skill_does_not_double_emit() {
+        let events = adapters::parse(
+            env(json!({
+                "hook_event_name": "PostToolUse", "tool_name": "Skill",
+                "tool_input": {"skill": "commit"}
+            })),
+            &CaptureCfg::default(),
+        );
+        assert_eq!(
+            events.len(),
+            1,
+            "PostToolUse must emit only ToolUse, no Skill event"
+        );
+    }
+
+    #[test]
+    fn notebook_edit_extracts_notebook_path() {
+        let events = adapters::parse(
+            env(json!({
+                "hook_event_name": "PreToolUse", "tool_name": "NotebookEdit",
+                "tool_input": {"notebook_path": "/repo/nb.ipynb"}
+            })),
+            &CaptureCfg::default(),
+        );
+        let EventKind::ToolUse { files, .. } = &events[0].kind else {
+            panic!()
+        };
+        assert_eq!(files, &vec!["/repo/nb.ipynb".to_string()]);
+    }
+
+    #[test]
     fn session_and_unknown_events() {
         let events = adapters::parse(
             env(json!({
