@@ -150,16 +150,23 @@ mod tests {
         let addr = server.server_addr().to_string();
         let (tx, rx) = std::sync::mpsc::channel::<String>();
         std::thread::spawn(move || {
+            let mut count = 0;
             for mut req in server.incoming_requests() {
                 let mut body = String::new();
                 let _ = req.as_reader().read_to_string(&mut body);
                 let url = req.url().to_string();
-                let status = if tx.send(url.clone()).is_ok() && url == "/v1/logs" {
-                    200
+                let status = if url == "/v1/logs" {
+                    count += 1;
+                    if count == 1 {
+                        200
+                    } else {
+                        500
+                    }
                 } else {
                     500
                 };
                 let _ = req.respond(tiny_http::Response::empty(status));
+                let _ = tx.send(url);
             }
         });
         let cfg = crate::config::ExportCfg {
@@ -177,5 +184,11 @@ mod tests {
         );
         exporter.export(std::slice::from_ref(&e)).await.unwrap();
         assert_eq!(rx.recv().unwrap(), "/v1/logs");
+
+        let err = exporter.export(std::slice::from_ref(&e)).await;
+        assert!(
+            err.is_err(),
+            "non-2xx must surface as Err for at-least-once redelivery"
+        );
     }
 }
