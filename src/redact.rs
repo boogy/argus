@@ -13,11 +13,19 @@ const BUILTIN: &[(&str, &str)] = &[
     ("bearer-token", r"(?i)bearer\s+[A-Za-z0-9\-_\.=]{16,}"),
     ("github-token", r"gh[pousr]_[A-Za-z0-9]{20,}"),
     ("aws-access-key", r"\b(AKIA|ASIA)[0-9A-Z]{16}\b"),
+    (
+        "private-key-block",
+        r"(?s)-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----",
+    ),
     ("private-key", r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
     ("slack-token", r"xox[baprs]-[A-Za-z0-9\-]{10,}"),
     (
         "generic-assignment",
         r#"(?i)(api[_-]?key|secret|password|token)["']?\s*[:=]\s*["'][^"']{8,}["']"#,
+    ),
+    (
+        "generic-assignment-unquoted",
+        r#"(?i)\b(api[_-]?key|secret|password|passwd|token)\b\s*[:=]\s*[^\s"']{8,}"#,
     ),
 ];
 
@@ -27,9 +35,9 @@ impl Redactor {
             .iter()
             .filter_map(|(name, p)| Regex::new(p).ok().map(|r| (name.to_string(), r)))
             .collect();
-        for p in &cfg.extra_patterns {
+        for (i, p) in cfg.extra_patterns.iter().enumerate() {
             match Regex::new(p) {
-                Ok(r) => rules.push(("custom".into(), r)),
+                Ok(r) => rules.push((format!("custom-{i}"), r)),
                 Err(e) => tracing::warn!("skipping invalid redaction pattern {p:?}: {e}"),
             }
         }
@@ -143,5 +151,44 @@ mod tests {
             Redactor::new(&cfg).scrub_str("sk-ant-api03-AbCd1234567890abcdef1234"),
             "sk-ant-api03-AbCd1234567890abcdef1234"
         );
+    }
+
+    #[test]
+    fn pem_block_body_does_not_leak() {
+        let input =
+            "-----BEGIN RSA PRIVATE KEY-----\nMIIEoSECRETBODYDATA\n-----END RSA PRIVATE KEY-----\n";
+        let out = r().scrub_str(input);
+        assert!(!out.contains("SECRETBODYDATA"), "PEM body leaked: {out}");
+        assert!(out.contains("[REDACTED:private-key-block]"));
+    }
+
+    #[test]
+    fn truncated_pem_header_still_redacted() {
+        let out = r().scrub_str("-----BEGIN EC PRIVATE KEY-----\nMIIEoPARTIAL");
+        assert!(!out.contains("BEGIN EC PRIVATE KEY"));
+    }
+
+    #[test]
+    fn unquoted_assignment_is_redacted() {
+        let out = r().scrub_str("export PASSWORD=hunter2secret and API_KEY=abcd1234efgh");
+        assert!(
+            !out.contains("hunter2secret"),
+            "unquoted password leaked: {out}"
+        );
+        assert!(
+            !out.contains("abcd1234efgh"),
+            "unquoted api key leaked: {out}"
+        );
+    }
+
+    #[test]
+    fn custom_rules_get_indexed_names() {
+        let cfg = crate::config::RedactionCfg {
+            enabled: true,
+            extra_patterns: vec!["AAA[0-9]{4}".into(), "BBB[0-9]{4}".into()],
+        };
+        let red = Redactor::new(&cfg);
+        assert!(red.scrub_str("x AAA1234 y").contains("[REDACTED:custom-0]"));
+        assert!(red.scrub_str("x BBB1234 y").contains("[REDACTED:custom-1]"));
     }
 }
