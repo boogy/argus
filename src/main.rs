@@ -5,6 +5,7 @@ mod event;
 mod hook;
 mod ipc;
 mod paths;
+mod redact;
 mod spool;
 
 use clap::{Parser, Subcommand};
