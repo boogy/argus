@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 mod event;
+mod hook;
 mod ipc;
 mod paths;
 mod spool;
@@ -37,9 +38,7 @@ enum Cmd {
 fn main() {
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Hook { source } => {
-            let _ = source;
-        }
+        Cmd::Hook { source } => hook::run(&source),
         Cmd::Daemon => {}
         Cmd::Install { dry_run } => {
             let _ = dry_run;
