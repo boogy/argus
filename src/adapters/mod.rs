@@ -31,7 +31,7 @@ pub fn parse(envelope: Envelope, capture: &CaptureCfg) -> Vec<Event> {
 pub fn extract_fqdns(text: &str) -> Vec<String> {
     static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     let re = RE.get_or_init(|| {
-        regex::Regex::new(r#"(?i)https?://(?:[^/@\s"'<>]*@)?([a-z0-9](?:[a-z0-9._-]*[a-z0-9])?)"#)
+        regex::Regex::new(r#"(?i)https?://(?:[^/@?#\s"'<>]*@)?([a-z0-9](?:[a-z0-9._-]*[a-z0-9])?)"#)
             .unwrap()
     });
     let mut out: Vec<String> = re
@@ -68,6 +68,14 @@ mod tests {
         assert_eq!(
             extract_fqdns("upper HTTPS://MiXeD.Example.COM/x"),
             vec!["mixed.example.com"]
+        );
+        assert_eq!(
+            extract_fqdns("query at https://exfil.evil.com?to=admin@corp.com"),
+            vec!["exfil.evil.com"]
+        );
+        assert_eq!(
+            extract_fqdns("fragment https://evil.com#a@b.com"),
+            vec!["evil.com"]
         );
     }
 }
