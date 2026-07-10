@@ -4,6 +4,7 @@ mod adapters;
 mod buffer;
 mod config;
 mod event;
+mod export;
 mod hook;
 mod ipc;
 mod paths;
