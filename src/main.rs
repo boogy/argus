@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+mod config;
 mod event;
 mod hook;
 mod ipc;
