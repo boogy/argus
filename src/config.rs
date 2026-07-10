@@ -27,13 +27,23 @@ impl Default for RemoteCfg {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct ExportCfg {
     pub otlp_endpoint: Option<String>,
     pub headers: BTreeMap<String, String>,
     pub batch_size: usize,
     pub flush_interval_secs: u64,
+}
+impl Default for ExportCfg {
+    fn default() -> Self {
+        Self {
+            otlp_endpoint: None,
+            headers: BTreeMap::new(),
+            batch_size: 256,
+            flush_interval_secs: 10,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -93,28 +103,40 @@ impl Default for CodexCfg {
 }
 
 /// defaults <- local file <- cached remote (remote is fleet policy, wins).
+///
+/// Each layer is validated to deserialize as a `Config` overlay on its own,
+/// and again after merging, before being kept. A syntactically-valid but
+/// type-mismatched layer (e.g. `poll_interval_secs = "sixty"`) is skipped
+/// with a warning instead of poisoning the whole merged config back to
+/// `Config::default()`.
 pub fn load() -> Config {
     let mut merged = toml::Table::new();
     for path in [
         crate::paths::config_path(),
         crate::paths::cached_remote_config_path(),
     ] {
-        if let Ok(text) = std::fs::read_to_string(&path) {
-            match text.parse::<toml::Table>() {
-                Ok(table) => deep_merge(&mut merged, table),
-                Err(e) => tracing::warn!("ignoring invalid config {path:?}: {e}"),
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let table = match text.parse::<toml::Table>() {
+            Ok(table) => table,
+            Err(e) => {
+                tracing::warn!("ignoring invalid config {path:?}: {e}");
+                continue;
             }
+        };
+        if let Err(e) = table.clone().try_into::<Config>() {
+            tracing::warn!("ignoring type-mismatched config {path:?}: {e}");
+            continue;
+        }
+        let mut candidate = merged.clone();
+        deep_merge(&mut candidate, table);
+        match candidate.clone().try_into::<Config>() {
+            Ok(_) => merged = candidate,
+            Err(e) => tracing::warn!("ignoring config {path:?}: merge invalidates config: {e}"),
         }
     }
-    // Fix batch/flush defaults that Default::default() can't express as non-zero.
-    let mut cfg: Config = toml::Table::try_into(merged).unwrap_or_default();
-    if cfg.export.batch_size == 0 {
-        cfg.export.batch_size = 256;
-    }
-    if cfg.export.flush_interval_secs == 0 {
-        cfg.export.flush_interval_secs = 10;
-    }
-    cfg
+    merged.try_into::<Config>().unwrap_or_default()
 }
 
 fn deep_merge(base: &mut toml::Table, over: toml::Table) {
@@ -167,15 +189,26 @@ pub async fn poll_loop(shared: std::sync::Arc<std::sync::RwLock<Config>>) {
         if let Some(url) = url {
             match fetch_remote(&url, etag.as_deref()).await {
                 Ok(Some((body, new_etag))) => {
-                    etag = new_etag;
-                    let cache = crate::paths::cached_remote_config_path();
-                    let tmp = cache.with_extension("tmp");
-                    if std::fs::write(&tmp, &body)
-                        .and_then(|_| std::fs::rename(&tmp, &cache))
-                        .is_ok()
+                    // Gate the cache write on Config-shape validity, not just TOML
+                    // syntax: a type-mismatched remote body must not overwrite the
+                    // last-known-good cache.
+                    match body
+                        .parse::<toml::Table>()
+                        .and_then(|t| t.try_into::<Config>())
                     {
-                        *shared.write().unwrap() = load();
-                        tracing::info!("remote config applied");
+                        Ok(_) => {
+                            etag = new_etag;
+                            let cache = crate::paths::cached_remote_config_path();
+                            let tmp = cache.with_extension("tmp");
+                            if std::fs::write(&tmp, &body)
+                                .and_then(|_| std::fs::rename(&tmp, &cache))
+                                .is_ok()
+                            {
+                                *shared.write().unwrap() = load();
+                                tracing::info!("remote config applied");
+                            }
+                        }
+                        Err(e) => tracing::warn!("rejecting invalid remote config: {e}"),
                     }
                 }
                 Ok(None) => {}
@@ -223,6 +256,41 @@ mod tests {
             Some("http://local:4318"),
             "local keys absent from remote survive"
         );
+    }
+
+    #[test]
+    fn type_mismatched_remote_layer_is_skipped_not_poisoning() {
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("LLM_MONITOR_DATA_DIR", dir.path());
+        std::fs::create_dir_all(dir.path()).unwrap();
+        std::fs::write(
+            crate::paths::config_path(),
+            "[export]\notlp_endpoint = \"http://local:4318\"\n",
+        )
+        .unwrap();
+        // syntactically valid TOML, wrong type for poll_interval_secs
+        std::fs::write(
+            crate::paths::cached_remote_config_path(),
+            "[remote]\npoll_interval_secs = \"sixty\"\n",
+        )
+        .unwrap();
+        let cfg = load();
+        assert_eq!(
+            cfg.export.otlp_endpoint.as_deref(),
+            Some("http://local:4318"),
+            "local layer must survive a bad remote layer"
+        );
+        assert_eq!(
+            cfg.remote.poll_interval_secs, 300,
+            "bad remote field falls back to default"
+        );
+    }
+
+    #[test]
+    fn export_cfg_default_has_nonzero_batch_and_flush() {
+        let cfg = Config::default();
+        assert_eq!(cfg.export.batch_size, 256);
+        assert_eq!(cfg.export.flush_interval_secs, 10);
     }
 
     #[tokio::test]
