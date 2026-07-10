@@ -25,7 +25,7 @@ const BUILTIN: &[(&str, &str)] = &[
     ),
     (
         "generic-assignment-unquoted",
-        r#"(?i)\b(api[_-]?key|secret|password|passwd|token)\b\s*[:=]\s*[^\s"']{8,}"#,
+        r#"(?i)(?:\b|_)(api[_-]?key|secret|password|passwd|token)\b\s*[:=]\s*[^\s"']{8,}"#,
     ),
 ];
 
@@ -190,5 +190,15 @@ mod tests {
         let red = Redactor::new(&cfg);
         assert!(red.scrub_str("x AAA1234 y").contains("[REDACTED:custom-0]"));
         assert!(red.scrub_str("x BBB1234 y").contains("[REDACTED:custom-1]"));
+    }
+
+    #[test]
+    fn underscore_prefixed_env_var_assignments_are_redacted() {
+        let out = r().scrub_str(
+            "ANTHROPIC_API_KEY=abcd1234efgh DB_PASSWORD=hunter2secret GITHUB_TOKEN=ghx12345678",
+        );
+        assert!(!out.contains("abcd1234efgh"), "leaked: {out}");
+        assert!(!out.contains("hunter2secret"), "leaked: {out}");
+        assert!(!out.contains("ghx12345678"), "leaked: {out}");
     }
 }
