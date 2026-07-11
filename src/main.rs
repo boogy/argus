@@ -14,6 +14,10 @@ enum Cmd {
     Hook {
         #[arg(long)]
         source: String,
+        /// Event-name hint for tools whose payloads carry no event name
+        /// (Copilot camelCase payloads).
+        #[arg(long)]
+        event: Option<String>,
         /// Codex notify passes the event JSON as a positional arg; other
         /// tools pipe it via stdin.
         payload: Option<String>,
@@ -36,7 +40,11 @@ fn main() -> Result<()> {
     match cli.cmd {
         // Must never propagate errors: a failure here must not break the
         // host tool's hook invocation.
-        Cmd::Hook { source, payload } => llm_monitor::hook::run(&source, payload.as_deref()),
+        Cmd::Hook {
+            source,
+            event,
+            payload,
+        } => llm_monitor::hook::run(&source, event.as_deref(), payload.as_deref()),
         Cmd::Daemon => {
             tokio::runtime::Runtime::new()?.block_on(llm_monitor::daemon::run())?;
         }

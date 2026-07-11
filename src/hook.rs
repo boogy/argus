@@ -1,16 +1,28 @@
 use crate::event::Envelope;
 
-/// Entry point for `llm-monitor hook --source X`. Must never fail the host tool.
+/// Hard cap on hook stdin: a runaway host payload (multi-hundred-MB tool
+/// result) must not balloon shim memory/latency. 8 MiB keeps worst-case
+/// read+parse well under the IPC deadline budget.
+pub const MAX_STDIN_BYTES: usize = 8 * 1024 * 1024;
+
+pub fn read_capped(r: &mut impl std::io::Read) -> String {
+    use std::io::Read;
+    let mut input = String::new();
+    let _ = r.take(MAX_STDIN_BYTES as u64).read_to_string(&mut input);
+    input
+}
+
+/// Entry point for `llm-monitor hook --source X [--event NAME]`. Must never
+/// fail the host tool.
 ///
 /// Most tools (Claude Code, opencode) pipe the event JSON via stdin. Codex's
 /// `notify` instead invokes the program with the event JSON as a positional
-/// argv argument; `arg_payload` carries that when present.
-pub fn run(source: &str, arg_payload: Option<&str>) {
-    let mut input = String::new();
-    use std::io::Read;
-    let _ = std::io::stdin().read_to_string(&mut input);
+/// argv argument; `arg_payload` carries that when present. `event` is the
+/// event-name hint for tools whose payloads carry no event-name field.
+pub fn run(source: &str, event: Option<&str>, arg_payload: Option<&str>) {
+    let input = read_capped(&mut std::io::stdin().lock());
     let payload = choose_payload(&input, arg_payload);
-    deliver(source, &payload);
+    deliver(source, event, &payload);
 }
 
 /// Pure selection logic: stdin wins when non-empty (the common case); an
@@ -29,13 +41,13 @@ fn choose_payload(stdin: &str, arg: Option<&str>) -> String {
 
 /// Testable core: wrap raw hook text and hand it off. Malformed JSON is
 /// preserved as a string payload so nothing is ever lost.
-pub fn deliver(source: &str, raw: &str) {
+pub fn deliver(source: &str, event: Option<&str>, raw: &str) {
     let payload =
         serde_json::from_str(raw).unwrap_or_else(|_| serde_json::Value::String(raw.to_string()));
     let envelope = Envelope {
         source: source.to_string(),
         received_at: chrono::Utc::now(),
-        event: None,
+        event: event.map(String::from),
         payload,
     };
     if send_with_deadline(&envelope, std::time::Duration::from_millis(250)) {
@@ -87,6 +99,7 @@ mod tests {
         let started = std::time::Instant::now();
         deliver(
             "claude-code",
+            None,
             r#"{"hook_event_name":"UserPromptSubmit","prompt":"hi"}"#,
         );
         assert!(
@@ -135,11 +148,30 @@ mod tests {
     }
 
     #[test]
+    fn event_hint_lands_in_envelope() {
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("LLM_MONITOR_DATA_DIR", dir.path());
+        std::env::set_var("LLM_MONITOR_SOCKET", dir.path().join("nope.sock"));
+        std::env::set_var("LLM_MONITOR_NO_AUTOSPAWN", "1");
+        deliver("copilot", Some("preToolUse"), r#"{"toolName":"bash"}"#);
+        let drained = crate::spool::drain().unwrap();
+        assert_eq!(drained[0].event.as_deref(), Some("preToolUse"));
+    }
+
+    #[test]
+    fn oversized_stdin_is_truncated_not_unbounded() {
+        // read_capped is pure over any Read; 8MiB cap.
+        let big = vec![b'a'; 9 * 1024 * 1024];
+        let s = read_capped(&mut std::io::Cursor::new(big));
+        assert_eq!(s.len(), MAX_STDIN_BYTES);
+    }
+
+    #[test]
     fn malformed_stdin_is_swallowed_not_panicked() {
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("LLM_MONITOR_DATA_DIR", dir.path());
         std::env::set_var("LLM_MONITOR_NO_AUTOSPAWN", "1");
-        deliver("claude-code", "not json at all"); // must not panic
+        deliver("claude-code", None, "not json at all"); // must not panic
     }
 
     #[test]

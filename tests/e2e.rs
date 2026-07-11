@@ -39,6 +39,7 @@ async fn hook_event_flows_to_mock_collector() {
     // Simulate a Claude Code hook firing, including a secret to test redaction.
     llm_monitor::hook::deliver(
         "claude-code",
+        None,
         r#"{"hook_event_name":"PreToolUse","session_id":"e2e","tool_name":"Bash",
             "tool_input":{"command":"curl -H 'Authorization: Bearer ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789' https://api.internal.example.com/v1"}}"#,
     );
