@@ -51,4 +51,25 @@ async fn hook_event_flows_to_mock_collector() {
         !body.contains("ghp_AbCdEf"),
         "secret redacted before export"
     );
+
+    // Copilot flow through the same daemon (merged into this test because
+    // both flows set process-global env vars and would race as separate
+    // #[tokio::test] functions).
+    llm_monitor::hook::deliver(
+        "copilot",
+        Some("postToolUse"),
+        r#"{"sessionId":"cp-e2e","cwd":"/repo","toolName":"bash",
+            "toolArgs":{"command":"curl https://api.copilot-test.example.com/v1"},
+            "toolResult":{"resultType":"success","textResultForLlm":"ok"}}"#,
+    );
+
+    let body = rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+    assert!(
+        body.contains("api.copilot-test.example.com"),
+        "copilot fqdn extracted"
+    );
+    assert!(
+        body.contains("\"tool_use\"") || body.contains("tool.name"),
+        "copilot tool event exported"
+    );
 }

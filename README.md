@@ -6,7 +6,7 @@ they touch, which skills/subagents run — captured through each tool's native
 hook/plugin surface (no TLS proxying, no MITM) and exported as OTLP/JSON logs to
 any observability backend (Splunk, Datadog, Grafana, an OTel Collector, ...).
 
-Supports **Claude Code**, **opencode**, and **OpenAI Codex**.
+Supports **Claude Code**, **opencode**, **OpenAI Codex**, and **GitHub Copilot CLI**.
 
 ## Quick start
 
@@ -46,19 +46,42 @@ cleanly remove all wiring.
 Each tool exposes a different amount of detail through its hook/plugin API;
 llm-monitor captures everything each surface offers.
 
-| Signal              | Claude Code | opencode | Codex |
-|----------------------|:-----------:|:--------:|:-----:|
-| Prompts              | Y | Y | Y |
-| Tool use (pre/post)  | Y | Y | Y (tool decision/result) |
-| File paths touched   | Y | Y | — (not exposed by the tool surface) |
-| FQDNs contacted      | Y | Y | Y (from tool args/command text) |
-| Skill invocations    | Y | — | — |
-| Subagent/Task runs   | Y | — | — |
-| Session lifecycle    | Y (Start/End/Stop/SubagentStop/Compact/Notification) | Y (created/idle) | Y (conversation start, turn-complete) |
+| Signal                      |        Claude Code         |       opencode        |          Codex          |    Copilot CLI    |
+| --------------------------- | :------------------------: | :-------------------: | :---------------------: | :---------------: |
+| Prompts                     |             Y              |           Y           |            Y            |         Y         |
+| Assistant messages          |          Y (Stop)          |           Y           |      Y (Stop hook)      |         —         |
+| Tool use (pre/post)         |             Y              |           Y           |            Y            |         Y         |
+| Tool outputs                |             Y              |           Y           |            Y            |         Y         |
+| Tool failures               |             Y              |           —           | Y (post incl. non-zero) |         Y         |
+| File paths touched          |             Y              |           Y           |     Y (apply_patch)     |         Y         |
+| FQDNs contacted             |             Y              |           Y           |            Y            |         Y         |
+| Skill/command invocations   |             Y              | Y (command.executed)  |            —            |         —         |
+| Subagent runs               |       Y (start+stop)       |           —           |            Y            |         Y         |
+| Permission requests         |     Y (request+denied)     |   Y (asked+replied)   |            Y            |         Y         |
+| Compaction                  | Y (pre+post, token counts) | Y (session.compacted) |            Y            |      Y (pre)      |
+| Errors                      |      Y (StopFailure)       |   Y (session.error)   |            —            | Y (errorOccurred) |
+| Config/instructions changes |             Y              |           —           |            —            |         —         |
+| Session lifecycle           |             Y              |           Y           |            Y            |         Y         |
 
-Codex is thinner by design: it speaks OTLP logs (`[otel]` in `config.toml`) plus
-a single `notify` hook for turn completion — it does not expose file-write or
-skill/subagent hooks the way Claude Code does.
+Codex is wired three ways at once: its hooks system (`~/.codex/hooks.json`,
+Claude-compatible payloads — note new hooks need one-time trust via `/hooks`
+inside Codex), the `notify` hook for turn completion on older versions, and
+OTLP logs (`[otel]` in `config.toml`) for token/model telemetry.
+
+### Claude Code hooks deliberately not wired
+
+- `MessageDisplay` — fires on every rendered assistant-message chunk
+  (hot-path cost); the final text is already captured via
+  `Stop.last_assistant_message`.
+- `UserPromptExpansion` — expansion input is already captured at
+  `UserPromptSubmit`.
+- `FileChanged` — requires literal filename matchers, not wildcardable.
+- `WorktreeCreate`/`WorktreeRemove` — `WorktreeCreate` interprets hook stdout
+  as a replacement worktree path and a non-zero exit fails creation; too
+  risky for observe-only wiring.
+- `Setup`, `TeammateIdle`, `Elicitation`/`ElicitationResult` — control-flow
+  hooks that expect decision output; `Elicitation` form content is
+  user-sensitive.
 
 ## Config reference
 
@@ -77,6 +100,9 @@ unset keys keep their default.
 | `export.flush_interval_secs` | `10` | Export loop interval; backs off exponentially (capped ~30x) on repeated failures. |
 | `capture.prompts` | `true` | Capture prompt text. `false` → events still emitted, text replaced with `[not captured]` (metadata-only mode). |
 | `capture.tool_inputs` | `true` | Capture tool-call input JSON. `false` → tool events still emitted (name, files, FQDNs) without the input payload. |
+| `capture.tool_outputs` | `true` | Capture tool result/output JSON on post-tool events. `false` → output field left null. |
+| `capture.assistant_messages` | `true` | Capture assistant message text (Claude Code/Codex `Stop`, opencode `chat.message`). `false` → assistant-message events suppressed. |
+| `capture.max_field_bytes` | `65536` | Per-field size cap (serialized bytes) for prompt text, assistant text, tool input/output. Oversized text gets `…[truncated]`; oversized JSON is replaced with `{"_truncated":true,"_bytes":n}`. `0` = unlimited. |
 | `redaction.enabled` | `true` | Run the built-in secret scrubber before anything is buffered or exported. |
 | `redaction.extra_patterns` | `[]` | Additional regexes scrubbed the same way as built-ins (invalid patterns are skipped with a warning, not fatal). |
 | `buffer.max_events` | `100000` | SQLite buffer cap; oldest events are dropped once full (offline-first, not unbounded). |
@@ -148,9 +174,9 @@ extra_patterns = ["ACME-[0-9]{6}"]
   → batched OTLP/JSON export with exponential backoff. It also drains the
   spool directory and polls remote config.
 - **Install** (`llm-monitor install`) detects installed tools by home-dir
-  presence (`~/.claude`, `~/.config/opencode`, `~/.codex`) and idempotently
-  wires each one — see the per-tool fidelity table above. `--dry-run` prints
-  planned changes without writing.
+  presence (`~/.claude`, `~/.config/opencode`, `~/.codex`, `~/.copilot`) and
+  idempotently wires each one — see the per-tool fidelity table above.
+  `--dry-run` prints planned changes without writing.
 
 ## Troubleshooting
 
@@ -170,8 +196,10 @@ extra_patterns = ["ACME-[0-9]{6}"]
   rather than blocking the drain loop.
 - **Hook not firing**: confirm `llm-monitor install` actually wrote entries —
   check `~/.claude/settings.json` (`hooks.*`), `~/.config/opencode/plugin/llm-monitor.ts`,
-  or `~/.codex/config.toml` (`notify`, `[otel]`). Re-run `llm-monitor install`
-  (idempotent) if entries are missing.
+  `~/.codex/config.toml` (`notify`, `[otel]`), `~/.codex/hooks.json`, or
+  `~/.copilot/hooks/llm-monitor.json`. Re-run `llm-monitor install`
+  (idempotent) if entries are missing. Codex hooks additionally need one-time
+  trust: run `/hooks` inside Codex and trust the llm-monitor entries.
 - **Codex config not touched**: install never overwrites an existing `notify`
   or `[otel]` block — it warns on stderr and leaves it alone so it can't
   silently break another integration. Remove the conflicting block manually
@@ -184,3 +212,5 @@ extra_patterns = ["ACME-[0-9]{6}"]
 - Remote config is trusted over HTTPS; no detached-signature verification yet.
 - Bash tool parsing only extracts FQDNs, not file writes via `>`/`tee`.
 - No Claude Code transcript-path mining for token/model usage stats.
+- Claude Code `MessageDisplay` and `FileChanged` are deliberately not wired —
+  see the wired-hooks notes in [Per-tool fidelity](#per-tool-fidelity).
