@@ -10,8 +10,32 @@ pub struct Buffer {
 
 impl Buffer {
     pub fn open(max_events: u64) -> Result<Self> {
-        std::fs::create_dir_all(crate::paths::data_dir())?;
+        // A cap of 0 would make the trim-to-cap DELETE below (OFFSET 0) wipe
+        // every row on each push; clamp to a minimum of 1 to keep at least
+        // the most recent event.
+        let max_events = max_events.max(1);
+        let data_dir = crate::paths::data_dir();
+        std::fs::create_dir_all(&data_dir)?;
+        #[cfg(unix)]
+        {
+            let _ = std::fs::set_permissions(
+                &data_dir,
+                std::os::unix::fs::PermissionsExt::from_mode(0o700),
+            );
+        }
         let conn = Connection::open(crate::paths::db_path())?;
+        // Best-effort: on-disk events may hold pre-redaction data, so keep
+        // the DB file readable only by its owner. A perm error here must not
+        // break daemon startup.
+        #[cfg(unix)]
+        {
+            let _ = std::fs::set_permissions(
+                crate::paths::db_path(),
+                std::os::unix::fs::PermissionsExt::from_mode(0o600),
+            );
+        }
+        // Non-Unix platforms (e.g. Windows) don't use POSIX permission bits;
+        // ACL-based hardening is out of scope here.
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.execute_batch(
@@ -121,6 +145,20 @@ mod tests {
         let batch = b.peek_batch(10).unwrap();
         let first = serde_json::to_string(&batch[0].1).unwrap();
         assert!(first.contains("p2"), "oldest two dropped, got {first}");
+    }
+
+    #[test]
+    fn max_events_zero_is_clamped_not_wiped() {
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("LLM_MONITOR_DATA_DIR", dir.path());
+        let b = Buffer::open(0).unwrap();
+        for i in 0..3 {
+            b.push(&ev(i)).unwrap();
+        }
+        assert!(
+            b.len().unwrap() >= 1,
+            "max_events=0 must not delete every row on push"
+        );
     }
 
     #[test]

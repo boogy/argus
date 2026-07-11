@@ -137,10 +137,14 @@ fn install_codex(home: &std::path::Path, dry_run: bool) -> Result<()> {
         eprintln!("codex: existing notify preserved; codex turn events not wired");
     }
     if !doc.contains_key("otel") {
+        // Source the endpoint from config so Codex's notify target and the
+        // daemon's actual OTLP listen address can't drift apart.
+        let listen = crate::config::load().codex.otlp_listen;
+        let endpoint = format!("http://{listen}");
         let mut otel = toml_edit::Table::new();
         otel["environment"] = toml_edit::value("prod");
         let mut otlp_http = toml_edit::InlineTable::new();
-        otlp_http.insert("endpoint", "http://127.0.0.1:4327".into());
+        otlp_http.insert("endpoint", endpoint.into());
         otlp_http.insert("protocol", "json".into());
         let mut exporter = toml_edit::InlineTable::new();
         exporter.insert("otlp-http", toml_edit::Value::InlineTable(otlp_http));
@@ -200,8 +204,13 @@ fn uninstall_codex(home: &std::path::Path) -> Result<()> {
     let Ok(mut doc) = text.parse::<toml_edit::DocumentMut>() else {
         return Ok(());
     };
+    // Load the current configured endpoint, using the same format install_codex uses
+    let listen = crate::config::load().codex.otlp_listen;
+    let endpoint = format!("http://{listen}");
+    let default_endpoint = "http://127.0.0.1:4327";
     let ours = |v: &toml_edit::Item| {
-        v.to_string().contains("llm-monitor") || v.to_string().contains("127.0.0.1:4327")
+        let s = v.to_string();
+        s.contains("llm-monitor") || s.contains(&endpoint) || s.contains(default_endpoint)
     };
     if doc.get("notify").is_some_and(ours) {
         doc.remove("notify");
@@ -220,6 +229,10 @@ mod tests {
     fn fake_home() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("LLM_MONITOR_HOME", dir.path());
+        // install_codex now reads config::load(), which in turn reads
+        // LLM_MONITOR_DATA_DIR; isolate it so tests never pick up a real
+        // on-disk config.
+        std::env::set_var("LLM_MONITOR_DATA_DIR", dir.path().join("data"));
         std::fs::create_dir_all(dir.path().join(".claude")).unwrap();
         std::fs::create_dir_all(dir.path().join(".config/opencode")).unwrap();
         std::fs::create_dir_all(dir.path().join(".codex")).unwrap();
@@ -318,5 +331,27 @@ mod tests {
         assert!(text.contains("model = \"o3\""));
         assert!(text.contains("otel"));
         assert!(text.contains("127.0.0.1:4327"));
+    }
+
+    #[test]
+    fn uninstall_removes_codex_otel_for_custom_endpoint() {
+        let home = fake_home();
+        let data = home.path().join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::write(
+            data.join("config.toml"),
+            "[codex]\notlp_listen = \"127.0.0.1:9999\"\n",
+        )
+        .unwrap();
+        run(false).unwrap();
+        let cfg_path = home.path().join(".codex/config.toml");
+        let installed = std::fs::read_to_string(&cfg_path).unwrap();
+        assert!(installed.contains("9999"), "install wrote custom endpoint");
+        uninstall().unwrap();
+        let after = std::fs::read_to_string(&cfg_path).unwrap();
+        assert!(
+            !after.contains("otel"),
+            "uninstall removed custom-endpoint otel block"
+        );
     }
 }

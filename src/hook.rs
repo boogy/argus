@@ -1,11 +1,30 @@
 use crate::event::Envelope;
 
 /// Entry point for `llm-monitor hook --source X`. Must never fail the host tool.
-pub fn run(source: &str) {
+///
+/// Most tools (Claude Code, opencode) pipe the event JSON via stdin. Codex's
+/// `notify` instead invokes the program with the event JSON as a positional
+/// argv argument; `arg_payload` carries that when present.
+pub fn run(source: &str, arg_payload: Option<&str>) {
     let mut input = String::new();
     use std::io::Read;
     let _ = std::io::stdin().read_to_string(&mut input);
-    deliver(source, &input);
+    let payload = choose_payload(&input, arg_payload);
+    deliver(source, &payload);
+}
+
+/// Pure selection logic: stdin wins when non-empty (the common case); an
+/// empty/whitespace-only stdin falls back to the positional argv payload
+/// (Codex's notify invocation, which passes no stdin).
+fn choose_payload(stdin: &str, arg: Option<&str>) -> String {
+    if stdin.trim().is_empty() {
+        if let Some(arg) = arg {
+            if !arg.trim().is_empty() {
+                return arg.to_string();
+            }
+        }
+    }
+    stdin.to_string()
 }
 
 /// Testable core: wrap raw hook text and hand it off. Malformed JSON is
@@ -119,5 +138,19 @@ mod tests {
         std::env::set_var("LLM_MONITOR_DATA_DIR", dir.path());
         std::env::set_var("LLM_MONITOR_NO_AUTOSPAWN", "1");
         deliver("claude-code", "not json at all"); // must not panic
+    }
+
+    #[test]
+    fn choose_payload_falls_back_to_arg_only_when_stdin_empty() {
+        let event = r#"{"type":"agent-turn-complete"}"#;
+        assert_eq!(choose_payload("", Some(event)), event);
+        assert_eq!(choose_payload("   \n", Some(event)), event);
+        assert_eq!(
+            choose_payload(r#"{"stdin":"payload"}"#, Some(event)),
+            r#"{"stdin":"payload"}"#,
+            "non-empty stdin must win over argv payload"
+        );
+        assert_eq!(choose_payload("", None), "");
+        assert_eq!(choose_payload("", Some("")), "");
     }
 }

@@ -14,6 +14,9 @@ enum Cmd {
     Hook {
         #[arg(long)]
         source: String,
+        /// Codex notify passes the event JSON as a positional arg; other
+        /// tools pipe it via stdin.
+        payload: Option<String>,
     },
     /// Background daemon: parse, redact, buffer, export.
     Daemon,
@@ -33,7 +36,7 @@ fn main() -> Result<()> {
     match cli.cmd {
         // Must never propagate errors: a failure here must not break the
         // host tool's hook invocation.
-        Cmd::Hook { source } => llm_monitor::hook::run(&source),
+        Cmd::Hook { source, payload } => llm_monitor::hook::run(&source, payload.as_deref()),
         Cmd::Daemon => {
             tokio::runtime::Runtime::new()?.block_on(llm_monitor::daemon::run())?;
         }
