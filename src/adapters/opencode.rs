@@ -129,4 +129,76 @@ mod tests {
         };
         assert_eq!(fqdns, &vec!["registry.npmjs.org".to_string()]);
     }
+
+    #[test]
+    fn non_user_message_is_ignored() {
+        let events = adapters::parse(
+            env(json!({
+                "event": "chat.message", "sessionID": "oc1",
+                "message": {"role": "assistant"}, "parts": [{"type": "text", "text": "hi"}]
+            })),
+            &CaptureCfg::default(),
+        );
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn capture_flags_suppress_content() {
+        let cfg = CaptureCfg {
+            prompts: false,
+            tool_inputs: false,
+        };
+        let events = adapters::parse(
+            env(json!({
+                "event": "chat.message", "message": {"role": "user"},
+                "parts": [{"type": "text", "text": "secret"}]
+            })),
+            &cfg,
+        );
+        let EventKind::Prompt { text } = &events[0].kind else {
+            panic!()
+        };
+        assert_eq!(text, "[not captured]");
+
+        let events = adapters::parse(
+            env(json!({
+                "event": "tool.execute.before", "tool": "write",
+                "args": {"filePath": "/a.ts", "content": "secret"}
+            })),
+            &cfg,
+        );
+        let EventKind::ToolUse { input, files, .. } = &events[0].kind else {
+            panic!()
+        };
+        assert!(input.is_null());
+        assert_eq!(files.len(), 1, "metadata still extracted");
+    }
+
+    #[test]
+    fn session_and_unknown_events_map() {
+        let events = adapters::parse(
+            env(json!({"event": "session.created", "sessionID": "s"})),
+            &CaptureCfg::default(),
+        );
+        assert!(
+            matches!(&events[0].kind, EventKind::Session { action } if action == "session.created")
+        );
+        let events = adapters::parse(
+            env(json!({"event": "mystery.event"})),
+            &CaptureCfg::default(),
+        );
+        assert!(matches!(&events[0].kind, EventKind::Raw { .. }));
+    }
+
+    #[test]
+    fn tool_execute_after_maps_to_post_phase() {
+        let events = adapters::parse(
+            env(json!({"event": "tool.execute.after", "tool": "bash"})),
+            &CaptureCfg::default(),
+        );
+        let EventKind::ToolUse { phase, .. } = &events[0].kind else {
+            panic!()
+        };
+        assert_eq!(phase, "post");
+    }
 }

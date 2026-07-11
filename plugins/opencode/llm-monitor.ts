@@ -11,6 +11,7 @@ function send(payload: Record<string, unknown>): void {
       detached: true,
     });
     child.on("error", () => {});
+    child.stdin.on("error", () => {});
     child.stdin.write(JSON.stringify(payload));
     child.stdin.end();
     child.unref();
