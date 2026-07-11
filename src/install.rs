@@ -122,29 +122,30 @@ fn install_opencode(home: &std::path::Path, dry_run: bool) -> Result<()> {
 
 fn install_codex(home: &std::path::Path, dry_run: bool) -> Result<()> {
     let path = home.join(".codex/config.toml");
-    let mut table = std::fs::read_to_string(&path)
+    let mut doc = std::fs::read_to_string(&path)
         .ok()
-        .and_then(|s| s.parse::<toml::Table>().ok())
+        .and_then(|s| s.parse::<toml_edit::DocumentMut>().ok())
         .unwrap_or_default();
-    if !table.contains_key("notify") {
-        table.insert(
-            "notify".into(),
-            toml::Value::Array(vec![
-                self_exe().into(),
-                "hook".into(),
-                "--source".into(),
-                "codex".into(),
-            ]),
-        );
+    if !doc.contains_key("notify") {
+        let mut arr = toml_edit::Array::new();
+        arr.push(self_exe());
+        arr.push("hook");
+        arr.push("--source");
+        arr.push("codex");
+        doc["notify"] = toml_edit::value(arr);
     } else {
         eprintln!("codex: existing notify preserved; codex turn events not wired");
     }
-    if !table.contains_key("otel") {
-        let otel: toml::Table = toml::toml! {
-            environment = "prod"
-            exporter = { otlp-http = { endpoint = "http://127.0.0.1:4327", protocol = "json" } }
-        };
-        table.insert("otel".into(), toml::Value::Table(otel));
+    if !doc.contains_key("otel") {
+        let mut otel = toml_edit::Table::new();
+        otel["environment"] = toml_edit::value("prod");
+        let mut otlp_http = toml_edit::InlineTable::new();
+        otlp_http.insert("endpoint", "http://127.0.0.1:4327".into());
+        otlp_http.insert("protocol", "json".into());
+        let mut exporter = toml_edit::InlineTable::new();
+        exporter.insert("otlp-http", toml_edit::Value::InlineTable(otlp_http));
+        otel["exporter"] = toml_edit::value(toml_edit::Value::InlineTable(exporter));
+        doc["otel"] = toml_edit::Item::Table(otel);
     } else {
         eprintln!("codex: existing [otel] preserved; not overwriting");
     }
@@ -155,7 +156,7 @@ fn install_codex(home: &std::path::Path, dry_run: bool) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(&path, toml::to_string_pretty(&table)?)?;
+    std::fs::write(&path, doc.to_string())?;
     println!("wired Codex otel+notify in {}", path.display());
     Ok(())
 }
@@ -196,19 +197,19 @@ fn uninstall_codex(home: &std::path::Path) -> Result<()> {
     let Ok(text) = std::fs::read_to_string(&path) else {
         return Ok(());
     };
-    let Ok(mut table) = text.parse::<toml::Table>() else {
+    let Ok(mut doc) = text.parse::<toml_edit::DocumentMut>() else {
         return Ok(());
     };
-    let ours = |v: &toml::Value| {
+    let ours = |v: &toml_edit::Item| {
         v.to_string().contains("llm-monitor") || v.to_string().contains("127.0.0.1:4327")
     };
-    if table.get("notify").is_some_and(ours) {
-        table.remove("notify");
+    if doc.get("notify").is_some_and(ours) {
+        doc.remove("notify");
     }
-    if table.get("otel").is_some_and(ours) {
-        table.remove("otel");
+    if doc.get("otel").is_some_and(ours) {
+        doc.remove("otel");
     }
-    std::fs::write(&path, toml::to_string_pretty(&table)?)?;
+    std::fs::write(&path, doc.to_string())?;
     Ok(())
 }
 
@@ -286,5 +287,36 @@ mod tests {
             .path()
             .join(".config/opencode/plugin/llm-monitor.ts")
             .exists());
+    }
+
+    #[test]
+    fn install_preserves_claude_settings_key_order() {
+        let home = fake_home();
+        std::fs::write(
+            home.path().join(".claude/settings.json"),
+            r#"{"z_first": 1, "hooks": {}, "a_last": 2}"#,
+        )
+        .unwrap();
+        run(false).unwrap();
+        let text = std::fs::read_to_string(home.path().join(".claude/settings.json")).unwrap();
+        let z_pos = text.find("z_first").unwrap();
+        let a_pos = text.find("a_last").unwrap();
+        assert!(z_pos < a_pos, "expected z_first before a_last, got: {text}");
+    }
+
+    #[test]
+    fn install_preserves_codex_comments_and_formatting() {
+        let home = fake_home();
+        std::fs::write(
+            home.path().join(".codex/config.toml"),
+            "# my custom codex config\nmodel = \"o3\"\n",
+        )
+        .unwrap();
+        run(false).unwrap();
+        let text = std::fs::read_to_string(home.path().join(".codex/config.toml")).unwrap();
+        assert!(text.contains("# my custom codex config"));
+        assert!(text.contains("model = \"o3\""));
+        assert!(text.contains("otel"));
+        assert!(text.contains("127.0.0.1:4327"));
     }
 }
