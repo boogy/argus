@@ -72,6 +72,9 @@ pub fn run(dry_run: bool) -> Result<()> {
         install_codex(&home, dry_run)?;
         install_codex_hooks(&home, dry_run)?;
     }
+    if copilot_dir(&home).exists() {
+        install_copilot(&home, dry_run)?;
+    }
     Ok(())
 }
 
@@ -268,6 +271,56 @@ fn install_codex(home: &std::path::Path, dry_run: bool) -> Result<()> {
     Ok(())
 }
 
+/// Copilot CLI hook events (verified against the Copilot hooks reference:
+/// camelCase events, `bash`/`powershell` command entries, `timeoutSec`;
+/// `permissionRequest` with empty stdout + exit 0 falls through to the
+/// normal permission flow, so observe-only wiring is safe).
+const COPILOT_EVENTS: &[&str] = &[
+    "sessionStart",
+    "sessionEnd",
+    "userPromptSubmitted",
+    "preToolUse",
+    "postToolUse",
+    "postToolUseFailure",
+    "errorOccurred",
+    "agentStop",
+    "subagentStart",
+    "subagentStop",
+    "preCompact",
+    "notification",
+    "permissionRequest",
+];
+
+fn copilot_dir(home: &std::path::Path) -> std::path::PathBuf {
+    std::env::var("COPILOT_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| home.join(".copilot"))
+}
+
+/// The hooks file is wholly ours (own filename), so install overwrites it
+/// unconditionally — same policy as the opencode plugin shim.
+fn install_copilot(home: &std::path::Path, dry_run: bool) -> Result<()> {
+    let path = copilot_dir(home).join("hooks/llm-monitor.json");
+    let exe = self_exe();
+    let mut hooks = serde_json::Map::new();
+    for event in COPILOT_EVENTS {
+        let cmd = format!("{exe} hook --source copilot --event {event}");
+        hooks.insert(
+            (*event).into(),
+            json!([{ "type": "command", "bash": cmd, "powershell": cmd, "timeoutSec": 10 }]),
+        );
+    }
+    let doc = json!({ "version": 1, "hooks": hooks });
+    if dry_run {
+        println!("[dry-run] would write {}", path.display());
+        return Ok(());
+    }
+    std::fs::create_dir_all(path.parent().unwrap())?;
+    std::fs::write(&path, serde_json::to_string_pretty(&doc)?)?;
+    println!("wired Copilot CLI hooks in {}", path.display());
+    Ok(())
+}
+
 /// Reverse `run`: remove exactly what `install` added, leaving unrelated
 /// user config (including a pre-existing Codex `[otel]`/`notify` that
 /// `install` refused to touch) untouched.
@@ -277,6 +330,7 @@ pub fn uninstall() -> Result<()> {
     let _ = std::fs::remove_file(home.join(".config/opencode/plugin/llm-monitor.ts"));
     uninstall_codex(&home)?;
     uninstall_codex_hooks(&home)?;
+    let _ = std::fs::remove_file(copilot_dir(&home).join("hooks/llm-monitor.json"));
     println!("llm-monitor unwired from all tools");
     Ok(())
 }
@@ -490,6 +544,52 @@ mod tests {
             .path()
             .join(".config/opencode/plugin/llm-monitor.ts")
             .exists());
+    }
+
+    #[test]
+    fn install_writes_copilot_hooks_file_and_uninstall_removes_it() {
+        let home = fake_home();
+        std::fs::create_dir_all(home.path().join(".copilot")).unwrap();
+        run(false).unwrap();
+        let path = home.path().join(".copilot/hooks/llm-monitor.json");
+        let doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(doc["version"], 1);
+        for event in [
+            "sessionStart",
+            "sessionEnd",
+            "userPromptSubmitted",
+            "preToolUse",
+            "postToolUse",
+            "postToolUseFailure",
+            "errorOccurred",
+            "agentStop",
+            "subagentStart",
+            "subagentStop",
+            "preCompact",
+            "notification",
+            "permissionRequest",
+        ] {
+            let entry = &doc["hooks"][event][0];
+            assert_eq!(entry["type"], "command", "event {event}");
+            let bash = entry["bash"].as_str().unwrap();
+            assert!(bash.contains("--source copilot"), "event {event}");
+            assert!(bash.contains(&format!("--event {event}")), "event {event}");
+            assert!(
+                entry["powershell"].as_str().unwrap().contains("--event"),
+                "event {event}"
+            );
+            assert_eq!(entry["timeoutSec"], 10);
+        }
+        uninstall().unwrap();
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn copilot_skipped_when_not_installed() {
+        let home = fake_home(); // fake_home creates .claude/.config/.codex only
+        run(false).unwrap();
+        assert!(!home.path().join(".copilot/hooks/llm-monitor.json").exists());
     }
 
     #[test]
