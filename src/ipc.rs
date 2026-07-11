@@ -51,6 +51,14 @@ pub fn send(envelope: &Envelope) -> Result<()> {
     Ok(())
 }
 
+/// Best-effort connectivity probe used by `llm-monitor status`: true if a
+/// daemon is currently listening on the configured socket. Opens and
+/// immediately drops the connection; sends nothing.
+pub fn is_daemon_running() -> bool {
+    let Ok(n) = name() else { return false };
+    Stream::connect(n).is_ok()
+}
+
 pub struct Listener {
     inner: interprocess::local_socket::tokio::Listener,
 }

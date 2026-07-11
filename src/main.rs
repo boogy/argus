@@ -1,16 +1,4 @@
-#![allow(dead_code)]
-
-mod adapters;
-mod buffer;
-mod config;
-mod event;
-mod export;
-mod hook;
-mod ipc;
-mod paths;
-mod redact;
-mod spool;
-
+use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -40,15 +28,49 @@ enum Cmd {
     Status,
 }
 
-fn main() {
+fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Hook { source } => hook::run(&source),
-        Cmd::Daemon => {}
-        Cmd::Install { dry_run } => {
-            let _ = dry_run;
+        // Must never propagate errors: a failure here must not break the
+        // host tool's hook invocation.
+        Cmd::Hook { source } => llm_monitor::hook::run(&source),
+        Cmd::Daemon => {
+            tokio::runtime::Runtime::new()?.block_on(llm_monitor::daemon::run())?;
         }
-        Cmd::Uninstall => {}
-        Cmd::Status => {}
+        Cmd::Install { dry_run } => llm_monitor::install::run(dry_run)?,
+        Cmd::Uninstall => llm_monitor::install::uninstall()?,
+        Cmd::Status => print_status()?,
     }
+    Ok(())
+}
+
+fn print_status() -> Result<()> {
+    let data_dir = llm_monitor::paths::data_dir();
+    println!("data dir: {}", data_dir.display());
+
+    let cfg = llm_monitor::config::load();
+    println!(
+        "config: otlp_endpoint={} batch_size={} flush_interval_secs={} redaction_enabled={}",
+        cfg.export.otlp_endpoint.as_deref().unwrap_or("(none)"),
+        cfg.export.batch_size,
+        cfg.export.flush_interval_secs,
+        cfg.redaction.enabled,
+    );
+
+    match llm_monitor::buffer::Buffer::open(cfg.buffer.max_events).and_then(|b| b.len()) {
+        Ok(n) => println!("buffered events: {n}"),
+        Err(e) => println!("buffered events: unavailable ({e})"),
+    }
+
+    let running = llm_monitor::ipc::is_daemon_running();
+    println!(
+        "daemon socket: {}",
+        if running {
+            "connected"
+        } else {
+            "not reachable"
+        }
+    );
+
+    Ok(())
 }

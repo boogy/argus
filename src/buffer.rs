@@ -72,6 +72,10 @@ impl Buffer {
         let count: i64 = conn.query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))?;
         Ok(count as u64)
     }
+
+    pub fn is_empty(&self) -> Result<bool> {
+        Ok(self.len()? == 0)
+    }
 }
 
 #[cfg(test)]
