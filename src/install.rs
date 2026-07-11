@@ -11,15 +11,32 @@ use serde_json::{json, Value};
 
 const OPENCODE_SHIM: &str = include_str!("../plugins/opencode/llm-monitor.ts");
 
-/// (event name, whether it takes a `"matcher": "*"` field).
+/// (event name, whether the entry carries a `"matcher": "*"` field).
+/// Matchers are set only for tool-name-matched events; matcher-less entries
+/// run for every matcher value anyway. Deliberately not wired (see README):
+/// MessageDisplay, UserPromptExpansion, FileChanged, Worktree*, Setup,
+/// TeammateIdle, Elicitation*.
 const CC_HOOKS: &[(&str, bool)] = &[
     ("UserPromptSubmit", false),
     ("PreToolUse", true),
     ("PostToolUse", true),
+    ("PostToolUseFailure", true),
+    ("PermissionRequest", true),
+    ("PermissionDenied", true),
+    ("Notification", false),
     ("SessionStart", false),
     ("SessionEnd", false),
     ("Stop", false),
+    ("SubagentStart", false),
     ("SubagentStop", false),
+    ("PreCompact", false),
+    ("PostCompact", false),
+    ("StopFailure", false),
+    ("ConfigChange", false),
+    ("CwdChanged", false),
+    ("InstructionsLoaded", false),
+    ("TaskCreated", false),
+    ("TaskCompleted", false),
 ];
 
 /// Home directory root. Overridable via `LLM_MONITOR_HOME` so tests never
@@ -88,7 +105,7 @@ fn install_claude_code(home: &std::path::Path, dry_run: bool) -> Result<()> {
         if arr.iter().any(|h| h.to_string().contains("llm-monitor")) {
             continue;
         }
-        let mut entry = json!({ "hooks": [{ "type": "command", "command": cmd }] });
+        let mut entry = json!({ "hooks": [{ "type": "command", "command": cmd, "timeout": 10 }] });
         if *has_matcher {
             entry["matcher"] = json!("*");
         }
@@ -269,6 +286,47 @@ mod tests {
         assert!(codex.contains("otel"));
         assert!(codex.contains("127.0.0.1:4327"));
         assert!(codex.contains("notify"));
+    }
+
+    #[test]
+    fn install_wires_full_claude_hook_set() {
+        let home = fake_home();
+        run(false).unwrap();
+        let settings: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(home.path().join(".claude/settings.json")).unwrap(),
+        )
+        .unwrap();
+        for event in [
+            "UserPromptSubmit",
+            "PreToolUse",
+            "PostToolUse",
+            "PostToolUseFailure",
+            "PermissionRequest",
+            "PermissionDenied",
+            "Notification",
+            "SessionStart",
+            "SessionEnd",
+            "Stop",
+            "SubagentStart",
+            "SubagentStop",
+            "PreCompact",
+            "PostCompact",
+            "StopFailure",
+            "ConfigChange",
+            "CwdChanged",
+            "InstructionsLoaded",
+            "TaskCreated",
+            "TaskCompleted",
+        ] {
+            assert!(
+                settings["hooks"][event].to_string().contains("llm-monitor"),
+                "missing hook wiring for {event}"
+            );
+        }
+        // hooks must be bounded so a wedged shim can't stall Claude Code
+        assert!(settings["hooks"]["PreToolUse"]
+            .to_string()
+            .contains("\"timeout\":10"));
     }
 
     #[test]
