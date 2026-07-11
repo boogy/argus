@@ -15,7 +15,7 @@ pub fn parse(payload: &Value, _capture: &CaptureCfg) -> Vec<Event> {
     )]
 }
 
-/// Codex OTLP receiver stub. Task 13 replaces this with a real listener that
-/// accepts OTLP-formatted events from the Codex CLI's `notify` hook and
-/// forwards parsed envelopes into `tx`.
+/// Codex OTLP receiver stub: no-op until Task 13 wires the real OTLP
+/// listener that accepts OTLP-formatted events from the Codex CLI's
+/// `notify` hook and forwards parsed envelopes into `tx`.
 pub async fn otlp_listener(_cfg: Arc<RwLock<Config>>, _tx: Sender<Envelope>) {}

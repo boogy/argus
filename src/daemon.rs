@@ -60,34 +60,51 @@ pub async fn run() -> Result<()> {
     let max_events = read_cfg(&shared_cfg).buffer.max_events;
     let buffer = Arc::new(Buffer::open(max_events)?);
 
-    tokio::spawn(export_loop(buffer.clone(), shared_cfg.clone()));
+    let export_handle = tokio::spawn(export_loop(buffer.clone(), shared_cfg.clone()));
 
     // Pipeline: parse -> redact -> buffer. Redactor rebuilt when redaction
     // config changes (cheap fingerprint check, avoids rebuilding regexes on
     // every event).
     let mut redactor = Redactor::new(&read_cfg(&shared_cfg).redaction);
     let mut redactor_gen = config_fingerprint(&shared_cfg);
+
+    // Shared by both select arms so a drained-on-shutdown envelope goes
+    // through the exact same parse -> redact -> buffer pipeline as one
+    // received during normal operation.
+    let mut process = |envelope: Envelope| {
+        let current = config_fingerprint(&shared_cfg);
+        if current != redactor_gen {
+            redactor = Redactor::new(&read_cfg(&shared_cfg).redaction);
+            redactor_gen = current;
+        }
+        let capture = read_cfg(&shared_cfg).capture.clone();
+        for event in adapters::parse(envelope, &capture) {
+            let event = redactor.scrub_event(event);
+            if let Err(e) = buffer.push(&event) {
+                tracing::error!("buffer push failed: {e}");
+            }
+        }
+    };
+
     loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
-                tracing::info!("shutdown signal received, flushing final batch");
+                tracing::info!("shutdown signal received, draining queued envelopes and flushing final batch");
+                // Drain whatever is already queued in the channel so it
+                // isn't silently dropped on shutdown.
+                while let Ok(envelope) = rx.try_recv() {
+                    process(envelope);
+                }
+                // Stop the export loop before the final flush so the two
+                // can't race and double-export the same batch (harmless
+                // under at-least-once, but noisy).
+                export_handle.abort();
                 final_flush(&buffer, &shared_cfg).await;
                 break;
             }
             maybe_envelope = rx.recv() => {
                 let Some(envelope) = maybe_envelope else { break };
-                let current = config_fingerprint(&shared_cfg);
-                if current != redactor_gen {
-                    redactor = Redactor::new(&read_cfg(&shared_cfg).redaction);
-                    redactor_gen = current;
-                }
-                let capture = read_cfg(&shared_cfg).capture.clone();
-                for event in adapters::parse(envelope, &capture) {
-                    let event = redactor.scrub_event(event);
-                    if let Err(e) = buffer.push(&event) {
-                        tracing::error!("buffer push failed: {e}");
-                    }
-                }
+                process(envelope);
             }
         }
     }

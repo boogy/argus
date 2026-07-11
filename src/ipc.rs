@@ -1,6 +1,6 @@
 use crate::event::Envelope;
 use crate::paths;
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use interprocess::local_socket::{
     tokio::{prelude::*, Stream as AsyncStream},
     traits::Stream as _,
@@ -65,7 +65,19 @@ pub struct Listener {
 
 impl Listener {
     pub fn bind() -> Result<Self> {
-        // Remove a stale socket file left by a crashed daemon (Unix only).
+        // Liveness probe: if a daemon is already listening on this socket,
+        // connecting succeeds. Bail out rather than stealing the socket out
+        // from under a live daemon (which would keep running orphaned). The
+        // probe connection is dropped immediately; the accept side already
+        // tolerates a zero-byte connection (`lines.next_line()` returns
+        // `Ok(None)` on EOF and the handler just exits).
+        if let Ok(n) = name() {
+            if Stream::connect(n).is_ok() {
+                return Err(anyhow!("daemon already running"));
+            }
+        }
+        // No live daemon: remove a stale socket file left by a crashed
+        // daemon (Unix only) before binding.
         #[cfg(unix)]
         let _ = std::fs::remove_file(paths::socket_name());
         let inner = ListenerOptions::new().name(name()?).create_tokio()?;
@@ -167,6 +179,22 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(got.source, "claude-code");
+        std::env::remove_var("LLM_MONITOR_SOCKET");
+    }
+
+    #[tokio::test]
+    async fn second_bind_fails_while_daemon_alive() {
+        let sock = std::env::temp_dir().join(format!("lm-ipc-guard-{}.sock", std::process::id()));
+        std::env::set_var("LLM_MONITOR_SOCKET", &sock);
+        let listener = Listener::bind().unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        tokio::spawn(listener.accept_loop(tx));
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let second = tokio::task::spawn_blocking(Listener::bind).await.unwrap();
+        assert!(
+            second.is_err(),
+            "second bind must fail while first daemon is alive"
+        );
         std::env::remove_var("LLM_MONITOR_SOCKET");
     }
 }
