@@ -107,7 +107,15 @@ pub async fn serve(listener: TcpListener, tx: Sender<Envelope>) {
     }
 }
 
-async fn handle_conn(mut stream: tokio::net::TcpStream, tx: Sender<Envelope>) {
+async fn handle_conn(stream: tokio::net::TcpStream, tx: Sender<Envelope>) {
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        handle_conn_inner(stream, tx),
+    )
+    .await;
+}
+
+async fn handle_conn_inner(mut stream: tokio::net::TcpStream, tx: Sender<Envelope>) {
     let mut buf = Vec::with_capacity(8192);
     let mut tmp = [0u8; 4096];
     // Read until end of headers, then content-length worth of body.
@@ -120,22 +128,29 @@ async fn handle_conn(mut stream: tokio::net::TcpStream, tx: Sender<Envelope>) {
         }
         buf.extend_from_slice(&tmp[..n]);
         if let Some(pos) = find_headers_end(&buf) {
-            let head = String::from_utf8_lossy(&buf[..pos]);
-            let len = head
+            let len = String::from_utf8_lossy(&buf[..pos])
                 .lines()
                 .find(|l| l.to_ascii_lowercase().starts_with("content-length:"))
                 .and_then(|l| l.split(':').nth(1)?.trim().parse::<usize>().ok())
                 .unwrap_or(0);
+            // Reject oversized/bogus Content-Length before any arithmetic
+            // with it: an attacker-controlled huge value (e.g. usize::MAX)
+            // would otherwise overflow `headers_end + content_length` or
+            // panic slicing `buf`.
+            if len > MAX_BODY_BYTES {
+                return;
+            }
             break (pos, len);
         }
         if buf.len() > MAX_BODY_BYTES {
             return;
         }
     };
-    if headers_end + content_length > MAX_BODY_BYTES {
-        return;
-    }
-    while buf.len() < headers_end + content_length {
+    // content_length <= MAX_BODY_BYTES and headers_end <= MAX_BODY_BYTES
+    // (enforced by the header-growth cap above), so this addition cannot
+    // overflow usize.
+    let body_end = headers_end + content_length;
+    while buf.len() < body_end {
         let Ok(n) = stream.read(&mut tmp).await else {
             return;
         };
@@ -144,15 +159,13 @@ async fn handle_conn(mut stream: tokio::net::TcpStream, tx: Sender<Envelope>) {
         }
         buf.extend_from_slice(&tmp[..n]);
     }
-    if buf.len() < headers_end + content_length {
+    if buf.len() < body_end {
         return;
     }
     let head = String::from_utf8_lossy(&buf[..headers_end]);
-    let ok = head.starts_with("POST /v1/logs");
+    let ok = head.starts_with("POST /v1/logs ") || head.starts_with("POST /v1/logs?");
     if ok {
-        if let Ok(v) =
-            serde_json::from_slice::<Value>(&buf[headers_end..headers_end + content_length])
-        {
+        if let Ok(v) = serde_json::from_slice::<Value>(&buf[headers_end..body_end]) {
             for record in flatten_otlp_records(&v) {
                 let _ = tx
                     .send(Envelope {
@@ -264,6 +277,80 @@ mod tests {
         };
         assert_eq!(tool, "shell");
         assert_eq!(fqdns, &vec!["pypi.org".to_string()]);
+    }
+
+    #[test]
+    fn codex_tool_result_maps_to_post_phase() {
+        let events = adapters::parse(
+            env(json!({
+                "event_name": "codex.tool_result",
+                "attributes": {"tool_name": "shell", "command": "echo hi"}
+            })),
+            &CaptureCfg::default(),
+        );
+        let EventKind::ToolUse { phase, .. } = &events[0].kind else {
+            panic!()
+        };
+        assert_eq!(phase, "post");
+    }
+
+    #[test]
+    fn agent_turn_complete_maps_to_session_turn_complete() {
+        let events = adapters::parse(
+            env(json!({"type": "agent-turn-complete"})),
+            &CaptureCfg::default(),
+        );
+        assert!(
+            matches!(&events[0].kind, EventKind::Session { action } if action == "turn-complete")
+        );
+    }
+
+    #[tokio::test]
+    async fn oversized_content_length_does_not_panic_and_listener_survives() {
+        let cfg = std::sync::Arc::new(std::sync::RwLock::new(crate::config::Config::default()));
+        cfg.write().unwrap().codex.otlp_listen = "127.0.0.1:0".into();
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        let bound = super::bind_listener(cfg.clone()).await.unwrap();
+        let addr = bound.local_addr().unwrap();
+        tokio::spawn(super::serve(bound, tx));
+        // hostile request: absurd Content-Length, no body
+        {
+            use tokio::io::AsyncWriteExt;
+            let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+            s.write_all(b"POST /v1/logs HTTP/1.1\r\nContent-Length: 18446744073709551615\r\n\r\n")
+                .await
+                .unwrap();
+            let _ = s.shutdown().await;
+        }
+        // listener must still answer a subsequent well-formed request
+        let body = serde_json::json!({"resourceLogs":[{"scopeLogs":[{"logRecords":[{"eventName":"codex.conversation_starts","attributes":[]}]}]}]});
+        let resp = reqwest::Client::new()
+            .post(format!("http://{addr}/v1/logs"))
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert!(
+            resp.status().is_success(),
+            "listener survived hostile request"
+        );
+    }
+
+    #[tokio::test]
+    async fn wrong_path_returns_404() {
+        let cfg = std::sync::Arc::new(std::sync::RwLock::new(crate::config::Config::default()));
+        cfg.write().unwrap().codex.otlp_listen = "127.0.0.1:0".into();
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        let bound = super::bind_listener(cfg.clone()).await.unwrap();
+        let addr = bound.local_addr().unwrap();
+        tokio::spawn(super::serve(bound, tx));
+        let resp = reqwest::Client::new()
+            .post(format!("http://{addr}/v1/logsXXX"))
+            .body("x")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 404);
     }
 
     #[tokio::test]
