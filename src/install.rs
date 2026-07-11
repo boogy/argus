@@ -70,6 +70,7 @@ pub fn run(dry_run: bool) -> Result<()> {
     }
     if home.join(".codex").exists() {
         install_codex(&home, dry_run)?;
+        install_codex_hooks(&home, dry_run)?;
     }
     Ok(())
 }
@@ -137,6 +138,91 @@ fn install_opencode(home: &std::path::Path, dry_run: bool) -> Result<()> {
     Ok(())
 }
 
+/// Codex hooks.json events we subscribe to (verified against the Codex hooks
+/// docs: Claude-compatible `hooks.{Event}[]` schema, JSON payload on stdin
+/// with `hook_event_name`; non-managed hooks need one-time trust via
+/// `/hooks` in the Codex CLI).
+const CODEX_HOOK_EVENTS: &[(&str, bool)] = &[
+    ("SessionStart", false),
+    ("UserPromptSubmit", false),
+    ("PreToolUse", true),
+    ("PostToolUse", true),
+    ("PermissionRequest", true),
+    ("SubagentStart", false),
+    ("SubagentStop", false),
+    ("Stop", false),
+    ("PreCompact", false),
+    ("PostCompact", false),
+];
+
+fn install_codex_hooks(home: &std::path::Path, dry_run: bool) -> Result<()> {
+    let path = home.join(".codex/hooks.json");
+    let mut doc: Value = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| json!({}));
+    if !doc.is_object() {
+        doc = json!({});
+    }
+    let hooks = doc
+        .as_object_mut()
+        .unwrap()
+        .entry("hooks")
+        .or_insert_with(|| json!({}));
+    if !hooks.is_object() {
+        *hooks = json!({});
+    }
+    let cmd = format!("{} hook --source codex", self_exe());
+    for (event, has_matcher) in CODEX_HOOK_EVENTS {
+        let arr = hooks
+            .as_object_mut()
+            .unwrap()
+            .entry(*event)
+            .or_insert_with(|| json!([]));
+        if !arr.is_array() {
+            *arr = json!([]);
+        }
+        let arr = arr.as_array_mut().unwrap();
+        if arr.iter().any(|h| h.to_string().contains("llm-monitor")) {
+            continue;
+        }
+        let mut entry = json!({ "hooks": [{ "type": "command", "command": cmd, "timeout": 10 }] });
+        if *has_matcher {
+            entry["matcher"] = json!("*");
+        }
+        arr.push(entry);
+    }
+    if dry_run {
+        println!("[dry-run] would update {}", path.display());
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&path, serde_json::to_string_pretty(&doc)?)?;
+    println!("wired Codex hooks in {}", path.display());
+    Ok(())
+}
+
+fn uninstall_codex_hooks(home: &std::path::Path) -> Result<()> {
+    let path = home.join(".codex/hooks.json");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Ok(());
+    };
+    let Ok(mut doc) = serde_json::from_str::<Value>(&text) else {
+        return Ok(());
+    };
+    if let Some(hooks) = doc.get_mut("hooks").and_then(Value::as_object_mut) {
+        for (_, v) in hooks.iter_mut() {
+            if let Some(arr) = v.as_array_mut() {
+                arr.retain(|h| !h.to_string().contains("llm-monitor"));
+            }
+        }
+    }
+    std::fs::write(&path, serde_json::to_string_pretty(&doc)?)?;
+    Ok(())
+}
+
 fn install_codex(home: &std::path::Path, dry_run: bool) -> Result<()> {
     let path = home.join(".codex/config.toml");
     let mut doc = std::fs::read_to_string(&path)
@@ -190,6 +276,7 @@ pub fn uninstall() -> Result<()> {
     uninstall_claude_code(&home)?;
     let _ = std::fs::remove_file(home.join(".config/opencode/plugin/llm-monitor.ts"));
     uninstall_codex(&home)?;
+    uninstall_codex_hooks(&home)?;
     println!("llm-monitor unwired from all tools");
     Ok(())
 }
@@ -345,6 +432,51 @@ mod tests {
             .exists());
         let codex = std::fs::read_to_string(home.path().join(".codex/config.toml")).unwrap();
         assert!(codex.contains("custom"), "existing otel config preserved");
+    }
+
+    #[test]
+    fn install_wires_codex_hooks_json_idempotently() {
+        let home = fake_home();
+        run(false).unwrap();
+        run(false).unwrap();
+        let text = std::fs::read_to_string(home.path().join(".codex/hooks.json")).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&text).unwrap();
+        for event in [
+            "SessionStart",
+            "UserPromptSubmit",
+            "PreToolUse",
+            "PostToolUse",
+            "PermissionRequest",
+            "SubagentStart",
+            "SubagentStop",
+            "Stop",
+            "PreCompact",
+            "PostCompact",
+        ] {
+            let arr = doc["hooks"][event].as_array().unwrap();
+            assert_eq!(
+                arr.iter()
+                    .filter(|h| h.to_string().contains("llm-monitor"))
+                    .count(),
+                1,
+                "event {event}"
+            );
+        }
+    }
+
+    #[test]
+    fn uninstall_removes_codex_hooks_entries_only() {
+        let home = fake_home();
+        std::fs::write(
+            home.path().join(".codex/hooks.json"),
+            r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"my-own-tool"}]}]}}"#,
+        )
+        .unwrap();
+        run(false).unwrap();
+        uninstall().unwrap();
+        let text = std::fs::read_to_string(home.path().join(".codex/hooks.json")).unwrap();
+        assert!(text.contains("my-own-tool"), "user hooks preserved");
+        assert!(!text.contains("llm-monitor"));
     }
 
     #[test]
