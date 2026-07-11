@@ -12,6 +12,11 @@ use tokio::sync::mpsc::Sender;
 /// delivered via `llm-monitor hook --source codex`).
 pub fn parse(env: &Envelope, capture: &CaptureCfg) -> Vec<Event> {
     let p = &env.payload;
+    // Codex's hooks system emits Claude-compatible payloads (hook_event_name,
+    // snake_case fields, plus turn_id) — reuse the shared parser.
+    if p.get("hook_event_name").is_some() {
+        return crate::adapters::claude_code::parse_hook("codex", p, capture);
+    }
     let attrs = p.get("attributes").cloned().unwrap_or(json!({}));
     let session_id = attrs
         .get("conversation.id")
@@ -52,7 +57,7 @@ pub fn parse(env: &Envelope, capture: &CaptureCfg) -> Vec<Event> {
             }
             .into();
             let input = if capture.tool_inputs {
-                attrs.clone()
+                crate::adapters::cap_value(attrs.clone(), capture.max_field_bytes)
             } else {
                 Value::Null
             };
@@ -254,6 +259,55 @@ mod tests {
             event: None,
             payload,
         }
+    }
+
+    #[test]
+    fn codex_hook_payloads_parse_like_claude_shape() {
+        let events = adapters::parse(
+            env(json!({
+                "hook_event_name": "UserPromptSubmit", "session_id": "cx-h1",
+                "turn_id": "t1", "cwd": "/repo", "model": "gpt-5-codex",
+                "prompt": "fix the tests"
+            })),
+            &CaptureCfg::default(),
+        );
+        assert_eq!(events[0].source, "codex");
+        assert!(matches!(&events[0].kind, EventKind::Prompt { text } if text == "fix the tests"));
+        assert_eq!(events[0].meta.turn_id.as_deref(), Some("t1"));
+        assert_eq!(events[0].meta.model.as_deref(), Some("gpt-5-codex"));
+    }
+
+    #[test]
+    fn codex_apply_patch_extracts_file_paths() {
+        let events = adapters::parse(
+            env(json!({
+                "hook_event_name": "PreToolUse", "tool_name": "apply_patch",
+                "tool_input": {"input": "*** Begin Patch\n*** Update File: src/lib.rs\n@@\n*** End Patch"}
+            })),
+            &CaptureCfg::default(),
+        );
+        let EventKind::ToolUse { files, .. } = &events[0].kind else {
+            panic!()
+        };
+        assert_eq!(files, &vec!["src/lib.rs".to_string()]);
+    }
+
+    #[test]
+    fn codex_otlp_and_notify_paths_still_work() {
+        // regression guard: shape (b) and (c) untouched
+        let events = adapters::parse(
+            env(json!({"event_name": "codex.user_prompt",
+                       "attributes": {"conversation.id": "cx1", "prompt": "hello"}})),
+            &CaptureCfg::default(),
+        );
+        assert!(matches!(&events[0].kind, EventKind::Prompt { .. }));
+        let events = adapters::parse(
+            env(json!({"type": "agent-turn-complete"})),
+            &CaptureCfg::default(),
+        );
+        assert!(
+            matches!(&events[0].kind, EventKind::Session { action, .. } if action == "turn-complete")
+        );
     }
 
     #[test]
