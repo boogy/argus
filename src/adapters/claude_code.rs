@@ -1,9 +1,10 @@
 use crate::adapters::extract_fqdns;
 use crate::config::CaptureCfg;
-use crate::event::{Event, EventKind};
+use crate::event::{Envelope, Event, EventKind};
 use serde_json::Value;
 
-pub fn parse(p: &Value, capture: &CaptureCfg) -> Vec<Event> {
+pub fn parse(env: &Envelope, capture: &CaptureCfg) -> Vec<Event> {
+    let p = &env.payload;
     let session_id = p
         .get("session_id")
         .and_then(Value::as_str)

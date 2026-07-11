@@ -4,20 +4,104 @@ pub mod opencode;
 
 use crate::config::CaptureCfg;
 use crate::event::{Envelope, Event, EventKind};
+use serde_json::Value;
+
+pub type ParseFn = fn(&Envelope, &CaptureCfg) -> Vec<Event>;
+
+/// Adding a new tool = one adapter module exposing
+/// `parse(&Envelope, &CaptureCfg) -> Vec<Event>` + one row here
+/// + an install function in `install.rs`. See docs/adding-a-tool.md.
+pub const ADAPTERS: &[(&str, ParseFn)] = &[
+    ("claude-code", claude_code::parse),
+    ("opencode", opencode::parse),
+    ("codex", codex::parse),
+];
 
 pub fn parse(envelope: Envelope, capture: &CaptureCfg) -> Vec<Event> {
-    match envelope.source.as_str() {
-        "claude-code" => claude_code::parse(&envelope.payload, capture),
-        "opencode" => opencode::parse(&envelope.payload, capture),
-        "codex" => codex::parse(&envelope.payload, capture),
-        other => vec![Event::new(
-            other,
-            None,
-            None,
-            EventKind::Raw {
-                payload: envelope.payload,
-            },
-        )],
+    for (source, f) in ADAPTERS {
+        if *source == envelope.source {
+            return f(&envelope, capture);
+        }
+    }
+    vec![Event::new(
+        &envelope.source,
+        None,
+        None,
+        EventKind::Raw {
+            payload: envelope.payload,
+        },
+    )]
+}
+
+const FILE_KEYS: &[&str] = &["file_path", "filePath", "notebook_path", "path"];
+const NET_KEYS: &[&str] = &["url", "command", "query"];
+
+/// File paths from a tool input: known path keys plus apply_patch-style
+/// patch headers embedded in any string value for patch-shaped tools.
+pub fn extract_files_for_tool(tool: &str, input: &Value) -> Vec<String> {
+    let mut out: Vec<String> = FILE_KEYS
+        .iter()
+        .filter_map(|k| input.get(k).and_then(Value::as_str))
+        .map(String::from)
+        .collect();
+    if tool.eq_ignore_ascii_case("apply_patch") || tool.eq_ignore_ascii_case("applypatch") {
+        for v in input.as_object().into_iter().flat_map(|o| o.values()) {
+            if let Some(s) = v.as_str() {
+                out.extend(extract_patch_files(s));
+            }
+        }
+        if let Some(s) = input.as_str() {
+            out.extend(extract_patch_files(s));
+        }
+    }
+    out.dedup();
+    out
+}
+
+pub fn extract_net_for_tool(_tool: &str, input: &Value) -> Vec<String> {
+    let mut out = vec![];
+    for key in NET_KEYS {
+        if let Some(s) = input.get(key).and_then(Value::as_str) {
+            out.extend(extract_fqdns(s));
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+pub fn extract_patch_files(patch: &str) -> Vec<String> {
+    patch
+        .lines()
+        .filter_map(|l| {
+            l.strip_prefix("*** Add File: ")
+                .or_else(|| l.strip_prefix("*** Update File: "))
+                .or_else(|| l.strip_prefix("*** Delete File: "))
+        })
+        .map(|s| s.trim().to_string())
+        .collect()
+}
+
+pub fn cap_text(s: &str, max: usize) -> String {
+    if max == 0 || s.len() <= max {
+        return s.to_string();
+    }
+    let mut end = max;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…[truncated]", &s[..end])
+}
+
+pub fn cap_value(v: Value, max: usize) -> Value {
+    if max == 0 {
+        return v;
+    }
+    let n = serde_json::to_string(&v).map(|s| s.len()).unwrap_or(0);
+    if n <= max {
+        v
+    } else {
+        serde_json::json!({"_truncated": true, "_bytes": n})
     }
 }
 
@@ -46,6 +130,60 @@ pub fn extract_fqdns(text: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn registry_dispatches_and_unknown_source_is_raw() {
+        let env = Envelope {
+            source: "some-future-tool".into(),
+            received_at: chrono::Utc::now(),
+            event: None,
+            payload: serde_json::json!({"x": 1}),
+        };
+        let events = parse(env, &CaptureCfg::default());
+        assert!(matches!(&events[0].kind, EventKind::Raw { .. }));
+        assert_eq!(events[0].source, "some-future-tool");
+        assert!(ADAPTERS.iter().any(|(s, _)| *s == "claude-code"));
+    }
+
+    #[test]
+    fn extract_patch_files_reads_apply_patch_headers() {
+        let patch = "*** Begin Patch\n*** Update File: src/a.rs\n@@\n*** Add File: docs/b.md\n*** Delete File: old.txt\n*** End Patch";
+        assert_eq!(
+            extract_patch_files(patch),
+            vec!["src/a.rs".to_string(), "docs/b.md".into(), "old.txt".into()]
+        );
+    }
+
+    #[test]
+    fn generic_file_and_net_extraction() {
+        let input = serde_json::json!({"filePath": "/r/x.ts", "url": "https://api.example.com/v1"});
+        assert_eq!(
+            extract_files_for_tool("someTool", &input),
+            vec!["/r/x.ts".to_string()]
+        );
+        assert_eq!(
+            extract_net_for_tool("someTool", &input),
+            vec!["api.example.com".to_string()]
+        );
+        let patch_input = serde_json::json!({"input": "*** Update File: lib/z.py\n@@"});
+        assert_eq!(
+            extract_files_for_tool("apply_patch", &patch_input),
+            vec!["lib/z.py".to_string()]
+        );
+    }
+
+    #[test]
+    fn cap_helpers_truncate() {
+        assert_eq!(cap_text("short", 100), "short");
+        let long = "x".repeat(200);
+        let capped = cap_text(&long, 50);
+        assert!(capped.len() < 200 && capped.ends_with("…[truncated]"));
+        assert_eq!(cap_text(&long, 0), long, "0 disables the cap");
+        let big = serde_json::json!({"blob": "y".repeat(200)});
+        let v = cap_value(big.clone(), 50);
+        assert_eq!(v["_truncated"], true);
+        assert_eq!(cap_value(big.clone(), 0), big);
+    }
 
     #[test]
     fn extract_fqdns_handles_credentials_punctuation_and_ports() {

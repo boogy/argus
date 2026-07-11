@@ -10,7 +10,8 @@ use tokio::sync::mpsc::Sender;
 /// Parses either a flattened OTLP logRecord (`{"event_name": ..., "attributes": {...}}`)
 /// or a raw Codex `notify` payload (top-level `{"type": "agent-turn-complete", ...}`,
 /// delivered via `llm-monitor hook --source codex`).
-pub fn parse(p: &Value, capture: &CaptureCfg) -> Vec<Event> {
+pub fn parse(env: &Envelope, capture: &CaptureCfg) -> Vec<Event> {
+    let p = &env.payload;
     let attrs = p.get("attributes").cloned().unwrap_or(json!({}));
     let session_id = attrs
         .get("conversation.id")
