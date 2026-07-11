@@ -1,5 +1,6 @@
 pub mod claude_code;
 pub mod codex;
+pub mod copilot;
 pub mod opencode;
 
 use crate::config::CaptureCfg;
@@ -15,6 +16,7 @@ pub const ADAPTERS: &[(&str, ParseFn)] = &[
     ("claude-code", claude_code::parse),
     ("opencode", opencode::parse),
     ("codex", codex::parse),
+    ("copilot", copilot::parse),
 ];
 
 pub fn parse(envelope: Envelope, capture: &CaptureCfg) -> Vec<Event> {
