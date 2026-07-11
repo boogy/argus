@@ -90,23 +90,23 @@ config** (remote is fleet policy and always wins, so a compromised or
 uncooperative developer machine can't locally weaken it). All keys are optional;
 unset keys keep their default.
 
-| Key | Default | Meaning |
-|---|---|---|
-| `remote.url` | *(unset)* | HTTPS URL polled for fleet-wide config. |
-| `remote.poll_interval_secs` | `300` | Poll interval (floor `30`). |
-| `export.otlp_endpoint` | *(unset)* | OTLP/JSON logs endpoint (`POST {endpoint}/v1/logs`). No endpoint = events stay buffered locally. |
-| `export.headers` | `{}` | Extra HTTP headers sent with each export (e.g. auth). |
-| `export.batch_size` | `256` | Max events per export batch. |
-| `export.flush_interval_secs` | `10` | Export loop interval; backs off exponentially (capped ~30x) on repeated failures. |
-| `capture.prompts` | `true` | Capture prompt text. `false` → events still emitted, text replaced with `[not captured]` (metadata-only mode). |
-| `capture.tool_inputs` | `true` | Capture tool-call input JSON. `false` → tool events still emitted (name, files, FQDNs) without the input payload. |
-| `capture.tool_outputs` | `true` | Capture tool result/output JSON on post-tool events. `false` → output field left null. |
-| `capture.assistant_messages` | `true` | Capture assistant message text (Claude Code/Codex `Stop`, opencode `chat.message`). `false` → assistant-message events suppressed. |
-| `capture.max_field_bytes` | `65536` | Per-field size cap (serialized bytes) for prompt text, assistant text, tool input/output. Oversized text gets `…[truncated]`; oversized JSON is replaced with `{"_truncated":true,"_bytes":n}`. `0` = unlimited. |
-| `redaction.enabled` | `true` | Run the built-in secret scrubber before anything is buffered or exported. |
-| `redaction.extra_patterns` | `[]` | Additional regexes scrubbed the same way as built-ins (invalid patterns are skipped with a warning, not fatal). |
-| `buffer.max_events` | `100000` | SQLite buffer cap; oldest events are dropped once full (offline-first, not unbounded). |
-| `codex.otlp_listen` | `"127.0.0.1:4327"` | Local address the daemon listens on for Codex's `[otel]` OTLP/JSON export. |
+| Key                          | Default            | Meaning                                                                                                                                                                                                          |
+| ---------------------------- | ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `remote.url`                 | _(unset)_          | HTTPS URL polled for fleet-wide config.                                                                                                                                                                          |
+| `remote.poll_interval_secs`  | `300`              | Poll interval (floor `30`).                                                                                                                                                                                      |
+| `export.otlp_endpoint`       | _(unset)_          | OTLP/JSON logs endpoint (`POST {endpoint}/v1/logs`). No endpoint = events stay buffered locally.                                                                                                                 |
+| `export.headers`             | `{}`               | Extra HTTP headers sent with each export (e.g. auth).                                                                                                                                                            |
+| `export.batch_size`          | `256`              | Max events per export batch.                                                                                                                                                                                     |
+| `export.flush_interval_secs` | `10`               | Export loop interval; backs off exponentially (capped ~30x) on repeated failures.                                                                                                                                |
+| `capture.prompts`            | `true`             | Capture prompt text. `false` → events still emitted, text replaced with `[not captured]` (metadata-only mode).                                                                                                   |
+| `capture.tool_inputs`        | `true`             | Capture tool-call input JSON. `false` → tool events still emitted (name, files, FQDNs) without the input payload.                                                                                                |
+| `capture.tool_outputs`       | `true`             | Capture tool result/output JSON on post-tool events. `false` → output field left null.                                                                                                                           |
+| `capture.assistant_messages` | `true`             | Capture assistant message text (Claude Code/Codex `Stop`, opencode `chat.message`). `false` → assistant-message events suppressed.                                                                               |
+| `capture.max_field_bytes`    | `65536`            | Per-field size cap (serialized bytes) for prompt text, assistant text, tool input/output. Oversized text gets `…[truncated]`; oversized JSON is replaced with `{"_truncated":true,"_bytes":n}`. `0` = unlimited. |
+| `redaction.enabled`          | `true`             | Run the built-in secret scrubber before anything is buffered or exported.                                                                                                                                        |
+| `redaction.extra_patterns`   | `[]`               | Additional regexes scrubbed the same way as built-ins (invalid patterns are skipped with a warning, not fatal).                                                                                                  |
+| `buffer.max_events`          | `100000`           | SQLite buffer cap; oldest events are dropped once full (offline-first, not unbounded).                                                                                                                           |
+| `codex.otlp_listen`          | `"127.0.0.1:4327"` | Local address the daemon listens on for Codex's `[otel]` OTLP/JSON export.                                                                                                                                       |
 
 Example `config.toml`:
 
