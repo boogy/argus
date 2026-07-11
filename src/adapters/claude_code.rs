@@ -46,6 +46,8 @@ pub fn parse(p: &Value, capture: &CaptureCfg) -> Vec<Event> {
                 tool: tool.clone(),
                 phase,
                 input: kept_input,
+                output: Value::Null,
+                error: None,
                 files,
                 fqdns,
             })];
@@ -78,6 +80,7 @@ pub fn parse(p: &Value, capture: &CaptureCfg) -> Vec<Event> {
         "SessionStart" | "SessionEnd" | "Stop" | "SubagentStop" | "PreCompact" | "Notification" => {
             vec![mk(EventKind::Session {
                 action: hook.to_string(),
+                detail: Value::Null,
             })]
         }
         _ => vec![mk(EventKind::Raw { payload: p.clone() })],
@@ -123,6 +126,7 @@ mod tests {
         Envelope {
             source: "claude-code".into(),
             received_at: chrono::Utc::now(),
+            event: None,
             payload,
         }
     }
@@ -220,6 +224,7 @@ mod tests {
         let cfg = CaptureCfg {
             prompts: false,
             tool_inputs: false,
+            ..CaptureCfg::default()
         };
         let events = adapters::parse(
             env(json!({
@@ -286,7 +291,7 @@ mod tests {
             &CaptureCfg::default(),
         );
         assert!(
-            matches!(&events[0].kind, EventKind::Session { action } if action == "SessionStart")
+            matches!(&events[0].kind, EventKind::Session { action, .. } if action == "SessionStart")
         );
 
         let events = adapters::parse(

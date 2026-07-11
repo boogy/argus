@@ -51,12 +51,20 @@ impl Default for ExportCfg {
 pub struct CaptureCfg {
     pub prompts: bool,
     pub tool_inputs: bool,
+    pub tool_outputs: bool,
+    pub assistant_messages: bool,
+    /// Per-field size cap (bytes of serialized content) applied to prompt
+    /// text, assistant text, tool input/output. 0 = unlimited.
+    pub max_field_bytes: usize,
 }
 impl Default for CaptureCfg {
     fn default() -> Self {
         Self {
             prompts: true,
             tool_inputs: true,
+            tool_outputs: true,
+            assistant_messages: true,
+            max_field_bytes: 65536,
         }
     }
 }
@@ -284,6 +292,14 @@ mod tests {
             cfg.remote.poll_interval_secs, 300,
             "bad remote field falls back to default"
         );
+    }
+
+    #[test]
+    fn capture_defaults_include_outputs_and_caps() {
+        let cfg = Config::default();
+        assert!(cfg.capture.tool_outputs);
+        assert!(cfg.capture.assistant_messages);
+        assert_eq!(cfg.capture.max_field_bytes, 65536);
     }
 
     #[test]

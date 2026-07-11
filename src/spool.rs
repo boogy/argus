@@ -72,6 +72,7 @@ mod tests {
         let env = Envelope {
             source: "codex".into(),
             received_at: chrono::Utc::now(),
+            event: None,
             payload: serde_json::json!({"k": "v"}),
         };
         append(&env).unwrap();
@@ -89,6 +90,7 @@ mod tests {
         let env = Envelope {
             source: "codex".into(),
             received_at: chrono::Utc::now(),
+            event: None,
             payload: serde_json::json!({"secret": "sk-raw"}),
         };
         append(&env).unwrap();

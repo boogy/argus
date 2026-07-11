@@ -124,6 +124,7 @@ mod tests {
         let env = Envelope {
             source: "claude-code".into(),
             received_at: chrono::Utc::now(),
+            event: None,
             payload: serde_json::json!({"hook_event_name": "UserPromptSubmit"}),
         };
         let env2 = env.clone();
@@ -155,6 +156,7 @@ mod tests {
         let env = Envelope {
             source: "claude-code".into(),
             received_at: chrono::Utc::now(),
+            event: None,
             payload: serde_json::json!({"hook_event_name": "UserPromptSubmit"}),
         };
         let env2 = env.clone();

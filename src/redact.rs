@@ -74,9 +74,27 @@ impl Redactor {
             return e;
         }
         match &mut e.kind {
-            EventKind::Prompt { text } => *text = self.scrub_str(text),
-            EventKind::ToolUse { input, .. } => self.scrub_json(input),
+            EventKind::Prompt { text } | EventKind::AssistantMessage { text } => {
+                *text = self.scrub_str(text)
+            }
+            EventKind::ToolUse {
+                input,
+                output,
+                error,
+                ..
+            } => {
+                self.scrub_json(input);
+                self.scrub_json(output);
+                if let Some(err) = error {
+                    *err = self.scrub_str(err);
+                }
+            }
             EventKind::Skill { args: Some(a), .. } => *a = self.scrub_str(a),
+            EventKind::Permission { input, .. } => self.scrub_json(input),
+            EventKind::Notification { message, .. } | EventKind::Error { message, .. } => {
+                *message = self.scrub_str(message)
+            }
+            EventKind::Session { detail, .. } => self.scrub_json(detail),
             EventKind::Raw { payload } => self.scrub_json(payload),
             _ => {}
         }
@@ -122,6 +140,8 @@ mod tests {
                 tool: "Bash".into(),
                 phase: "pre".into(),
                 input: serde_json::json!({"command": "curl -H 'Authorization: Bearer ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789'"}),
+                output: serde_json::Value::Null,
+                error: None,
                 files: vec![],
                 fqdns: vec![],
             },
@@ -129,6 +149,47 @@ mod tests {
         let out = r().scrub_event(e);
         let s = serde_json::to_string(&out).unwrap();
         assert!(!s.contains("ghp_AbCdEf"));
+    }
+
+    #[test]
+    fn new_kinds_are_scrubbed() {
+        let secret = "ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789";
+        let cases = vec![
+            crate::event::EventKind::AssistantMessage {
+                text: format!("token {secret}"),
+            },
+            crate::event::EventKind::Notification {
+                message: format!("use {secret}"),
+                category: "x".into(),
+            },
+            crate::event::EventKind::Error {
+                message: format!("auth {secret}"),
+                context: "x".into(),
+            },
+            crate::event::EventKind::Permission {
+                tool: "Bash".into(),
+                action: "requested".into(),
+                input: serde_json::json!({"command": format!("curl -H 'X: {secret}'")}),
+            },
+            crate::event::EventKind::Session {
+                action: "SessionEnd".into(),
+                detail: serde_json::json!({"reason": format!("had {secret}")}),
+            },
+            crate::event::EventKind::ToolUse {
+                tool: "Bash".into(),
+                phase: "post".into(),
+                input: serde_json::Value::Null,
+                output: serde_json::json!({"stdout": format!("printed {secret}")}),
+                error: Some(format!("failed with {secret}")),
+                files: vec![],
+                fqdns: vec![],
+            },
+        ];
+        for kind in cases {
+            let e = crate::event::Event::new("t", None, None, kind);
+            let s = serde_json::to_string(&r().scrub_event(e)).unwrap();
+            assert!(!s.contains("ghp_AbCdEf"), "leaked: {s}");
+        }
     }
 
     #[test]

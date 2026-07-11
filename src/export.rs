@@ -38,10 +38,20 @@ fn record(e: &Event) -> Value {
     }
     let event_type = match &e.kind {
         EventKind::Prompt { .. } => "prompt",
+        EventKind::AssistantMessage { .. } => "assistant_message",
         EventKind::ToolUse {
-            tool, files, fqdns, ..
+            tool,
+            phase,
+            files,
+            fqdns,
+            error,
+            ..
         } => {
             attrs.push(attr("tool.name", tool));
+            attrs.push(attr("tool.phase", phase));
+            if error.is_some() {
+                attrs.push(attr("tool.failed", "true"));
+            }
             if !files.is_empty() {
                 attrs.push(attr("file.paths", &files.join(",")));
             }
@@ -58,12 +68,48 @@ fn record(e: &Event) -> Value {
             attrs.push(attr("agent.type", agent_type));
             "agent"
         }
-        EventKind::Session { action } => {
+        EventKind::Permission { tool, action, .. } => {
+            attrs.push(attr("tool.name", tool));
+            attrs.push(attr("permission.action", action));
+            "permission"
+        }
+        EventKind::Notification { category, .. } => {
+            attrs.push(attr("notification.category", category));
+            "notification"
+        }
+        EventKind::Compact { phase, trigger, .. } => {
+            attrs.push(attr("compact.phase", phase));
+            attrs.push(attr("compact.trigger", trigger));
+            "compact"
+        }
+        EventKind::FileChange { path, action } => {
+            attrs.push(attr("file.paths", path));
+            attrs.push(attr("file.action", action));
+            "file_change"
+        }
+        EventKind::Error { context, .. } => {
+            attrs.push(attr("error.context", context));
+            "error"
+        }
+        EventKind::Session { action, .. } => {
             attrs.push(attr("session.action", action));
             "session"
         }
         EventKind::Raw { .. } => "raw",
     };
+    for (key, val) in [
+        ("turn.id", &e.meta.turn_id),
+        ("agent.id", &e.meta.agent_id),
+        ("agent.type", &e.meta.agent_type),
+        ("permission.mode", &e.meta.permission_mode),
+        ("llm.model", &e.meta.model),
+    ] {
+        if let Some(v) = val {
+            if !attrs.iter().any(|a| a["key"] == *key) {
+                attrs.push(attr(key, v));
+            }
+        }
+    }
     attrs.insert(0, attr("event.type", event_type));
     json!({
         "timeUnixNano": (e.ts.timestamp_nanos_opt().unwrap_or(0)).to_string(),
@@ -123,6 +169,8 @@ mod tests {
                 tool: "Write".into(),
                 phase: "pre".into(),
                 input: serde_json::json!({}),
+                output: serde_json::Value::Null,
+                error: None,
                 files: vec!["/a.rs".into()],
                 fqdns: vec![],
             },
@@ -142,6 +190,35 @@ mod tests {
         assert_eq!(get("event.type").as_deref(), Some("tool_use"));
         assert_eq!(get("tool.name").as_deref(), Some("Write"));
         assert_eq!(get("session.id").as_deref(), Some("s1"));
+    }
+
+    #[test]
+    fn new_kinds_and_meta_export_attributes() {
+        let mut e = Event::new(
+            "copilot",
+            Some("s".into()),
+            None,
+            EventKind::Permission {
+                tool: "bash".into(),
+                action: "requested".into(),
+                input: serde_json::json!({}),
+            },
+        );
+        e.meta.agent_type = Some("Explore".into());
+        let body = to_otlp_body(std::slice::from_ref(&e));
+        let attrs = body["resourceLogs"][0]["scopeLogs"][0]["logRecords"][0]["attributes"].clone();
+        let get = |k: &str| {
+            attrs
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|a| a["key"] == k)
+                .map(|a| a["value"]["stringValue"].as_str().unwrap().to_string())
+        };
+        assert_eq!(get("event.type").as_deref(), Some("permission"));
+        assert_eq!(get("tool.name").as_deref(), Some("bash"));
+        assert_eq!(get("permission.action").as_deref(), Some("requested"));
+        assert_eq!(get("agent.type").as_deref(), Some("Explore"));
     }
 
     #[tokio::test]
@@ -180,6 +257,7 @@ mod tests {
             None,
             EventKind::Session {
                 action: "start".into(),
+                detail: serde_json::Value::Null,
             },
         );
         exporter.export(std::slice::from_ref(&e)).await.unwrap();

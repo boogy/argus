@@ -59,18 +59,22 @@ pub fn parse(p: &Value, capture: &CaptureCfg) -> Vec<Event> {
                 tool,
                 phase,
                 input,
+                output: Value::Null,
+                error: None,
                 files: vec![],
                 fqdns: extract_fqdns(&text_blob),
             })]
         }
         "codex.conversation_starts" => vec![mk(EventKind::Session {
             action: "start".into(),
+            detail: Value::Null,
         })],
         // Codex `notify` delivers raw JSON like {"type": "agent-turn-complete", ...}
         // (top-level, not wrapped in a "notify" key).
         _ if p.get("type").and_then(Value::as_str) == Some("agent-turn-complete") => {
             vec![mk(EventKind::Session {
                 action: "turn-complete".into(),
+                detail: Value::Null,
             })]
         }
         _ => vec![mk(EventKind::Raw { payload: p.clone() })],
@@ -171,6 +175,7 @@ async fn handle_conn_inner(mut stream: tokio::net::TcpStream, tx: Sender<Envelop
                     .send(Envelope {
                         source: "codex".into(),
                         received_at: chrono::Utc::now(),
+                        event: None,
                         payload: record,
                     })
                     .await;
@@ -245,6 +250,7 @@ mod tests {
         Envelope {
             source: "codex".into(),
             received_at: chrono::Utc::now(),
+            event: None,
             payload,
         }
     }
@@ -301,7 +307,7 @@ mod tests {
             &CaptureCfg::default(),
         );
         assert!(
-            matches!(&events[0].kind, EventKind::Session { action } if action == "turn-complete")
+            matches!(&events[0].kind, EventKind::Session { action, .. } if action == "turn-complete")
         );
     }
 

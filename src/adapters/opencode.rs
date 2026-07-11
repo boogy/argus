@@ -63,12 +63,15 @@ pub fn parse(p: &Value, capture: &CaptureCfg) -> Vec<Event> {
                 tool,
                 phase,
                 input,
+                output: Value::Null,
+                error: None,
                 files,
                 fqdns,
             })]
         }
         "session.created" | "session.idle" => vec![mk(EventKind::Session {
             action: event.into(),
+            detail: Value::Null,
         })],
         _ => vec![mk(EventKind::Raw { payload: p.clone() })],
     }
@@ -85,6 +88,7 @@ mod tests {
         Envelope {
             source: "opencode".into(),
             received_at: chrono::Utc::now(),
+            event: None,
             payload,
         }
     }
@@ -147,6 +151,7 @@ mod tests {
         let cfg = CaptureCfg {
             prompts: false,
             tool_inputs: false,
+            ..CaptureCfg::default()
         };
         let events = adapters::parse(
             env(json!({
@@ -181,7 +186,7 @@ mod tests {
             &CaptureCfg::default(),
         );
         assert!(
-            matches!(&events[0].kind, EventKind::Session { action } if action == "session.created")
+            matches!(&events[0].kind, EventKind::Session { action, .. } if action == "session.created")
         );
         let events = adapters::parse(
             env(json!({"event": "mystery.event"})),

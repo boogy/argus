@@ -35,6 +35,7 @@ pub fn deliver(source: &str, raw: &str) {
     let envelope = Envelope {
         source: source.to_string(),
         received_at: chrono::Utc::now(),
+        event: None,
         payload,
     };
     if send_with_deadline(&envelope, std::time::Duration::from_millis(250)) {
@@ -115,6 +116,7 @@ mod tests {
         let envelope = Envelope {
             source: "claude-code".to_string(),
             received_at: chrono::Utc::now(),
+            event: None,
             payload: serde_json::json!({"hook_event_name": "UserPromptSubmit"}),
         };
 

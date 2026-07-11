@@ -6,7 +6,35 @@ use serde::{Deserialize, Serialize};
 pub struct Envelope {
     pub source: String,
     pub received_at: DateTime<Utc>,
+    /// Optional event-name hint passed as `--event` by installs whose tool
+    /// payloads carry no event-name field (Copilot's camelCase payloads).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event: Option<String>,
     pub payload: serde_json::Value,
+}
+
+/// Cross-tool context attached to every event. Adapters populate whatever
+/// their hook surface exposes; all fields optional.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Meta {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript_path: Option<String>,
+}
+
+impl Meta {
+    pub fn is_empty(&self) -> bool {
+        *self == Meta::default()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -18,6 +46,8 @@ pub struct Event {
     pub source: String,
     pub session_id: Option<String>,
     pub cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Meta::is_empty")]
+    pub meta: Meta,
     #[serde(flatten)]
     pub kind: EventKind,
 }
@@ -28,10 +58,17 @@ pub enum EventKind {
     Prompt {
         text: String,
     },
+    AssistantMessage {
+        text: String,
+    },
     ToolUse {
         tool: String,
-        phase: String,
+        phase: String, // "pre" | "post" | "error"
         input: serde_json::Value,
+        #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+        output: serde_json::Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
         files: Vec<String>,
         fqdns: Vec<String>,
     },
@@ -43,8 +80,36 @@ pub enum EventKind {
         agent_type: String,
         description: Option<String>,
     },
+    Permission {
+        tool: String,
+        action: String, // "requested" | "denied" | "replied"
+        #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+        input: serde_json::Value,
+    },
+    Notification {
+        message: String,
+        category: String,
+    },
+    Compact {
+        phase: String,   // "pre" | "post"
+        trigger: String, // "manual" | "auto"
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tokens_before: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tokens_after: Option<u64>,
+    },
+    FileChange {
+        path: String,
+        action: String,
+    },
+    Error {
+        message: String,
+        context: String,
+    },
     Session {
         action: String,
+        #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+        detail: serde_json::Value,
     },
     Raw {
         payload: serde_json::Value,
@@ -68,6 +133,7 @@ impl Event {
             source: source.to_string(),
             session_id,
             cwd,
+            meta: Meta::default(),
             kind,
         }
     }
@@ -97,6 +163,8 @@ mod tests {
                 tool: "Write".into(),
                 phase: "pre".into(),
                 input: serde_json::json!({"file_path": "/repo/a.rs"}),
+                output: serde_json::Value::Null,
+                error: None,
                 files: vec!["/repo/a.rs".into()],
                 fqdns: vec![],
             },
@@ -114,11 +182,110 @@ mod tests {
         let env = Envelope {
             source: "opencode".into(),
             received_at: chrono::Utc::now(),
+            event: None,
             payload: serde_json::json!({"event": "tool.execute.before"}),
         };
         let s = serde_json::to_string(&env).unwrap();
         let back: Envelope = serde_json::from_str(&s).unwrap();
         assert_eq!(back.source, "opencode");
+    }
+
+    #[test]
+    fn old_serialized_events_still_deserialize() {
+        // An event written by the previous binary version (no meta, no output/
+        // error on tool_use, no detail on session) must round-trip.
+        let old = r#"{"id":"x","ts":"2026-07-11T00:00:00Z","host":"h","username":"u",
+            "source":"claude-code","session_id":null,"cwd":null,
+            "type":"tool_use","tool":"Write","phase":"pre","input":{},"files":[],"fqdns":[]}"#;
+        let e: Event = serde_json::from_str(old).unwrap();
+        let EventKind::ToolUse { output, error, .. } = &e.kind else {
+            panic!()
+        };
+        assert!(output.is_null());
+        assert!(error.is_none());
+        assert!(e.meta.is_empty());
+
+        let old_session = r#"{"id":"x","ts":"2026-07-11T00:00:00Z","host":"h","username":"u",
+            "source":"claude-code","session_id":null,"cwd":null,
+            "type":"session","action":"Stop"}"#;
+        let e: Event = serde_json::from_str(old_session).unwrap();
+        assert!(matches!(&e.kind, EventKind::Session { detail, .. } if detail.is_null()));
+    }
+
+    #[test]
+    fn empty_meta_is_not_serialized() {
+        let e = Event::new("t", None, None, EventKind::Prompt { text: "x".into() });
+        let v = serde_json::to_value(&e).unwrap();
+        assert!(v.get("meta").is_none(), "empty meta must be skipped");
+    }
+
+    #[test]
+    fn populated_meta_round_trips() {
+        let mut e = Event::new("t", None, None, EventKind::Prompt { text: "x".into() });
+        e.meta.agent_type = Some("Explore".into());
+        e.meta.model = Some("claude-fable-5".into());
+        let s = serde_json::to_string(&e).unwrap();
+        let back: Event = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.meta.agent_type.as_deref(), Some("Explore"));
+    }
+
+    #[test]
+    fn new_kinds_round_trip_with_snake_case_tags() {
+        let cases = vec![
+            (
+                EventKind::AssistantMessage { text: "hi".into() },
+                "assistant_message",
+            ),
+            (
+                EventKind::Permission {
+                    tool: "Bash".into(),
+                    action: "requested".into(),
+                    input: serde_json::json!({}),
+                },
+                "permission",
+            ),
+            (
+                EventKind::Notification {
+                    message: "m".into(),
+                    category: "idle_prompt".into(),
+                },
+                "notification",
+            ),
+            (
+                EventKind::Compact {
+                    phase: "post".into(),
+                    trigger: "auto".into(),
+                    tokens_before: Some(1000),
+                    tokens_after: Some(200),
+                },
+                "compact",
+            ),
+            (
+                EventKind::FileChange {
+                    path: "/x".into(),
+                    action: "edited".into(),
+                },
+                "file_change",
+            ),
+            (
+                EventKind::Error {
+                    message: "boom".into(),
+                    context: "rate_limit".into(),
+                },
+                "error",
+            ),
+        ];
+        for (kind, tag) in cases {
+            let v = serde_json::to_value(Event::new("t", None, None, kind)).unwrap();
+            assert_eq!(v["type"], tag);
+        }
+    }
+
+    #[test]
+    fn envelope_event_hint_defaults_to_none() {
+        let s = r#"{"source":"copilot","received_at":"2026-07-11T00:00:00Z","payload":{}}"#;
+        let env: Envelope = serde_json::from_str(s).unwrap();
+        assert!(env.event.is_none());
     }
 
     #[test]
@@ -131,6 +298,8 @@ mod tests {
                 tool: "Write".into(),
                 phase: "pre".into(),
                 input: serde_json::json!({}),
+                output: serde_json::Value::Null,
+                error: None,
                 files: vec![],
                 fqdns: vec![],
             },
