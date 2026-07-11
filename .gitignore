@@ -1,5 +1,8 @@
+.claude/worktrees
 /target
 /.superpowers
+.superpowers/
+docs/superpowers/
 
 
 # Added by cargo
