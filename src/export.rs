@@ -96,6 +96,16 @@ fn record(e: &Event) -> Value {
             "session"
         }
         EventKind::Raw { .. } => "raw",
+        EventKind::Integrity {
+            status,
+            tool,
+            detail,
+        } => {
+            attrs.push(attr("integrity.status", status));
+            attrs.push(attr("integrity.tool", tool));
+            attrs.push(attr("integrity.detail", detail));
+            "integrity"
+        }
     };
     for (key, val) in [
         ("turn.id", &e.meta.turn_id),
@@ -111,9 +121,15 @@ fn record(e: &Event) -> Value {
         }
     }
     attrs.insert(0, attr("event.type", event_type));
+    // Broken wiring is the one finding a SIEM should alert on, so lift it out
+    // of the INFO stream everything else rides in.
+    let severity = match &e.kind {
+        EventKind::Integrity { status, .. } if status != "ok" => "WARN",
+        _ => "INFO",
+    };
     json!({
         "timeUnixNano": (e.ts.timestamp_nanos_opt().unwrap_or(0)).to_string(),
-        "severityText": "INFO",
+        "severityText": severity,
         "body": { "stringValue": serde_json::to_string(e).unwrap_or_default() },
         "attributes": attrs
     })

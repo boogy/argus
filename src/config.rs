@@ -10,6 +10,8 @@ pub struct Config {
     pub redaction: RedactionCfg,
     pub buffer: BufferCfg,
     pub codex: CodexCfg,
+    pub heartbeat: HeartbeatCfg,
+    pub integrity: IntegrityCfg,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -106,6 +108,44 @@ impl Default for CodexCfg {
     fn default() -> Self {
         Self {
             otlp_listen: "127.0.0.1:4327".into(),
+        }
+    }
+}
+
+/// Liveness heartbeat. When `url` is set, the daemon POSTs a small JSON ping
+/// (host, version, ts) every `interval_secs`. The receiver alerts on the
+/// *absence* of pings (dead-man's switch), so this is intentionally decoupled
+/// from the OTLP export path — a broken exporter must not look like a live
+/// process, and a dead process must not look like a live-but-not-exporting one.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct HeartbeatCfg {
+    pub url: Option<String>,
+    pub interval_secs: u64,
+}
+impl Default for HeartbeatCfg {
+    fn default() -> Self {
+        Self {
+            url: None,
+            interval_secs: 3600,
+        }
+    }
+}
+
+/// Wiring self-check. On by default: a security control that silently stops
+/// capturing is worse than none, so the daemon periodically re-verifies its
+/// own hook/plugin wiring and reports tampering. `interval_secs` floored at 30.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct IntegrityCfg {
+    pub enabled: bool,
+    pub interval_secs: u64,
+}
+impl Default for IntegrityCfg {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            interval_secs: 3600,
         }
     }
 }
@@ -227,6 +267,47 @@ pub async fn poll_loop(shared: std::sync::Arc<std::sync::RwLock<Config>>) {
     }
 }
 
+/// POST one liveness ping. Errors (network, non-2xx) bubble up so the caller
+/// can log; the ping carries host identity so a fleet receiver can tell *which*
+/// machine stopped reporting.
+async fn send_heartbeat(client: &reqwest::Client, url: &str) -> anyhow::Result<()> {
+    let body = serde_json::json!({
+        "host": crate::event::hostname(),
+        "version": env!("CARGO_PKG_VERSION"),
+        "ts": chrono::Utc::now().to_rfc3339(),
+    });
+    client
+        .post(url)
+        .json(&body)
+        .send()
+        .await?
+        .error_for_status()?;
+    Ok(())
+}
+
+/// Daemon task: ping the configured heartbeat URL every `interval_secs`. A
+/// failed ping is logged and retried on the next tick — no spool, no backoff,
+/// because a missed ping is exactly the signal the receiver watches for.
+pub async fn heartbeat_loop(shared: std::sync::Arc<std::sync::RwLock<Config>>) {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .unwrap_or_default();
+    loop {
+        let (url, interval) = {
+            let cfg = shared.read().unwrap();
+            (cfg.heartbeat.url.clone(), cfg.heartbeat.interval_secs)
+        };
+        if let Some(url) = url {
+            match send_heartbeat(&client, &url).await {
+                Ok(()) => tracing::debug!("heartbeat sent"),
+                Err(e) => tracing::warn!("heartbeat failed: {e}"),
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(interval.max(10))).await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -332,5 +413,49 @@ mod tests {
         assert!(body.contains("prompts = false"));
         assert_eq!(etag.as_deref(), Some("\"v1\""));
         assert!(fetch_remote(&url, etag.as_deref()).await.unwrap().is_none());
+    }
+
+    #[test]
+    fn heartbeat_config_parses() {
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("LLM_MONITOR_DATA_DIR", dir.path());
+        std::fs::create_dir_all(dir.path()).unwrap();
+        std::fs::write(
+            crate::paths::config_path(),
+            "[heartbeat]\nurl = \"https://hb.internal/ping\"\ninterval_secs = 30\n",
+        )
+        .unwrap();
+        let cfg = load();
+        assert_eq!(cfg.heartbeat.url.as_deref(), Some("https://hb.internal/ping"));
+        assert_eq!(cfg.heartbeat.interval_secs, 30);
+    }
+
+    #[test]
+    fn heartbeat_defaults_are_off() {
+        let cfg = Config::default();
+        assert!(cfg.heartbeat.url.is_none(), "off unless a url is configured");
+        assert_eq!(cfg.heartbeat.interval_secs, 3600);
+    }
+
+    #[tokio::test]
+    async fn send_heartbeat_posts_json_ping() {
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let addr = server.server_addr().to_string();
+        let handle = std::thread::spawn(move || {
+            let mut req = server.incoming_requests().next().unwrap();
+            let method = req.method().to_string();
+            let mut body = String::new();
+            req.as_reader().read_to_string(&mut body).unwrap();
+            let _ = req.respond(tiny_http::Response::empty(200));
+            (method, body)
+        });
+        let client = reqwest::Client::new();
+        send_heartbeat(&client, &format!("http://{addr}/ping"))
+            .await
+            .unwrap();
+        let (method, body) = handle.join().unwrap();
+        assert_eq!(method, "POST");
+        assert!(body.contains("\"host\""), "ping carries host identity: {body}");
+        assert!(body.contains("\"version\""));
     }
 }

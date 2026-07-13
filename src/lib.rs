@@ -6,6 +6,7 @@ pub mod event;
 pub mod export;
 pub mod hook;
 pub mod install;
+pub mod integrity;
 pub mod ipc;
 pub mod paths;
 pub mod redact;
