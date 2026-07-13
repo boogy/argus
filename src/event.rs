@@ -114,6 +114,14 @@ pub enum EventKind {
     Raw {
         payload: serde_json::Value,
     },
+    /// Self-check on the daemon's own hook/plugin wiring. `status` is "ok" or
+    /// "broken"; a broken finding means capture for `tool` is (partly) blind —
+    /// the wiring was removed or altered. Emitted by the integrity loop.
+    Integrity {
+        status: String,
+        tool: String,
+        detail: String,
+    },
 }
 
 impl Event {
@@ -139,7 +147,7 @@ impl Event {
     }
 }
 
-fn hostname() -> String {
+pub fn hostname() -> String {
     std::process::Command::new("hostname")
         .output()
         .ok()

@@ -16,7 +16,7 @@ const OPENCODE_SHIM: &str = include_str!("../plugins/opencode/llm-monitor.ts");
 /// run for every matcher value anyway. Deliberately not wired (see README):
 /// MessageDisplay, UserPromptExpansion, FileChanged, Worktree*, Setup,
 /// TeammateIdle, Elicitation*.
-const CC_HOOKS: &[(&str, bool)] = &[
+pub(crate) const CC_HOOKS: &[(&str, bool)] = &[
     ("UserPromptSubmit", false),
     ("PreToolUse", true),
     ("PostToolUse", true),
@@ -41,7 +41,7 @@ const CC_HOOKS: &[(&str, bool)] = &[
 
 /// Home directory root. Overridable via `LLM_MONITOR_HOME` so tests never
 /// touch a real home directory.
-fn home() -> std::path::PathBuf {
+pub(crate) fn home() -> std::path::PathBuf {
     std::env::var("LLM_MONITOR_HOME")
         .map(Into::into)
         .unwrap_or_else(|_| dirs::home_dir().unwrap_or_else(|| ".".into()))
@@ -145,7 +145,7 @@ fn install_opencode(home: &std::path::Path, dry_run: bool) -> Result<()> {
 /// docs: Claude-compatible `hooks.{Event}[]` schema, JSON payload on stdin
 /// with `hook_event_name`; non-managed hooks need one-time trust via
 /// `/hooks` in the Codex CLI).
-const CODEX_HOOK_EVENTS: &[(&str, bool)] = &[
+pub(crate) const CODEX_HOOK_EVENTS: &[(&str, bool)] = &[
     ("SessionStart", false),
     ("UserPromptSubmit", false),
     ("PreToolUse", true),
@@ -291,7 +291,7 @@ const COPILOT_EVENTS: &[&str] = &[
     "permissionRequest",
 ];
 
-fn copilot_dir(home: &std::path::Path) -> std::path::PathBuf {
+pub(crate) fn copilot_dir(home: &std::path::Path) -> std::path::PathBuf {
     std::env::var("COPILOT_HOME")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| home.join(".copilot"))

@@ -35,6 +35,7 @@ pub async fn run() -> Result<()> {
 
     let shared_cfg = Arc::new(RwLock::new(config::load()));
     tokio::spawn(config::poll_loop(shared_cfg.clone()));
+    tokio::spawn(config::heartbeat_loop(shared_cfg.clone()));
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Envelope>(1024);
     tokio::spawn(listener.accept_loop(tx.clone()));
@@ -61,6 +62,10 @@ pub async fn run() -> Result<()> {
     let buffer = Arc::new(Buffer::open(max_events)?);
 
     let export_handle = tokio::spawn(export_loop(buffer.clone(), shared_cfg.clone()));
+    tokio::spawn(crate::integrity::integrity_loop(
+        shared_cfg.clone(),
+        buffer.clone(),
+    ));
 
     // Pipeline: parse -> redact -> buffer. Redactor rebuilt when redaction
     // config changes (cheap fingerprint check, avoids rebuilding regexes on
