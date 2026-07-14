@@ -1,11 +1,15 @@
 //! Wiring self-check (tamper detection).
 //!
-//! The heartbeat proves the *daemon* is running; this proves the daemon is
-//! still *wired into the tools*. A developer who keeps the process alive but
-//! deletes the `PreToolUse` hook from `~/.claude/settings.json` makes capture
-//! go blind while liveness stays green — this loop catches exactly that by
+//! "Is the daemon running" is one question; this answers a different one: is
+//! the daemon still *wired into the tools*? A developer who keeps the process
+//! alive but deletes the `PreToolUse` hook from `~/.claude/settings.json`
+//! makes capture go blind while the process looks healthy — caught here by
 //! re-verifying, against the same wiring `install` writes, that every detected
 //! tool still carries the `llm-monitor` marker.
+//!
+//! Two entry points share [`check`]: the daemon's [`integrity_loop`] (pushes
+//! `integrity` events to the SIEM) and [`check_and_report`] (the `llm-monitor
+//! check` CLI, pulled by an MDM/monitoring agent on the endpoint).
 
 use crate::buffer::Buffer;
 use crate::config::Config;
@@ -97,6 +101,30 @@ fn check_file(tool: &str, path: &Path) -> Finding {
     }
 }
 
+/// One-shot check for external monitors — e.g. an MDM compliance script (Jamf
+/// Extension Attribute / Intune) or any monitoring agent runs `llm-monitor
+/// check` on its poll cycle. Prints one line per detected tool and returns
+/// whether every tool is intact; the caller maps that to an exit code. No
+/// daemon required — this reads the on-disk wiring directly.
+pub fn check_and_report() -> bool {
+    let findings = check(&crate::install::home());
+    if findings.is_empty() {
+        println!("llm-monitor: no supported tools detected");
+        return true;
+    }
+    let mut all_ok = true;
+    for f in &findings {
+        println!(
+            "{}: {} ({})",
+            f.tool,
+            if f.ok { "ok" } else { "BROKEN" },
+            f.detail
+        );
+        all_ok &= f.ok;
+    }
+    all_ok
+}
+
 fn finding_event(f: &Finding) -> Event {
     Event::new(
         "llm-monitor",
@@ -112,9 +140,10 @@ fn finding_event(f: &Finding) -> Event {
 
 /// Daemon task: periodically self-check wiring and buffer a finding for every
 /// *broken* tool (which then exports to the SIEM/collector like any event).
-/// Healthy tools emit nothing — absence of capture is covered by the
-/// heartbeat, so an "ok" every interval would be pure noise. A broken finding
-/// re-emits each cycle until re-install, keeping the alert live.
+/// Healthy tools emit nothing — an "ok" every interval would be pure noise;
+/// whether the daemon itself is alive is answered by `llm-monitor check` /
+/// process monitoring, not here. A broken finding re-emits each cycle until
+/// re-install, keeping the alert live.
 pub async fn integrity_loop(shared: Arc<RwLock<Config>>, buffer: Arc<Buffer>) {
     loop {
         let (enabled, interval) = {
@@ -203,6 +232,21 @@ mod tests {
             .find(|f| f.tool == "opencode")
             .unwrap();
         assert!(!oc.ok, "missing plugin file must be flagged");
+    }
+
+    #[test]
+    fn check_and_report_reflects_wiring() {
+        let home = wired_claude_home();
+        std::env::set_var("LLM_MONITOR_HOME", home.path());
+        assert!(check_and_report(), "fully wired => true");
+        // strip one hook, as a tampering developer would
+        let path = home.path().join(".claude/settings.json");
+        let mut doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        doc["hooks"]["PreToolUse"] = serde_json::json!([]);
+        std::fs::write(&path, doc.to_string()).unwrap();
+        assert!(!check_and_report(), "broken wiring => false");
+        std::env::remove_var("LLM_MONITOR_HOME");
     }
 
     #[test]

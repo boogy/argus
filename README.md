@@ -107,8 +107,6 @@ unset keys keep their default.
 | `redaction.extra_patterns`   | `[]`               | Additional regexes scrubbed the same way as built-ins (invalid patterns are skipped with a warning, not fatal).                                                                                                  |
 | `buffer.max_events`          | `100000`           | SQLite buffer cap; oldest events are dropped once full (offline-first, not unbounded).                                                                                                                           |
 | `codex.otlp_listen`          | `"127.0.0.1:4327"` | Local address the daemon listens on for Codex's `[otel]` OTLP/JSON export.                                                                                                                                       |
-| `heartbeat.url`              | _(unset)_          | Liveness endpoint. When set, the daemon `POST`s a JSON ping `{host, version, ts}` on an interval. Unset = no heartbeat. Decoupled from `export.*` so a broken exporter doesn't look alive, nor vice-versa.        |
-| `heartbeat.interval_secs`    | `3600`             | Heartbeat interval (floor `10`). Set your receiver's "no data" alert window to a small multiple of this.                                                                                                          |
 | `integrity.enabled`          | `true`             | Periodically re-verify the daemon's own hook/plugin wiring is intact. A tampered/removed hook emits an `event.type=integrity`, `integrity.status=broken` record at `WARN`. On by default (security control).      |
 | `integrity.interval_secs`    | `3600`             | Wiring self-check interval (floor `30`). Broken findings re-emit each cycle until re-install, so the alert stays live.                                                                                            |
 
@@ -187,6 +185,12 @@ extra_patterns = ["ACME-[0-9]{6}"]
 - `llm-monitor status` — prints the resolved data dir, effective config
   (endpoint, batch size, flush interval, redaction on/off), buffered event
   count, and whether the daemon socket is reachable.
+- `llm-monitor check` — one-shot hook-wiring self-check for fleet monitoring.
+  Prints one line per detected tool and exits `0` (all intact) or `2` (wiring
+  missing/altered). No daemon required. Intended for an MDM compliance script
+  (Jamf Extension Attribute / Intune) or any monitoring agent run on the
+  endpoint's poll cycle — the pull-based counterpart to the daemon's
+  `integrity` events.
 - **Offline / collector unreachable**: events keep flowing into the SQLite
   buffer (`<data-dir>/events.db`) instead of being dropped; `buffered events`
   in `status` grows. Once the collector is reachable again, the export loop's

@@ -147,7 +147,7 @@ impl Event {
     }
 }
 
-pub fn hostname() -> String {
+fn hostname() -> String {
     std::process::Command::new("hostname")
         .output()
         .ok()

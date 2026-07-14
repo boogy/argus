@@ -33,6 +33,10 @@ enum Cmd {
     Uninstall,
     /// Show daemon/config status.
     Status,
+    /// One-shot hook-wiring self-check for MDM/monitoring (e.g. Jamf, Intune).
+    /// Prints one line per detected tool; exits 0 if all intact, 2 if any
+    /// wiring is missing or altered. No daemon required.
+    Check,
 }
 
 fn main() -> Result<()> {
@@ -51,6 +55,14 @@ fn main() -> Result<()> {
         Cmd::Install { dry_run } => llm_monitor::install::run(dry_run)?,
         Cmd::Uninstall => llm_monitor::install::uninstall()?,
         Cmd::Status => print_status()?,
+        Cmd::Check => {
+            // Exit code is the contract for monitors: 0 = intact, 2 = tampered.
+            std::process::exit(if llm_monitor::integrity::check_and_report() {
+                0
+            } else {
+                2
+            });
+        }
     }
     Ok(())
 }
