@@ -2,7 +2,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "llm-monitor", version, about = "LLM tool observability agent")]
+#[command(name = "argus", version, about = "LLM tool observability agent")]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -24,12 +24,12 @@ enum Cmd {
     },
     /// Background daemon: parse, redact, buffer, export.
     Daemon,
-    /// Wire llm-monitor into installed tools.
+    /// Wire argus into installed tools.
     Install {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Remove llm-monitor wiring from tools.
+    /// Remove argus wiring from tools.
     Uninstall,
     /// Show daemon/config status.
     Status,
@@ -61,12 +61,12 @@ fn main() -> Result<()> {
             source,
             event,
             payload,
-        } => llm_monitor::hook::run(&source, event.as_deref(), payload.as_deref()),
+        } => argus::hook::run(&source, event.as_deref(), payload.as_deref()),
         Cmd::Daemon => {
-            tokio::runtime::Runtime::new()?.block_on(llm_monitor::daemon::run())?;
+            tokio::runtime::Runtime::new()?.block_on(argus::daemon::run())?;
         }
-        Cmd::Install { dry_run } => llm_monitor::install::run(dry_run)?,
-        Cmd::Uninstall => llm_monitor::install::uninstall()?,
+        Cmd::Install { dry_run } => argus::install::run(dry_run)?,
+        Cmd::Uninstall => argus::install::uninstall()?,
         Cmd::Status => print_status()?,
         Cmd::Check {
             hooks,
@@ -81,7 +81,7 @@ fn main() -> Result<()> {
             };
             // Exit code is the contract for monitors: 0 = intact, 2 = broken.
             std::process::exit(
-                if llm_monitor::integrity::check_and_report(
+                if argus::integrity::check_and_report(
                     do_hooks,
                     do_config,
                     remote_url.as_deref(),
@@ -97,10 +97,10 @@ fn main() -> Result<()> {
 }
 
 fn print_status() -> Result<()> {
-    let data_dir = llm_monitor::paths::data_dir();
+    let data_dir = argus::paths::data_dir();
     println!("data dir: {}", data_dir.display());
 
-    let cfg = llm_monitor::config::load();
+    let cfg = argus::config::load();
     println!(
         "config: otlp_endpoint={} batch_size={} flush_interval_secs={} redaction_enabled={}",
         cfg.export.otlp_endpoint.as_deref().unwrap_or("(none)"),
@@ -109,12 +109,12 @@ fn print_status() -> Result<()> {
         cfg.redaction.enabled,
     );
 
-    match llm_monitor::buffer::Buffer::open(cfg.buffer.max_events).and_then(|b| b.len()) {
+    match argus::buffer::Buffer::open(cfg.buffer.max_events).and_then(|b| b.len()) {
         Ok(n) => println!("buffered events: {n}"),
         Err(e) => println!("buffered events: unavailable ({e})"),
     }
 
-    let running = llm_monitor::ipc::is_daemon_running();
+    let running = argus::ipc::is_daemon_running();
     println!(
         "daemon socket: {}",
         if running {

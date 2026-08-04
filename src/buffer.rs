@@ -121,7 +121,7 @@ mod tests {
     #[test]
     fn push_peek_ack_cycle() {
         let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("LLM_MONITOR_DATA_DIR", dir.path());
+        std::env::set_var("ARGUS_DATA_DIR", dir.path());
         let b = Buffer::open(1000).unwrap();
         for i in 0..5 {
             b.push(&ev(i)).unwrap();
@@ -136,7 +136,7 @@ mod tests {
     #[test]
     fn cap_drops_oldest() {
         let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("LLM_MONITOR_DATA_DIR", dir.path());
+        std::env::set_var("ARGUS_DATA_DIR", dir.path());
         let b = Buffer::open(3).unwrap();
         for i in 0..5 {
             b.push(&ev(i)).unwrap();
@@ -150,7 +150,7 @@ mod tests {
     #[test]
     fn max_events_zero_is_clamped_not_wiped() {
         let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("LLM_MONITOR_DATA_DIR", dir.path());
+        std::env::set_var("ARGUS_DATA_DIR", dir.path());
         let b = Buffer::open(0).unwrap();
         for i in 0..3 {
             b.push(&ev(i)).unwrap();
@@ -164,7 +164,7 @@ mod tests {
     #[test]
     fn corrupt_row_is_skipped_not_fatal() {
         let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("LLM_MONITOR_DATA_DIR", dir.path());
+        std::env::set_var("ARGUS_DATA_DIR", dir.path());
         let b = Buffer::open(1000).unwrap();
         b.push(&ev(1)).unwrap();
         {

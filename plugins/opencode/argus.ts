@@ -1,4 +1,4 @@
-// llm-monitor opencode plugin shim: forwards events to the llm-monitor
+// argus opencode plugin shim: forwards events to the argus
 // daemon. Fire-and-forget; never blocks or fails the user's session.
 //
 // Fast path: one persistent connection to the daemon's local socket using
@@ -12,14 +12,14 @@ let sock: Socket | null = null;
 let sockBroken = false;
 
 function socketPath(): string {
-  if (process.env.LLM_MONITOR_SOCKET) return process.env.LLM_MONITOR_SOCKET;
-  if (process.platform === "win32") return "\\\\.\\pipe\\llm-monitor";
+  if (process.env.ARGUS_SOCKET) return process.env.ARGUS_SOCKET;
+  if (process.platform === "win32") return "\\\\.\\pipe\\argus";
   const dataDir =
-    process.env.LLM_MONITOR_DATA_DIR ??
+    process.env.ARGUS_DATA_DIR ??
     (process.platform === "darwin"
-      ? `${process.env.HOME}/Library/Application Support/llm-monitor`
-      : `${process.env.XDG_DATA_HOME ?? `${process.env.HOME}/.local/share`}/llm-monitor`);
-  return `${dataDir}/llm-monitor.sock`;
+      ? `${process.env.HOME}/Library/Application Support/argus`
+      : `${process.env.XDG_DATA_HOME ?? `${process.env.HOME}/.local/share`}/argus`);
+  return `${dataDir}/argus.sock`;
 }
 
 function sendViaSocket(frame: string): boolean {
@@ -46,7 +46,7 @@ function sendViaSocket(frame: string): boolean {
 
 function sendViaSpawn(payload: string): void {
   try {
-    const bin = process.env.LLM_MONITOR_BIN ?? "llm-monitor";
+    const bin = process.env.ARGUS_BIN ?? "argus";
     const child = spawn(bin, ["hook", "--source", "opencode"], {
       stdio: ["pipe", "ignore", "ignore"],
       detached: true,
@@ -98,7 +98,7 @@ const BUS_FORWARD = new Set([
   "installation.updated",
 ]);
 
-export const LlmMonitorPlugin: Plugin = async () => {
+export const ArgusPlugin: Plugin = async () => {
   return {
     "chat.message": async (_input, output) => {
       send({

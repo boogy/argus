@@ -12,7 +12,7 @@ pub fn read_capped(r: &mut impl std::io::Read) -> String {
     input
 }
 
-/// Entry point for `llm-monitor hook --source X [--event NAME]`. Must never
+/// Entry point for `argus hook --source X [--event NAME]`. Must never
 /// fail the host tool.
 ///
 /// Most tools (Claude Code, opencode) pipe the event JSON via stdin. Codex's
@@ -72,7 +72,7 @@ fn send_with_deadline(envelope: &Envelope, deadline: std::time::Duration) -> boo
 }
 
 fn autospawn_daemon() {
-    if std::env::var("LLM_MONITOR_NO_AUTOSPAWN").is_ok() {
+    if std::env::var("ARGUS_NO_AUTOSPAWN").is_ok() {
         return;
     }
     if let Ok(exe) = std::env::current_exe() {
@@ -92,9 +92,9 @@ mod tests {
     #[test]
     fn falls_back_to_spool_when_no_daemon() {
         let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("LLM_MONITOR_DATA_DIR", dir.path());
-        std::env::set_var("LLM_MONITOR_SOCKET", dir.path().join("nope.sock"));
-        std::env::set_var("LLM_MONITOR_NO_AUTOSPAWN", "1");
+        std::env::set_var("ARGUS_DATA_DIR", dir.path());
+        std::env::set_var("ARGUS_SOCKET", dir.path().join("nope.sock"));
+        std::env::set_var("ARGUS_NO_AUTOSPAWN", "1");
 
         let started = std::time::Instant::now();
         deliver(
@@ -124,7 +124,7 @@ mod tests {
     #[test]
     fn send_with_deadline_gives_up_promptly_when_unreachable() {
         let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("LLM_MONITOR_SOCKET", dir.path().join("nope.sock"));
+        std::env::set_var("ARGUS_SOCKET", dir.path().join("nope.sock"));
 
         let envelope = Envelope {
             source: "claude-code".to_string(),
@@ -150,9 +150,9 @@ mod tests {
     #[test]
     fn event_hint_lands_in_envelope() {
         let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("LLM_MONITOR_DATA_DIR", dir.path());
-        std::env::set_var("LLM_MONITOR_SOCKET", dir.path().join("nope.sock"));
-        std::env::set_var("LLM_MONITOR_NO_AUTOSPAWN", "1");
+        std::env::set_var("ARGUS_DATA_DIR", dir.path());
+        std::env::set_var("ARGUS_SOCKET", dir.path().join("nope.sock"));
+        std::env::set_var("ARGUS_NO_AUTOSPAWN", "1");
         deliver("copilot", Some("preToolUse"), r#"{"toolName":"bash"}"#);
         let drained = crate::spool::drain().unwrap();
         assert_eq!(drained[0].event.as_deref(), Some("preToolUse"));
@@ -169,8 +169,8 @@ mod tests {
     #[test]
     fn malformed_stdin_is_swallowed_not_panicked() {
         let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("LLM_MONITOR_DATA_DIR", dir.path());
-        std::env::set_var("LLM_MONITOR_NO_AUTOSPAWN", "1");
+        std::env::set_var("ARGUS_DATA_DIR", dir.path());
+        std::env::set_var("ARGUS_NO_AUTOSPAWN", "1");
         deliver("claude-code", None, "not json at all"); // must not panic
     }
 

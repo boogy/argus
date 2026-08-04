@@ -1,4 +1,4 @@
-# llm-monitor
+# argus
 
 A single cross-platform Rust binary that gives security/platform teams visibility
 into how AI coding agents are used: which prompts are sent, which tools/files/FQDNs
@@ -12,7 +12,7 @@ Supports **Claude Code**, **opencode**, **OpenAI Codex**, and **GitHub Copilot C
 
 ```bash
 cargo install --path .          # or grab a release binary
-llm-monitor install             # detects installed tools, wires hooks/plugins/config
+argus install             # detects installed tools, wires hooks/plugins/config
 ```
 
 Point the daemon at your collector — edit `<data-dir>/config.toml`:
@@ -22,29 +22,29 @@ Point the daemon at your collector — edit `<data-dir>/config.toml`:
 otlp_endpoint = "https://otel-collector.internal:4318"
 ```
 
-(`<data-dir>` is `~/Library/Application Support/llm-monitor` on macOS,
-`~/.local/share/llm-monitor` on Linux, `%APPDATA%\llm-monitor` on Windows —
+(`<data-dir>` is `~/Library/Application Support/argus` on macOS,
+`~/.local/share/argus` on Linux, `%APPDATA%\argus` on Windows —
 see [Architecture](#architecture).)
 
 For fleet-wide rollout, skip local `config.toml` entirely and set:
 
 ```toml
 [remote]
-url = "https://config.internal/llm-monitor.toml"
+url = "https://config.internal/argus.toml"
 ```
 
 The daemon polls that URL (ETag-conditional) and caches the result to disk, so
 policy still applies offline after the first successful fetch. Remote config
 always wins over the local file — see [Config reference](#config-reference).
 
-Run `llm-monitor status` any time to see the resolved config, buffered event
-count, and whether the daemon is reachable. Run `llm-monitor uninstall` to
+Run `argus status` any time to see the resolved config, buffered event
+count, and whether the daemon is reachable. Run `argus uninstall` to
 cleanly remove all wiring.
 
 ## Per-tool fidelity
 
 Each tool exposes a different amount of detail through its hook/plugin API;
-llm-monitor captures everything each surface offers.
+argus captures everything each surface offers.
 
 | Signal                      |        Claude Code         |       opencode        |          Codex          |    Copilot CLI    |
 | --------------------------- | :------------------------: | :-------------------: | :---------------------: | :---------------: |
@@ -135,7 +135,7 @@ extra_patterns = ["ACME-[0-9]{6}"]
 - Add organization-specific patterns via `redaction.extra_patterns` (plain
   regex strings); matches are replaced with `[REDACTED:<rule-name>]`.
 - For environments that must never capture prompt/tool-input content at all,
-  set `capture.prompts = false` and `capture.tool_inputs = false` — llm-monitor
+  set `capture.prompts = false` and `capture.tool_inputs = false` — argus
   still emits metadata (which tool ran, which files, which hosts, session
   lifecycle) with content fields replaced by a `[not captured]` marker.
 
@@ -145,13 +145,13 @@ extra_patterns = ["ACME-[0-9]{6}"]
  Claude Code hook / opencode plugin / Codex notify+otel
                     |
                     v
-        llm-monitor hook  (hot path: parse stdin JSON, forward, exit)
+        argus hook  (hot path: parse stdin JSON, forward, exit)
              |                     |
         IPC (< 250ms)        spool fallback (JSONL on disk)
              |                     |
              +----------+----------+
                         v
-                 llm-monitor daemon
+                 argus daemon
                         |
               adapter parse (per-tool)
                         |
@@ -165,33 +165,33 @@ extra_patterns = ["ACME-[0-9]{6}"]
               your OTLP backend (Splunk / Datadog / Grafana / Collector)
 ```
 
-- **Hook shim** (`llm-monitor hook`) is the only thing on the host tool's
+- **Hook shim** (`argus hook`) is the only thing on the host tool's
   critical path. It tries the daemon over a local socket (Unix domain socket /
   Windows named pipe via `interprocess`) with a 250ms deadline; on timeout or
   daemon-not-running it falls back to writing a JSONL spool file and
   autospawns the daemon. It never blocks the host tool and never fails loudly
   — a broken hook must not break Claude Code, opencode, or Codex.
-- **Daemon** (`llm-monitor daemon`) does everything else off that critical
+- **Daemon** (`argus daemon`) does everything else off that critical
   path: per-tool adapter parsing → secret redaction → durable SQLite buffering
   → batched OTLP/JSON export with exponential backoff. It also drains the
   spool directory and polls remote config.
-- **Install** (`llm-monitor install`) detects installed tools by home-dir
+- **Install** (`argus install`) detects installed tools by home-dir
   presence (`~/.claude`, `~/.config/opencode`, `~/.codex`, `~/.copilot`) and
   idempotently wires each one — see the per-tool fidelity table above.
   `--dry-run` prints planned changes without writing.
 
 ## Troubleshooting
 
-- `llm-monitor status` — prints the resolved data dir, effective config
+- `argus status` — prints the resolved data dir, effective config
   (endpoint, batch size, flush interval, redaction on/off), buffered event
   count, and whether the daemon socket is reachable.
-- `llm-monitor check` — one-shot integrity self-check for fleet monitoring;
+- `argus check` — one-shot integrity self-check for fleet monitoring;
   exits `0` (intact) or `2` (something broken). No daemon required. Intended for
   an MDM compliance script (Jamf Extension Attribute / Intune) or any monitoring
   agent on the endpoint's poll cycle — the pull-based counterpart to the
   daemon's `integrity` events. Checks two things (both by default; scope with
   `--hooks` / `--config`):
-  - **hooks** — each detected tool still carries the `llm-monitor` wiring.
+  - **hooks** — each detected tool still carries the `argus` wiring.
   - **config** — a remote policy (`[remote].url`) is loaded and effective, and
     the effective config matches it. Fails if the host isn't policy-managed, the
     policy never loaded (no/invalid cache → running on local/defaults), or a
@@ -202,7 +202,7 @@ extra_patterns = ["ACME-[0-9]{6}"]
     Pass **`--remote-url <URL>`** (the canonical policy URL, from your MDM) so
     the check fails if `remote.url` was **removed or repointed** to another
     policy server — otherwise the check trusts whatever URL the local config
-    declares. Example: `llm-monitor check --remote-url https://config.internal/llm-monitor.toml`
+    declares. Example: `argus check --remote-url https://config.internal/argus.toml`
 - **Offline / collector unreachable**: events keep flowing into the SQLite
   buffer (`<data-dir>/events.db`) instead of being dropped; `buffered events`
   in `status` grows. Once the collector is reachable again, the export loop's
@@ -214,16 +214,16 @@ extra_patterns = ["ACME-[0-9]{6}"]
   or briefly wedged). The daemon drains this directory every 5s once running;
   files with corrupt/unparseable content are dropped (logged as a warning)
   rather than blocking the drain loop.
-- **Hook not firing**: confirm `llm-monitor install` actually wrote entries —
-  check `~/.claude/settings.json` (`hooks.*`), `~/.config/opencode/plugin/llm-monitor.ts`,
+- **Hook not firing**: confirm `argus install` actually wrote entries —
+  check `~/.claude/settings.json` (`hooks.*`), `~/.config/opencode/plugin/argus.ts`,
   `~/.codex/config.toml` (`notify`, `[otel]`), `~/.codex/hooks.json`, or
-  `~/.copilot/hooks/llm-monitor.json`. Re-run `llm-monitor install`
+  `~/.copilot/hooks/argus.json`. Re-run `argus install`
   (idempotent) if entries are missing. Codex hooks additionally need one-time
-  trust: run `/hooks` inside Codex and trust the llm-monitor entries.
+  trust: run `/hooks` inside Codex and trust the argus entries.
 - **Codex config not touched**: install never overwrites an existing `notify`
   or `[otel]` block — it warns on stderr and leaves it alone so it can't
   silently break another integration. Remove the conflicting block manually
-  (or point it at llm-monitor yourself) if you want Codex wired.
+  (or point it at argus yourself) if you want Codex wired.
 
 ## Known limitations (v1)
 

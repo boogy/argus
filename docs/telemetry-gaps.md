@@ -95,7 +95,7 @@ fidelity fix in this list.
 
 ### 9. opencode drops model, token, and cost data it already receives
 
-The plugin forwards only `message.role` (`plugins/opencode/llm-monitor.ts:103`),
+The plugin forwards only `message.role` (`plugins/opencode/argus.ts:103`),
 but opencode's assistant message object carries `modelID`, `providerID`,
 token counts, and cost. That's per-turn usage telemetry — currently discarded
 in the shim, so no adapter change can recover it.

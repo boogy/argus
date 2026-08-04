@@ -9,7 +9,7 @@ use tokio::sync::mpsc::Sender;
 
 /// Parses either a flattened OTLP logRecord (`{"event_name": ..., "attributes": {...}}`)
 /// or a raw Codex `notify` payload (top-level `{"type": "agent-turn-complete", ...}`,
-/// delivered via `llm-monitor hook --source codex`).
+/// delivered via `argus hook --source codex`).
 pub fn parse(env: &Envelope, capture: &CaptureCfg) -> Vec<Event> {
     let p = &env.payload;
     // Codex's hooks system emits Claude-compatible payloads (hook_event_name,

@@ -12,12 +12,12 @@ pub fn to_otlp_body(events: &[Event]) -> Value {
     json!({
         "resourceLogs": [{
             "resource": { "attributes": [
-                attr("service.name", "llm-monitor"),
+                attr("service.name", "argus"),
                 attr("host.name", &host),
                 attr("user.name", &user),
             ]},
             "scopeLogs": [{
-                "scope": { "name": "llm-monitor", "version": env!("CARGO_PKG_VERSION") },
+                "scope": { "name": "argus", "version": env!("CARGO_PKG_VERSION") },
                 "logRecords": records
             }]
         }]

@@ -8,11 +8,11 @@ cookbook for investigating sessions, tools, files, and network activity locally.
 
 | Platform | Path                                                  |
 | -------- | ----------------------------------------------------- |
-| macOS    | `~/Library/Application Support/llm-monitor/events.db` |
-| Linux    | `~/.local/share/llm-monitor/events.db`                |
-| Windows  | `%APPDATA%\llm-monitor\events.db`                     |
+| macOS    | `~/Library/Application Support/argus/events.db` |
+| Linux    | `~/.local/share/argus/events.db`                |
+| Windows  | `%APPDATA%\argus\events.db`                     |
 
-`LLM_MONITOR_DATA_DIR` overrides the data dir. The file is `0600` (owner-only)
+`ARGUS_DATA_DIR` overrides the data dir. The file is `0600` (owner-only)
 on Unix because buffered rows may predate redaction config changes.
 
 ## Retention semantics — read this first
@@ -29,10 +29,10 @@ The DB runs in WAL mode. Reading while the daemon is running is safe, but:
 
 ```bash
 # always open read-only so you can't take a write lock under the daemon
-sqlite3 -readonly "~/Library/Application Support/llm-monitor/events.db"
+sqlite3 -readonly "~/Library/Application Support/argus/events.db"
 
 # for heavy analysis (or to create indexes), work on a snapshot instead
-sqlite3 "~/Library/Application Support/llm-monitor/events.db" ".backup /tmp/events-copy.db"
+sqlite3 "~/Library/Application Support/argus/events.db" ".backup /tmp/events-copy.db"
 ```
 
 ## Schema

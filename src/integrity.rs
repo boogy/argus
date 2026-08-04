@@ -5,10 +5,10 @@
 //! alive but deletes the `PreToolUse` hook from `~/.claude/settings.json`
 //! makes capture go blind while the process looks healthy — caught here by
 //! re-verifying, against the same wiring `install` writes, that every detected
-//! tool still carries the `llm-monitor` marker.
+//! tool still carries the `argus` marker.
 //!
 //! Two entry points share [`check`]: the daemon's [`integrity_loop`] (pushes
-//! `integrity` events to the SIEM) and [`check_and_report`] (the `llm-monitor
+//! `integrity` events to the SIEM) and [`check_and_report`] (the `argus
 //! check` CLI, pulled by an MDM/monitoring agent on the endpoint).
 
 use crate::buffer::Buffer;
@@ -18,7 +18,7 @@ use std::path::Path;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
-const MARKER: &str = "llm-monitor";
+const MARKER: &str = "argus";
 
 /// One tool's wiring status. `ok == false` means capture for `tool` is
 /// (partly) blind — wiring removed or altered.
@@ -44,7 +44,7 @@ pub fn check(home: &Path) -> Vec<Finding> {
     if home.join(".config/opencode").exists() {
         out.push(check_file(
             "opencode",
-            &home.join(".config/opencode/plugin/llm-monitor.ts"),
+            &home.join(".config/opencode/plugin/argus.ts"),
         ));
     }
     if home.join(".codex").exists() {
@@ -56,13 +56,13 @@ pub fn check(home: &Path) -> Vec<Finding> {
     }
     let copilot = crate::install::copilot_dir(home);
     if copilot.exists() {
-        out.push(check_file("copilot", &copilot.join("hooks/llm-monitor.json")));
+        out.push(check_file("copilot", &copilot.join("hooks/argus.json")));
     }
     out
 }
 
 /// A hooks JSON file (Claude Code `settings.json`, Codex `hooks.json`) is
-/// intact only if *every* expected event still carries an llm-monitor entry —
+/// intact only if *every* expected event still carries an argus entry —
 /// so removing even one event's wiring is caught, not just wiping the file.
 fn check_json_hooks<'a>(tool: &str, path: &Path, events: impl Iterator<Item = &'a str>) -> Finding {
     let broken = |detail: String| Finding {
@@ -194,7 +194,7 @@ fn diff_leaves(prefix: &str, policy: &toml::Table, effective: &toml::Table, out:
 }
 
 /// One-shot check for external monitors — e.g. an MDM compliance script (Jamf
-/// Extension Attribute / Intune) or any monitoring agent runs `llm-monitor
+/// Extension Attribute / Intune) or any monitoring agent runs `argus
 /// check` on its poll cycle. Runs the requested checks (both by default),
 /// prints one line per finding, and returns whether everything is intact; the
 /// caller maps that to an exit code. No daemon required — reads on-disk state.
@@ -229,7 +229,7 @@ pub fn check_and_report(
 
 fn finding_event(f: &Finding) -> Event {
     Event::new(
-        "llm-monitor",
+        "argus",
         None,
         None,
         EventKind::Integrity {
@@ -243,7 +243,7 @@ fn finding_event(f: &Finding) -> Event {
 /// Daemon task: periodically self-check wiring and buffer a finding for every
 /// *broken* tool (which then exports to the SIEM/collector like any event).
 /// Healthy tools emit nothing — an "ok" every interval would be pure noise;
-/// whether the daemon itself is alive is answered by `llm-monitor check` /
+/// whether the daemon itself is alive is answered by `argus check` /
 /// process monitoring, not here. A broken finding re-emits each cycle until
 /// re-install, keeping the alert live.
 pub async fn integrity_loop(shared: Arc<RwLock<Config>>, buffer: Arc<Buffer>) {
@@ -280,7 +280,7 @@ mod tests {
         for (event, _) in crate::install::CC_HOOKS {
             hooks.insert(
                 (*event).into(),
-                serde_json::json!([{ "hooks": [{ "command": "/opt/llm-monitor hook" }] }]),
+                serde_json::json!([{ "hooks": [{ "command": "/opt/argus hook" }] }]),
             );
         }
         std::fs::write(
@@ -339,7 +339,7 @@ mod tests {
     #[test]
     fn check_and_report_reflects_wiring() {
         let home = wired_claude_home();
-        std::env::set_var("LLM_MONITOR_HOME", home.path());
+        std::env::set_var("ARGUS_HOME", home.path());
         assert!(check_and_report(true, false, None), "fully wired => true");
         // strip one hook, as a tampering developer would
         let path = home.path().join(".claude/settings.json");
@@ -348,12 +348,12 @@ mod tests {
         doc["hooks"]["PreToolUse"] = serde_json::json!([]);
         std::fs::write(&path, doc.to_string()).unwrap();
         assert!(!check_and_report(true, false, None), "broken wiring => false");
-        std::env::remove_var("LLM_MONITOR_HOME");
+        std::env::remove_var("ARGUS_HOME");
     }
 
     fn set_data_dir() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("LLM_MONITOR_DATA_DIR", dir.path());
+        std::env::set_var("ARGUS_DATA_DIR", dir.path());
         std::fs::create_dir_all(dir.path()).unwrap();
         dir
     }

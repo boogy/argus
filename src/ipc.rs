@@ -13,7 +13,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 // `GenericFilePath` maps to a plain filesystem path for a Unix-domain socket on
 // Unix. On Windows, `interprocess`'s `GenericFilePath` only accepts paths already
 // shaped `\\.\pipe\...` (or `\\HOST\pipe\...`) and rejects everything else,
-// including arbitrary `LLM_MONITOR_SOCKET` overrides such as `C:\Temp\x.sock` or a
+// including arbitrary `ARGUS_SOCKET` overrides such as `C:\Temp\x.sock` or a
 // test's `temp_dir()` path. So on Windows we detect an already-pipe-shaped name and
 // pass it through via `GenericFilePath`; otherwise we take just the final path
 // component (stripping any directory) and map it via `GenericNamespaced`, which
@@ -51,7 +51,7 @@ pub fn send(envelope: &Envelope) -> Result<()> {
     Ok(())
 }
 
-/// Best-effort connectivity probe used by `llm-monitor status`: true if a
+/// Best-effort connectivity probe used by `argus status`: true if a
 /// daemon is currently listening on the configured socket. Opens and
 /// immediately drops the connection; sends nothing.
 pub fn is_daemon_running() -> bool {
@@ -115,7 +115,7 @@ mod tests {
     #[tokio::test]
     async fn shim_send_reaches_daemon_listener() {
         let sock = std::env::temp_dir().join(format!("lm-ipc-{}.sock", std::process::id()));
-        std::env::set_var("LLM_MONITOR_SOCKET", &sock);
+        std::env::set_var("ARGUS_SOCKET", &sock);
 
         let listener = Listener::bind().unwrap();
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);
@@ -137,7 +137,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(got.source, "claude-code");
-        std::env::remove_var("LLM_MONITOR_SOCKET");
+        std::env::remove_var("ARGUS_SOCKET");
     }
 
     /// A malformed (non-JSON) frame must be logged and dropped, not crash the
@@ -147,7 +147,7 @@ mod tests {
     async fn malformed_frame_is_dropped_without_crashing_loop() {
         let sock =
             std::env::temp_dir().join(format!("lm-ipc-malformed-{}.sock", std::process::id()));
-        std::env::set_var("LLM_MONITOR_SOCKET", &sock);
+        std::env::set_var("ARGUS_SOCKET", &sock);
 
         let listener = Listener::bind().unwrap();
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);
@@ -181,13 +181,13 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(got.source, "claude-code");
-        std::env::remove_var("LLM_MONITOR_SOCKET");
+        std::env::remove_var("ARGUS_SOCKET");
     }
 
     #[tokio::test]
     async fn second_bind_fails_while_daemon_alive() {
         let sock = std::env::temp_dir().join(format!("lm-ipc-guard-{}.sock", std::process::id()));
-        std::env::set_var("LLM_MONITOR_SOCKET", &sock);
+        std::env::set_var("ARGUS_SOCKET", &sock);
         let listener = Listener::bind().unwrap();
         let (tx, _rx) = tokio::sync::mpsc::channel(8);
         tokio::spawn(listener.accept_loop(tx));
@@ -197,6 +197,6 @@ mod tests {
             second.is_err(),
             "second bind must fail while first daemon is alive"
         );
-        std::env::remove_var("LLM_MONITOR_SOCKET");
+        std::env::remove_var("ARGUS_SOCKET");
     }
 }

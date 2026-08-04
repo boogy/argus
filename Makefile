@@ -1,11 +1,11 @@
-# llm-monitor — developer Makefile
+# argus — developer Makefile
 #
 # Tests run single-threaded via .cargo/config.toml (RUST_TEST_THREADS=1),
-# because several tests mutate process-global env vars (LLM_MONITOR_*).
+# because several tests mutate process-global env vars (ARGUS_*).
 # `cargo test` therefore needs no extra flags here.
 
 CARGO   ?= cargo
-BIN      = llm-monitor
+BIN      = argus
 RELEASE  = target/release/$(BIN)
 
 # Pretty-print available targets on a bare `make`.
@@ -63,7 +63,7 @@ verify: fmt-check lint test ## Full pre-commit gate: fmt-check + lint + test
 ## --- Tool wiring (uses the built binary) --------------------------------
 
 .PHONY: install
-install: release ## Wire llm-monitor into detected tools (Claude Code, opencode, Codex)
+install: release ## Wire argus into detected tools (Claude Code, opencode, Codex)
 	$(RELEASE) install
 
 .PHONY: install-dry-run
@@ -71,7 +71,7 @@ install-dry-run: release ## Show what `install` would change, without writing
 	$(RELEASE) install --dry-run
 
 .PHONY: uninstall
-uninstall: release ## Remove llm-monitor wiring from all tools
+uninstall: release ## Remove argus wiring from all tools
 	$(RELEASE) uninstall
 
 .PHONY: status
