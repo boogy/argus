@@ -137,6 +137,15 @@ impl Default for IntegrityCfg {
 /// with a warning instead of poisoning the whole merged config back to
 /// `Config::default()`.
 pub fn load() -> Config {
+    merged_table().try_into::<Config>().unwrap_or_default()
+}
+
+/// The merged config as a raw TOML table (defaults omitted — only what the
+/// files actually set), same precedence as `load`: local file, then cached
+/// remote (remote wins). Exposed so the integrity check can compare the
+/// *effective* config against the remote policy without re-implementing the
+/// merge.
+pub fn merged_table() -> toml::Table {
     let mut merged = toml::Table::new();
     for path in [
         crate::paths::config_path(),
@@ -163,7 +172,7 @@ pub fn load() -> Config {
             Err(e) => tracing::warn!("ignoring config {path:?}: merge invalidates config: {e}"),
         }
     }
-    merged.try_into::<Config>().unwrap_or_default()
+    merged
 }
 
 fn deep_merge(base: &mut toml::Table, over: toml::Table) {

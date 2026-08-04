@@ -1,5 +1,8 @@
 .claude/worktrees
 /target
+
+# Company-restricted deployment artifacts — keep out of this repo
+deploy/
 /.superpowers
 .superpowers/
 docs/superpowers/

@@ -33,10 +33,23 @@ enum Cmd {
     Uninstall,
     /// Show daemon/config status.
     Status,
-    /// One-shot hook-wiring self-check for MDM/monitoring (e.g. Jamf, Intune).
-    /// Prints one line per detected tool; exits 0 if all intact, 2 if any
-    /// wiring is missing or altered. No daemon required.
-    Check,
+    /// One-shot integrity self-check for MDM/monitoring (e.g. Jamf, Intune).
+    /// Verifies hook wiring AND that remote policy is loaded and effective.
+    /// With no flag, checks both. Exits 0 if intact, 2 if anything is broken.
+    /// No daemon required.
+    Check {
+        /// Check only the tool hook/plugin wiring.
+        #[arg(long)]
+        hooks: bool,
+        /// Check only that remote config policy is loaded and effective.
+        #[arg(long)]
+        config: bool,
+        /// Canonical policy URL the monitor (MDM) expects. When set, the config
+        /// check fails unless the running remote.url matches it exactly —
+        /// catching a removed or repointed remote.url. Pass this from your MDM.
+        #[arg(long)]
+        remote_url: Option<String>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -55,13 +68,29 @@ fn main() -> Result<()> {
         Cmd::Install { dry_run } => llm_monitor::install::run(dry_run)?,
         Cmd::Uninstall => llm_monitor::install::uninstall()?,
         Cmd::Status => print_status()?,
-        Cmd::Check => {
-            // Exit code is the contract for monitors: 0 = intact, 2 = tampered.
-            std::process::exit(if llm_monitor::integrity::check_and_report() {
-                0
+        Cmd::Check {
+            hooks,
+            config,
+            remote_url,
+        } => {
+            // No flag = check everything.
+            let (do_hooks, do_config) = if !hooks && !config {
+                (true, true)
             } else {
-                2
-            });
+                (hooks, config)
+            };
+            // Exit code is the contract for monitors: 0 = intact, 2 = broken.
+            std::process::exit(
+                if llm_monitor::integrity::check_and_report(
+                    do_hooks,
+                    do_config,
+                    remote_url.as_deref(),
+                ) {
+                    0
+                } else {
+                    2
+                },
+            );
         }
     }
     Ok(())

@@ -101,16 +101,118 @@ fn check_file(tool: &str, path: &Path) -> Finding {
     }
 }
 
+/// Config integrity: verify that the fleet's *remote policy* is loaded and
+/// effective, and flag any place the effective config deviates from it.
+///
+/// The point is not to spot-check individual keys (a determined user just
+/// disables the one that matters) but to confirm policy is in force. Because
+/// the loader is `defaults <- local <- remote` with remote winning, a value
+/// the policy sets *cannot* be weakened locally — so if the policy is loaded
+/// and every policy key is reflected in the effective config, tampering is
+/// inert. Findings are raised when:
+///   - no `[remote].url` is configured (host isn't policy-managed);
+///   - the remote cache is missing (policy never fetched — running on
+///     local/defaults) or invalid (skipped by the loader);
+///   - any policy key is not reflected in the effective config (policy
+///     present but not effective).
+///
+/// `expected_url` is the canonical policy URL, passed by the monitor (MDM) —
+/// NOT read from the local config, which the user controls. When set, the
+/// running `remote.url` must match it exactly, so **removing or repointing**
+/// `remote.url` (to a permissive attacker-controlled policy) is caught. When
+/// absent, we only require *some* `remote.url` (weaker — a repoint slips past).
+pub fn check_config(expected_url: Option<&str>) -> Vec<Finding> {
+    let broken = |d: String| {
+        vec![Finding {
+            tool: "config".into(),
+            ok: false,
+            detail: d,
+        }]
+    };
+    let cfg = crate::config::load();
+    let url = cfg.remote.url.as_deref();
+    if let Some(exp) = expected_url {
+        if url != Some(exp) {
+            return broken(format!(
+                "remote.url is {url:?}, expected {exp} — removed or repointed"
+            ));
+        }
+    } else if url.is_none() {
+        return broken("no [remote].url — host is not policy-managed; local config is authoritative".into());
+    }
+    let cache = crate::paths::cached_remote_config_path();
+    let Ok(text) = std::fs::read_to_string(&cache) else {
+        return broken("remote policy not loaded (no cache) — running on local/defaults".into());
+    };
+    let policy = match text.parse::<toml::Table>() {
+        Ok(t) => t,
+        Err(e) => return broken(format!("remote policy cache is invalid TOML, not applied: {e}")),
+    };
+    if policy.clone().try_into::<crate::config::Config>().is_err() {
+        return broken("remote policy cache is type-invalid — skipped by the loader, not effective".into());
+    }
+    // Every leaf the policy sets must be reflected in the effective config.
+    let effective = crate::config::merged_table();
+    let mut deviations = Vec::new();
+    diff_leaves("", &policy, &effective, &mut deviations);
+    if deviations.is_empty() {
+        vec![Finding {
+            tool: "config".into(),
+            ok: true,
+            detail: "remote policy loaded and effective".into(),
+        }]
+    } else {
+        deviations
+            .into_iter()
+            .map(|d| Finding {
+                tool: "config".into(),
+                ok: false,
+                detail: format!("policy not effective: {d}"),
+            })
+            .collect()
+    }
+}
+
+/// Recurse the policy table; for every leaf key, record a deviation when the
+/// effective config's value at the same path differs (or is absent).
+fn diff_leaves(prefix: &str, policy: &toml::Table, effective: &toml::Table, out: &mut Vec<String>) {
+    for (k, pv) in policy {
+        let path = if prefix.is_empty() {
+            k.clone()
+        } else {
+            format!("{prefix}.{k}")
+        };
+        match (pv, effective.get(k)) {
+            (toml::Value::Table(pt), Some(toml::Value::Table(et))) => {
+                diff_leaves(&path, pt, et, out)
+            }
+            (_, Some(ev)) if ev == pv => {}
+            (_, Some(ev)) => out.push(format!("{path} (effective={ev}, policy={pv})")),
+            (_, None) => out.push(format!("{path} (missing from effective config)")),
+        }
+    }
+}
+
 /// One-shot check for external monitors — e.g. an MDM compliance script (Jamf
 /// Extension Attribute / Intune) or any monitoring agent runs `llm-monitor
-/// check` on its poll cycle. Prints one line per detected tool and returns
-/// whether every tool is intact; the caller maps that to an exit code. No
-/// daemon required — this reads the on-disk wiring directly.
-pub fn check_and_report() -> bool {
-    let findings = check(&crate::install::home());
-    if findings.is_empty() {
-        println!("llm-monitor: no supported tools detected");
-        return true;
+/// check` on its poll cycle. Runs the requested checks (both by default),
+/// prints one line per finding, and returns whether everything is intact; the
+/// caller maps that to an exit code. No daemon required — reads on-disk state.
+pub fn check_and_report(
+    do_hooks: bool,
+    do_config: bool,
+    expected_remote_url: Option<&str>,
+) -> bool {
+    let mut findings = Vec::new();
+    if do_hooks {
+        let hooks = check(&crate::install::home());
+        if hooks.is_empty() {
+            println!("hooks: ok (no supported tools detected)");
+        }
+        findings.extend(hooks);
+    }
+    if do_config {
+        findings.extend(check_config(expected_remote_url));
     }
     let mut all_ok = true;
     for f in &findings {
@@ -238,15 +340,105 @@ mod tests {
     fn check_and_report_reflects_wiring() {
         let home = wired_claude_home();
         std::env::set_var("LLM_MONITOR_HOME", home.path());
-        assert!(check_and_report(), "fully wired => true");
+        assert!(check_and_report(true, false, None), "fully wired => true");
         // strip one hook, as a tampering developer would
         let path = home.path().join(".claude/settings.json");
         let mut doc: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         doc["hooks"]["PreToolUse"] = serde_json::json!([]);
         std::fs::write(&path, doc.to_string()).unwrap();
-        assert!(!check_and_report(), "broken wiring => false");
+        assert!(!check_and_report(true, false, None), "broken wiring => false");
         std::env::remove_var("LLM_MONITOR_HOME");
+    }
+
+    fn set_data_dir() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("LLM_MONITOR_DATA_DIR", dir.path());
+        std::fs::create_dir_all(dir.path()).unwrap();
+        dir
+    }
+
+    #[test]
+    fn config_flags_when_no_remote_url() {
+        let _d = set_data_dir();
+        std::fs::write(crate::paths::config_path(), "[capture]\nprompts = true\n").unwrap();
+        let f = &check_config(None)[0];
+        assert!(!f.ok);
+        assert!(f.detail.contains("not policy-managed"), "detail: {}", f.detail);
+    }
+
+    #[test]
+    fn config_flags_when_remote_set_but_no_cache() {
+        let _d = set_data_dir();
+        std::fs::write(crate::paths::config_path(), "[remote]\nurl = \"https://p\"\n").unwrap();
+        let f = &check_config(None)[0];
+        assert!(!f.ok);
+        assert!(f.detail.contains("no cache"), "detail: {}", f.detail);
+    }
+
+    #[test]
+    fn config_ok_when_policy_loaded_and_effective() {
+        let _d = set_data_dir();
+        std::fs::write(crate::paths::config_path(), "[remote]\nurl = \"https://p\"\n").unwrap();
+        std::fs::write(
+            crate::paths::cached_remote_config_path(),
+            "[capture]\ntool_inputs = false\n[redaction]\nenabled = true\n",
+        )
+        .unwrap();
+        let fs = check_config(None);
+        assert!(fs.iter().all(|f| f.ok), "expected ok, got {fs:?}");
+        assert!(fs[0].detail.contains("effective"));
+    }
+
+    #[test]
+    fn config_flags_repointed_remote_url() {
+        let _d = set_data_dir();
+        // user repoints policy to their own permissive server
+        std::fs::write(
+            crate::paths::config_path(),
+            "[remote]\nurl = \"https://evil.example/policy.toml\"\n",
+        )
+        .unwrap();
+        let f = &check_config(Some("https://config.internal/llm.toml"))[0];
+        assert!(!f.ok);
+        assert!(f.detail.contains("expected"), "detail: {}", f.detail);
+    }
+
+    #[test]
+    fn config_ok_when_remote_url_matches_expected() {
+        let _d = set_data_dir();
+        let url = "https://config.internal/llm.toml";
+        std::fs::write(
+            crate::paths::config_path(),
+            format!("[remote]\nurl = \"{url}\"\n"),
+        )
+        .unwrap();
+        std::fs::write(crate::paths::cached_remote_config_path(), "[redaction]\nenabled = true\n").unwrap();
+        let fs = check_config(Some(url));
+        assert!(fs.iter().all(|f| f.ok), "expected ok, got {fs:?}");
+    }
+
+    #[test]
+    fn local_tamper_is_inert_under_policy() {
+        let _d = set_data_dir();
+        // A user tries to disable capture locally...
+        std::fs::write(
+            crate::paths::config_path(),
+            "[remote]\nurl = \"https://p\"\n[capture]\ntool_inputs = false\n",
+        )
+        .unwrap();
+        // ...but policy sets it true; remote wins, so the tamper is inert.
+        std::fs::write(
+            crate::paths::cached_remote_config_path(),
+            "[capture]\ntool_inputs = true\n",
+        )
+        .unwrap();
+        assert!(
+            crate::config::load().capture.tool_inputs,
+            "policy must override the local tamper"
+        );
+        let fs = check_config(None);
+        assert!(fs.iter().all(|f| f.ok), "policy effective => ok: {fs:?}");
     }
 
     #[test]

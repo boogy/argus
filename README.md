@@ -185,12 +185,24 @@ extra_patterns = ["ACME-[0-9]{6}"]
 - `llm-monitor status` — prints the resolved data dir, effective config
   (endpoint, batch size, flush interval, redaction on/off), buffered event
   count, and whether the daemon socket is reachable.
-- `llm-monitor check` — one-shot hook-wiring self-check for fleet monitoring.
-  Prints one line per detected tool and exits `0` (all intact) or `2` (wiring
-  missing/altered). No daemon required. Intended for an MDM compliance script
-  (Jamf Extension Attribute / Intune) or any monitoring agent run on the
-  endpoint's poll cycle — the pull-based counterpart to the daemon's
-  `integrity` events.
+- `llm-monitor check` — one-shot integrity self-check for fleet monitoring;
+  exits `0` (intact) or `2` (something broken). No daemon required. Intended for
+  an MDM compliance script (Jamf Extension Attribute / Intune) or any monitoring
+  agent on the endpoint's poll cycle — the pull-based counterpart to the
+  daemon's `integrity` events. Checks two things (both by default; scope with
+  `--hooks` / `--config`):
+  - **hooks** — each detected tool still carries the `llm-monitor` wiring.
+  - **config** — a remote policy (`[remote].url`) is loaded and effective, and
+    the effective config matches it. Fails if the host isn't policy-managed, the
+    policy never loaded (no/invalid cache → running on local/defaults), or a
+    policy key isn't reflected. Note: because the loader is
+    `defaults < local < remote`, a value the policy sets can't be weakened
+    locally — so this verifies policy is *in force* rather than spot-checking
+    individual keys (which a targeted edit would slip past).
+    Pass **`--remote-url <URL>`** (the canonical policy URL, from your MDM) so
+    the check fails if `remote.url` was **removed or repointed** to another
+    policy server — otherwise the check trusts whatever URL the local config
+    declares. Example: `llm-monitor check --remote-url https://config.internal/llm-monitor.toml`
 - **Offline / collector unreachable**: events keep flowing into the SQLite
   buffer (`<data-dir>/events.db`) instead of being dropped; `buffered events`
   in `status` grows. Once the collector is reachable again, the export loop's
