@@ -50,14 +50,14 @@ mod tests {
 
     #[test]
     fn data_dir_respects_env_override() {
-        std::env::set_var("ARGUS_DATA_DIR", "/tmp/lmtest");
+        unsafe { std::env::set_var("ARGUS_DATA_DIR", "/tmp/lmtest"); }
         assert_eq!(data_dir(), std::path::PathBuf::from("/tmp/lmtest"));
-        std::env::remove_var("ARGUS_DATA_DIR");
+        unsafe { std::env::remove_var("ARGUS_DATA_DIR"); }
     }
 
     #[test]
     fn derived_paths_live_under_data_dir() {
-        std::env::set_var("ARGUS_DATA_DIR", "/tmp/lmtest");
+        unsafe { std::env::set_var("ARGUS_DATA_DIR", "/tmp/lmtest"); }
         assert_eq!(spool_dir(), data_dir().join("spool"));
         assert_eq!(db_path(), data_dir().join("events.db"));
         assert_eq!(config_path(), data_dir().join("config.toml"));
@@ -66,6 +66,6 @@ mod tests {
             data_dir().join("remote-config.cache.toml")
         );
         assert!(!socket_name().is_empty());
-        std::env::remove_var("ARGUS_DATA_DIR");
+        unsafe { std::env::remove_var("ARGUS_DATA_DIR"); }
     }
 }

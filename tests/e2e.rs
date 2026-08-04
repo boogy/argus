@@ -6,11 +6,15 @@
 #[tokio::test(flavor = "multi_thread")]
 async fn hook_event_flows_to_mock_collector() {
     let dir = tempfile::tempdir().unwrap();
-    std::env::set_var("ARGUS_DATA_DIR", dir.path());
-    std::env::set_var(
-        "ARGUS_SOCKET",
-        std::env::temp_dir().join(format!("lm-e2e-{}.sock", std::process::id())),
-    );
+    // edition 2024: env mutators are unsafe (not thread-safe); fine in this test
+    // which sets them before spawning anything.
+    unsafe {
+        std::env::set_var("ARGUS_DATA_DIR", dir.path());
+        std::env::set_var(
+            "ARGUS_SOCKET",
+            std::env::temp_dir().join(format!("lm-e2e-{}.sock", std::process::id())),
+        );
+    }
 
     // Mock OTLP collector.
     let server = tiny_http::Server::http("127.0.0.1:0").unwrap();

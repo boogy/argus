@@ -62,7 +62,7 @@ mod tests {
 
     fn setup() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("ARGUS_DATA_DIR", dir.path());
+        unsafe { std::env::set_var("ARGUS_DATA_DIR", dir.path()); }
         dir
     }
 

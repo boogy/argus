@@ -386,11 +386,11 @@ mod tests {
 
     fn fake_home() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("ARGUS_HOME", dir.path());
+        unsafe { std::env::set_var("ARGUS_HOME", dir.path()); }
         // install_codex now reads config::load(), which in turn reads
         // ARGUS_DATA_DIR; isolate it so tests never pick up a real
         // on-disk config.
-        std::env::set_var("ARGUS_DATA_DIR", dir.path().join("data"));
+        unsafe { std::env::set_var("ARGUS_DATA_DIR", dir.path().join("data")); }
         std::fs::create_dir_all(dir.path().join(".claude")).unwrap();
         std::fs::create_dir_all(dir.path().join(".config/opencode")).unwrap();
         std::fs::create_dir_all(dir.path().join(".codex")).unwrap();

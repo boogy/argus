@@ -339,7 +339,7 @@ mod tests {
     #[test]
     fn check_and_report_reflects_wiring() {
         let home = wired_claude_home();
-        std::env::set_var("ARGUS_HOME", home.path());
+        unsafe { std::env::set_var("ARGUS_HOME", home.path()); }
         assert!(check_and_report(true, false, None), "fully wired => true");
         // strip one hook, as a tampering developer would
         let path = home.path().join(".claude/settings.json");
@@ -348,12 +348,12 @@ mod tests {
         doc["hooks"]["PreToolUse"] = serde_json::json!([]);
         std::fs::write(&path, doc.to_string()).unwrap();
         assert!(!check_and_report(true, false, None), "broken wiring => false");
-        std::env::remove_var("ARGUS_HOME");
+        unsafe { std::env::remove_var("ARGUS_HOME"); }
     }
 
     fn set_data_dir() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("ARGUS_DATA_DIR", dir.path());
+        unsafe { std::env::set_var("ARGUS_DATA_DIR", dir.path()); }
         std::fs::create_dir_all(dir.path()).unwrap();
         dir
     }

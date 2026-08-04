@@ -115,7 +115,7 @@ mod tests {
     #[tokio::test]
     async fn shim_send_reaches_daemon_listener() {
         let sock = std::env::temp_dir().join(format!("lm-ipc-{}.sock", std::process::id()));
-        std::env::set_var("ARGUS_SOCKET", &sock);
+        unsafe { std::env::set_var("ARGUS_SOCKET", &sock); }
 
         let listener = Listener::bind().unwrap();
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);
@@ -137,7 +137,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(got.source, "claude-code");
-        std::env::remove_var("ARGUS_SOCKET");
+        unsafe { std::env::remove_var("ARGUS_SOCKET"); }
     }
 
     /// A malformed (non-JSON) frame must be logged and dropped, not crash the
@@ -147,7 +147,7 @@ mod tests {
     async fn malformed_frame_is_dropped_without_crashing_loop() {
         let sock =
             std::env::temp_dir().join(format!("lm-ipc-malformed-{}.sock", std::process::id()));
-        std::env::set_var("ARGUS_SOCKET", &sock);
+        unsafe { std::env::set_var("ARGUS_SOCKET", &sock); }
 
         let listener = Listener::bind().unwrap();
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);
@@ -181,13 +181,13 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(got.source, "claude-code");
-        std::env::remove_var("ARGUS_SOCKET");
+        unsafe { std::env::remove_var("ARGUS_SOCKET"); }
     }
 
     #[tokio::test]
     async fn second_bind_fails_while_daemon_alive() {
         let sock = std::env::temp_dir().join(format!("lm-ipc-guard-{}.sock", std::process::id()));
-        std::env::set_var("ARGUS_SOCKET", &sock);
+        unsafe { std::env::set_var("ARGUS_SOCKET", &sock); }
         let listener = Listener::bind().unwrap();
         let (tx, _rx) = tokio::sync::mpsc::channel(8);
         tokio::spawn(listener.accept_loop(tx));
@@ -197,6 +197,6 @@ mod tests {
             second.is_err(),
             "second bind must fail while first daemon is alive"
         );
-        std::env::remove_var("ARGUS_SOCKET");
+        unsafe { std::env::remove_var("ARGUS_SOCKET"); }
     }
 }
