@@ -1,0 +1,30 @@
+# Lessons
+
+Mistake patterns encountered while executing
+`/Users/bogdan/.claude/plans/how-can-we-better-elegant-engelbart.md`, encoded
+as rules. Append a short entry (what happened, the rule) after each
+correction; keep entries terse.
+
+- **Never undo an edit with a git command.** `git checkout <file>`, `git
+  restore <file>`, `git stash`, and `git reset --hard` act on the index, not
+  the specific edit — they silently take unrelated uncommitted work with
+  them. Undo an edit the same way it was made (reverse the `Edit`, or `cp`
+  from a backup). Commit real work before introducing a temporary/
+  experimental change into the same file; if committing isn't possible, back
+  the file up outside the repo first.
+
+- **A red commit poisons the resume signal.** Every task must reach a green
+  `make verify` before it is committed. A task that cannot get there is
+  reported back unfinished, never committed broken — the next session trusts
+  `git log` as ground truth.
+
+- **Neutralize, don't delete, when disabling code temporarily.** `if false
+  && cond {` beats deleting the block: deleting orphans imports, breaks the
+  build, and invites a destructive "just reset it" shortcut.
+
+- **`develop` was never verified on the current toolchain** — the edition-2024
+  adoption commit (`8c8b3fd`) did not re-run `cargo fmt`, and a newer clippy
+  added the `collapsible_if` lint (let-chains), which the existing code
+  tripped in 7 places. A green `make verify` gate is worthless if the
+  baseline was never green; verify the baseline before trusting it as a
+  per-task gate.
