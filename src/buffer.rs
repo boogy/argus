@@ -206,16 +206,45 @@ impl Buffer {
         })
     }
 
-    pub fn peek_batch(&self, n: usize) -> Result<Vec<(i64, Event)>> {
+    /// The oldest events, bounded by both a row count and a byte budget.
+    ///
+    /// The budget is computed in SQL rather than by parsing rows and adding
+    /// them up, so an oversized backlog costs one query instead of a
+    /// deserialize-then-discard pass over rows the batch cannot carry anyway.
+    ///
+    /// The first row is always returned, even when it alone exceeds the budget.
+    /// A batch that would otherwise be empty is a queue that never moves: the
+    /// oversized event would be re-peeked forever and everything behind it
+    /// would age out. Sent alone, a collector that cannot take it refuses it,
+    /// and a refusal is settled (see `export_once`) rather than retried.
+    pub fn peek_batch(&self, n: usize, max_bytes: u64) -> Result<Vec<(i64, Event)>> {
         // Read out the rows, then drop the connection before parsing them.
         // Deserializing a full batch is the expensive half of this call, and
         // it needs no database at all — holding the lock across it stalls
         // every arriving event behind the export loop's JSON work.
+        // 0 is the "no budget" spelling used by the size caps elsewhere in the
+        // config, and SQLite's integers are signed, so both meet at i64::MAX.
+        let budget = match max_bytes {
+            0 => i64::MAX,
+            n => n.min(i64::MAX as u64) as i64,
+        };
         let rows: Vec<(i64, String)> = {
             let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-            let mut stmt =
-                conn.prepare_cached("SELECT seq, body FROM events ORDER BY seq ASC LIMIT ?1")?;
-            let mapped = stmt.query_map([n as i64], |row| {
+            // `running` is monotonic over `seq`, so the rows that pass the
+            // budget test are always a prefix — no gap can open in the middle
+            // and hand the exporter a non-contiguous batch that `ack` would
+            // then delete rows out of.
+            let mut stmt = conn.prepare_cached(
+                "SELECT seq, body FROM (
+                     SELECT seq, body,
+                            SUM(LENGTH(CAST(body AS BLOB))) OVER (ORDER BY seq ASC) AS running,
+                            ROW_NUMBER() OVER (ORDER BY seq ASC) AS rn
+                     FROM (SELECT seq, body FROM events ORDER BY seq ASC LIMIT ?1)
+                 )
+                 WHERE running <= ?2 OR rn = 1
+                 ORDER BY seq ASC",
+            )?;
+            let mapped = stmt.query_map(rusqlite::params![n as i64, budget], |row| {
                 Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
             })?;
             mapped.collect::<rusqlite::Result<Vec<_>>>()?
@@ -256,9 +285,14 @@ impl Buffer {
     }
 }
 
+/// `LENGTH` on a TEXT value counts *characters*, and every size in this file is
+/// quoted in bytes — to the user in `buffer.max_bytes`, and to a collector that
+/// rejects on request size. A buffer of CJK or emoji-bearing prompts was
+/// therefore holding up to three times the bytes it was told to. The `CAST` to
+/// BLOB is what makes `LENGTH` count octets.
 fn total_bytes(conn: &Connection) -> Result<u64> {
     let n: i64 = conn.query_row(
-        "SELECT COALESCE(SUM(LENGTH(body)), 0) FROM events",
+        "SELECT COALESCE(SUM(LENGTH(CAST(body AS BLOB))), 0) FROM events",
         [],
         |r| r.get(0),
     )?;
@@ -282,7 +316,7 @@ fn trim_to_bytes(conn: &Connection, max_bytes: u64) -> Result<usize> {
              WHERE seq < (SELECT MAX(seq) FROM events)
                AND seq <= (
                    SELECT MAX(seq) FROM (
-                       SELECT seq, SUM(LENGTH(body)) OVER (ORDER BY seq DESC) AS running
+                       SELECT seq, SUM(LENGTH(CAST(body AS BLOB))) OVER (ORDER BY seq DESC) AS running
                        FROM events
                    ) WHERE running > ?1
                )",
@@ -334,7 +368,7 @@ mod tests {
         for i in 0..5 {
             b.push(&ev(i)).unwrap();
         }
-        let batch = b.peek_batch(3).unwrap();
+        let batch = b.peek_batch(3, 0).unwrap();
         assert_eq!(batch.len(), 3);
         assert_eq!(b.len().unwrap(), 5, "peek must not delete");
         b.ack(batch.last().unwrap().0).unwrap();
@@ -352,7 +386,7 @@ mod tests {
             b.push(&ev(i)).unwrap();
         }
         assert_eq!(b.len().unwrap(), 3);
-        let batch = b.peek_batch(10).unwrap();
+        let batch = b.peek_batch(10, 0).unwrap();
         let first = serde_json::to_string(&batch[0].1).unwrap();
         assert!(first.contains("p2"), "oldest two dropped, got {first}");
     }
@@ -389,7 +423,7 @@ mod tests {
             "one trim per batch, not one per event"
         );
         assert_eq!(b.len().unwrap(), 3, "the cap still holds across a batch");
-        let kept = b.peek_batch(10).unwrap();
+        let kept = b.peek_batch(10, 0).unwrap();
         let first = serde_json::to_string(&kept[0].1).unwrap();
         assert!(first.contains("p2"), "oldest two dropped, got {first}");
     }
@@ -411,7 +445,7 @@ mod tests {
             "two events were destroyed and nothing said so"
         );
         let loss = b
-            .peek_batch(10)
+            .peek_batch(10, 0)
             .unwrap()
             .into_iter()
             .map(|(_, e)| e)
@@ -479,7 +513,7 @@ mod tests {
                 .unwrap();
         }
         b.push(&ev(2)).unwrap();
-        let batch = b.peek_batch(10).unwrap();
+        let batch = b.peek_batch(10, 0).unwrap();
         assert_eq!(batch.len(), 2, "corrupt row skipped, valid rows returned");
     }
 
@@ -522,6 +556,119 @@ mod tests {
         b.push(&ev(1)).unwrap();
         b.push(&ev(2)).unwrap();
         assert_eq!(b.len().unwrap(), 1, "the newest event must survive");
+    }
+
+    /// The stored size of a peeked row.
+    fn body_len(row: &(i64, Event)) -> u64 {
+        serde_json::to_string(&row.1).unwrap().len() as u64
+    }
+
+    /// An event whose serialized body is one prompt of `n` euro signs: three
+    /// bytes per character, so byte and character counts diverge by design.
+    fn multibyte(n: usize) -> Event {
+        Event::new(
+            "claude-code",
+            None,
+            None,
+            EventKind::Prompt {
+                text: "€".repeat(n),
+            },
+        )
+    }
+
+    /// A batch is bounded by bytes as well as by rows, because a collector
+    /// rejects on request size and 256 events say nothing about it.
+    #[test]
+    fn a_batch_stops_at_the_byte_budget() {
+        let _dir = tmp();
+        let b = Buffer::open(&rows(1000)).unwrap();
+        for i in 0..10 {
+            b.push(&ev(i)).unwrap();
+        }
+        // Summed from the stored bodies rather than assumed uniform: a
+        // timestamp serializes to a different width from one event to the next.
+        let three: u64 = b.peek_batch(3, 0).unwrap().iter().map(body_len).sum();
+
+        let batch = b.peek_batch(10, three).unwrap();
+        assert_eq!(batch.len(), 3, "the budget, not the row cap, must bind");
+        assert_eq!(batch[0].0, 1, "and it must be the oldest events");
+        assert_eq!(
+            b.peek_batch(2, three).unwrap().len(),
+            2,
+            "the row cap still binds when it is the tighter of the two"
+        );
+        assert_eq!(b.peek_batch(10, 0).unwrap().len(), 10, "0 = no budget");
+    }
+
+    /// A single event over the whole budget must still leave, or the queue
+    /// stops: it would be re-peeked forever and everything behind it would age
+    /// out. Alone, a collector that cannot take it refuses it, and a refusal is
+    /// settled rather than retried.
+    #[test]
+    fn an_event_larger_than_the_budget_is_sent_alone_rather_than_stuck() {
+        let _dir = tmp();
+        let b = Buffer::open(&rows(1000)).unwrap();
+        b.push(&multibyte(4096)).unwrap();
+        b.push(&ev(2)).unwrap();
+        let batch = b.peek_batch(10, 1).unwrap();
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch[0].0, 1, "the head of the queue, not a smaller row");
+    }
+
+    /// Every size here is quoted in bytes — to the operator in
+    /// `buffer.max_bytes`, and to a collector that rejects on request size.
+    /// SQLite's `LENGTH` counts characters, so a buffer of CJK or emoji-bearing
+    /// prompts held up to three times what it was told to.
+    #[test]
+    fn sizes_are_counted_in_bytes_not_characters() {
+        let _dir = tmp();
+        let e = multibyte(1000);
+        let body = serde_json::to_string(&e).unwrap();
+        let (bytes, chars) = (body.len() as u64, body.chars().count() as u64);
+        assert!(bytes > chars, "the fixture must actually be multi-byte");
+
+        let b = Buffer::open(&rows(1000)).unwrap();
+        b.push(&e).unwrap();
+        b.push(&e).unwrap();
+        assert_eq!(
+            b.peek_batch(10, chars * 2).unwrap().len(),
+            1,
+            "a budget of two bodies' worth of characters holds one body"
+        );
+
+        // …and the same for the cap that decides what is kept at all.
+        let capped = Buffer::open(&BufferCfg {
+            max_events: 1_000_000,
+            max_bytes: chars * 2,
+        })
+        .unwrap();
+        capped.push(&e).unwrap();
+        capped.push(&e).unwrap();
+        assert_eq!(
+            capped.len().unwrap(),
+            1,
+            "the byte cap kept two bodies it was told were too big"
+        );
+    }
+
+    /// The in-memory running total is seeded and re-seeded from this query,
+    /// and it is allowed to drift only *upward*: an overestimate costs an early
+    /// trim, an underestimate silently holds more than the cap allows.
+    #[test]
+    fn the_running_byte_total_is_measured_in_bytes() {
+        let _dir = tmp();
+        let b = Buffer::open(&rows(1000)).unwrap();
+        let mut expected = 0u64;
+        for n in [400, 800, 1200] {
+            let e = multibyte(n);
+            expected += serde_json::to_string(&e).unwrap().len() as u64;
+            b.push(&e).unwrap();
+        }
+        assert_eq!(
+            total_bytes(&b.conn.lock().unwrap()).unwrap(),
+            expected,
+            "the total the cap is compared against must be the total on disk"
+        );
     }
 
     /// A cap that only applies at startup is no use to the operator raising it

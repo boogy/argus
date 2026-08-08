@@ -35,6 +35,13 @@ pub struct ExportCfg {
     pub otlp_endpoint: Option<String>,
     pub headers: BTreeMap<String, String>,
     pub batch_size: usize,
+    /// Ceiling on the serialized size of one export batch, in bytes. 0 =
+    /// unlimited.
+    ///
+    /// A count of events says nothing about the size of a request: 256 tool
+    /// results carrying file contents are three orders of magnitude larger than
+    /// 256 prompts, and collectors reject on bytes, not on rows.
+    pub max_batch_bytes: u64,
     pub flush_interval_secs: u64,
 }
 impl Default for ExportCfg {
@@ -43,6 +50,9 @@ impl Default for ExportCfg {
             otlp_endpoint: None,
             headers: BTreeMap::new(),
             batch_size: 256,
+            // Under the 4 MiB default request limit of the OTel Collector's
+            // HTTP receiver, with room for the OTLP envelope around the bodies.
+            max_batch_bytes: 3 * 1024 * 1024,
             flush_interval_secs: 10,
         }
     }

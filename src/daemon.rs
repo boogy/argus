@@ -24,6 +24,12 @@ fn effective_batch_size(cfg: &ExportCfg) -> usize {
     }
 }
 
+/// Both bounds on one batch. The row count is what the user tunes; the byte
+/// budget is what the collector actually enforces.
+fn batch_bounds(cfg: &ExportCfg) -> (usize, u64) {
+    (effective_batch_size(cfg), cfg.max_batch_bytes)
+}
+
 pub async fn run() -> Result<()> {
     // Single-instance guard: if another daemon already holds the socket, exit
     // cleanly rather than fighting over it.
@@ -146,11 +152,11 @@ pub async fn run() -> Result<()> {
 async fn export_loop(buffer: Arc<Buffer>, cfg: Arc<RwLock<config::Config>>) {
     let mut backoff = 1u64;
     loop {
-        let (flush, batch_size, exporter) = {
+        let (flush, bounds, exporter) = {
             let export_cfg = with_cfg(&cfg, |c| c.export.clone());
             (
                 effective_flush_secs(&export_cfg),
-                effective_batch_size(&export_cfg),
+                batch_bounds(&export_cfg),
                 Exporter::new(&export_cfg),
             )
         };
@@ -158,7 +164,7 @@ async fn export_loop(buffer: Arc<Buffer>, cfg: Arc<RwLock<config::Config>>) {
         tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
 
         record_losses(&buffer);
-        match export_once(&buffer, &exporter, batch_size).await {
+        match export_once(&buffer, &exporter, bounds).await {
             Attempt::Failed => backoff = (backoff * 2).min(30),
             // A buffer we could not read says nothing about the collector, so
             // it neither backs off nor clears a backoff already in progress.
@@ -196,8 +202,8 @@ const EXPORT_REJECTED: &str = "export_rejected";
 /// events pile up behind it and are eventually evicted to make room. The batch
 /// is lost either way at that point; the difference is whether the events
 /// behind it are lost too, and whether anyone downstream is told.
-async fn export_once(buffer: &Buffer, exporter: &Exporter, batch_size: usize) -> Attempt {
-    let Ok(batch) = buffer.peek_batch(batch_size) else {
+async fn export_once(buffer: &Buffer, exporter: &Exporter, bounds: (usize, u64)) -> Attempt {
+    let Ok(batch) = buffer.peek_batch(bounds.0, bounds.1) else {
         return Attempt::Unreadable;
     };
     if batch.is_empty() {
@@ -283,9 +289,9 @@ fn record_losses(buffer: &Buffer) {
 async fn final_flush(buffer: &Buffer, cfg: &Arc<RwLock<config::Config>>) {
     record_losses(buffer);
     let export_cfg = with_cfg(cfg, |c| c.export.clone());
-    let batch_size = effective_batch_size(&export_cfg);
+    let bounds = batch_bounds(&export_cfg);
     let exporter = Exporter::new(&export_cfg);
-    export_once(buffer, &exporter, batch_size).await;
+    export_once(buffer, &exporter, bounds).await;
 }
 
 /// Everything the per-envelope path derives from config, plus the fingerprint
@@ -482,7 +488,7 @@ mod tests {
             buffer.push(&e).unwrap();
         }
         record_losses(&buffer);
-        let queued = buffer.peek_batch(10).unwrap();
+        let queued = buffer.peek_batch(10, 0).unwrap();
         let loss = queued
             .iter()
             .find_map(|(_, e)| match &e.kind {
@@ -494,7 +500,7 @@ mod tests {
         record_losses(&buffer);
         assert_eq!(
             buffer
-                .peek_batch(10)
+                .peek_batch(10, 0)
                 .unwrap()
                 .iter()
                 .filter(|(_, e)| matches!(e.kind, crate::event::EventKind::Loss { .. }))
@@ -585,11 +591,11 @@ mod tests {
         }
 
         assert_eq!(
-            export_once(&buffer, &exporter, 100).await,
+            export_once(&buffer, &exporter, (100, 0)).await,
             Attempt::Dropped,
             "a 400 must settle the batch, not park it"
         );
-        let left = buffer.peek_batch(100).unwrap();
+        let left = buffer.peek_batch(100, 0).unwrap();
         assert_eq!(left.len(), 1, "the three refused events must be gone");
         match &left[0].1.kind {
             EventKind::Loss {
@@ -606,9 +612,15 @@ mod tests {
 
         // …and the record of the gap does not itself become an endless source
         // of new records when the collector refuses that too.
-        assert_eq!(export_once(&buffer, &exporter, 100).await, Attempt::Dropped);
+        assert_eq!(
+            export_once(&buffer, &exporter, (100, 0)).await,
+            Attempt::Dropped
+        );
         assert!(buffer.is_empty().unwrap(), "the queue must reach empty");
-        assert_eq!(export_once(&buffer, &exporter, 100).await, Attempt::Idle);
+        assert_eq!(
+            export_once(&buffer, &exporter, (100, 0)).await,
+            Attempt::Idle
+        );
     }
 
     /// The other half: an outage must not be mistaken for a refusal, or a
@@ -622,11 +634,63 @@ mod tests {
             buffer.push(&prompt(i)).unwrap();
         }
 
-        assert_eq!(export_once(&buffer, &exporter, 100).await, Attempt::Failed);
+        assert_eq!(
+            export_once(&buffer, &exporter, (100, 0)).await,
+            Attempt::Failed
+        );
         assert_eq!(
             buffer.len().unwrap(),
             3,
             "a retryable failure must leave the batch buffered"
         );
+    }
+
+    /// The budget is only worth having if the loop passes the configured one:
+    /// a bound that never leaves the config file bounds nothing, and the
+    /// difference is invisible until a collector starts refusing requests.
+    #[tokio::test]
+    async fn the_export_loop_sends_no_more_than_the_configured_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let buffer = buffer_in(dir.path());
+        let (exporter, addr) = collector(200);
+        for i in 0..10 {
+            buffer.push(&prompt(i)).unwrap();
+        }
+        // Summed from the stored bodies, not assumed uniform: a timestamp
+        // serializes to a different width from one event to the next.
+        let four: u64 = buffer
+            .peek_batch(4, 0)
+            .unwrap()
+            .iter()
+            .map(|(_, e)| serde_json::to_string(e).unwrap().len() as u64)
+            .sum();
+
+        let cfg = config::ExportCfg {
+            otlp_endpoint: Some(format!("http://{addr}")),
+            max_batch_bytes: four,
+            ..Default::default()
+        };
+        assert_eq!(
+            export_once(&buffer, &exporter, batch_bounds(&cfg)).await,
+            Attempt::Sent
+        );
+        assert_eq!(
+            buffer.len().unwrap(),
+            6,
+            "the configured budget must reach the batch, not just the config"
+        );
+
+        // The row cap is wired through the same call and is just as invisible
+        // when it isn't.
+        let by_rows = config::ExportCfg {
+            batch_size: 2,
+            max_batch_bytes: 0,
+            ..cfg
+        };
+        assert_eq!(
+            export_once(&buffer, &exporter, batch_bounds(&by_rows)).await,
+            Attempt::Sent
+        );
+        assert_eq!(buffer.len().unwrap(), 4, "the configured row cap too");
     }
 }

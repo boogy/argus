@@ -694,7 +694,41 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
     9 000 characters on its first line, so the length bound alone satisfied
     every assertion. A short first line followed by a stack trace discriminates;
     with that added, both the split and the length bound fail independently.
-  - [ ] **T9b** — Byte-budgeted batches computed in SQL from `length(body)`.
+  - [x] **T9b** — Byte-budgeted export batches. Files: `src/buffer.rs`,
+    `src/daemon.rs`, `src/config.rs`, `README.md`
+    A batch was bounded by rows alone, and a row count says nothing about a
+    request size: 256 tool results carrying file contents are orders of
+    magnitude larger than 256 prompts, and a collector rejects on bytes. With
+    T9a in place that rejection is now survivable rather than a wedge, but the
+    batch is still lost — `export.max_batch_bytes` (3 MiB, under the OTel
+    Collector's 4 MiB HTTP default) is what keeps it from being built.
+    Computed in SQL as a running `SUM` over `seq`, so an oversized backlog
+    costs one query rather than a deserialize-then-discard pass over rows the
+    batch cannot carry. The sum is monotonic over `seq`, so the rows that pass
+    are always a prefix — no gap can open mid-batch that `ack`, which deletes
+    by a single high-water seq, would then delete rows out of.
+    The first row is exempt from the budget. A batch that would otherwise be
+    empty is a queue that never moves: one oversized event would be re-peeked
+    forever while everything behind it aged out. Sent alone, a collector that
+    cannot take it refuses it, and T9a settles a refusal.
+    Found while writing it: SQLite's `LENGTH` on a TEXT value counts
+    *characters*, and every size here is quoted in bytes — to the operator in
+    `buffer.max_bytes` and to a collector that rejects on request size. A buffer
+    of CJK or emoji-bearing prompts was holding up to three times what it was
+    told to, and `total_bytes` reseeds the in-memory running total whose own
+    doc says it may drift only upward. `CAST(body AS BLOB)` in all three places
+    makes `LENGTH` count octets.
+    Seven mutations, four bit immediately: no budget in the query, no exemption
+    for the first row, and character-counting in either the batch query or the
+    trim each failed a test.
+    Three did not. Character-counting in `total_bytes` was an untested real
+    guarantee — exactly the downward drift its own comment forbids — now covered
+    by `the_running_byte_total_is_measured_in_bytes`. The other two were the
+    mechanism-vs-wiring shape again: nothing proved the export loop passed the
+    *configured* budget, or the configured row cap, to the batch it built. The
+    row cap gap predates this change and was inherited by the refactor. Both are
+    now covered by an `export_once` against a real buffer and collector, which
+    asserts on what was acked rather than on what was configured.
   - [ ] **T9c** — Optional request gzip (new `flate2` dep).
 
 - [ ] **T10** — Claude Code field-mismatch fixes. Dependency: T4, T5.
