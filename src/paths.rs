@@ -173,6 +173,14 @@ pub fn cached_remote_config_path() -> PathBuf {
     data_dir().join("remote-config.cache.toml")
 }
 
+/// The secret Codex presents to this install's OTLP receiver.
+///
+/// Inside the data directory rather than beside Codex's own config, because
+/// this directory is the one argus keeps at `0700` and can say something about.
+pub fn codex_token_path() -> PathBuf {
+    data_dir().join("codex-otlp.token")
+}
+
 /// Name used by `interprocess` local sockets. Filesystem path on Unix,
 /// named pipe on Windows. Env override keeps parallel tests isolated.
 pub fn socket_name() -> String {

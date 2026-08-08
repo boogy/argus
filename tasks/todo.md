@@ -590,8 +590,50 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
     each was rewritten to assert the property (loopback host, port in band,
     agreement with the loaded config) rather than the constant — their failing
     was the evidence the change reached what installs actually write.
-  - [ ] **T8f** — Install-generated bearer token in the Codex `[otel]` headers,
-    checked by the listener; unauthenticated `POST /v1/logs` rejected.
+  - [x] **T8f** — Bearer token on the Codex OTLP receiver. Files:
+    `src/adapters/codex.rs`, `src/harness/codex.rs`, `src/harness/mod.rs`,
+    `src/paths.rs`, `README.md`
+    The receiver is the one input that is not a local socket, because Codex
+    exports over HTTP — and loopback is not an authentication boundary. Every
+    process on the machine, under any account, could post to it, which meant
+    anything on the box could write fabricated prompts and tool calls into the
+    record of what the agents did: a security trail its own subject can author.
+    T8e's per-user port did not touch this; a listening port is not a secret,
+    `lsof` prints it.
+    256 bits as two v4 UUIDs (`uuid` is already in the tree; an RNG crate would
+    be new supply chain for the same bytes), in `<data-dir>/codex-otlp.token`,
+    opened `0600` rather than chmod'ed after — the window between a
+    default-mode create and the chmod is the whole of what the file protects.
+    Read back rather than rotated, since `install` copies it into Codex's
+    `[otel]` headers and a daemon minting a fresh one per start would refuse the
+    client it wired. `401`, not `404`, for our path without it: telling a Codex
+    whose token went stale "not found" sends whoever debugs it hunting a routing
+    problem that does not exist.
+    The token is resolved *before* the bind and a failure disables the listener:
+    a receiver that cannot tell Codex from anything else still fills the trail
+    and still looks healthy in `status`, which is worse than no receiver.
+    Six mutations, five bit: accept-everything failed the unauthenticated and
+    wrong-token tests; header-presence-only failed wrong-token; case-sensitive
+    scheme and header matching failed the RFC 9110 test; dropping `0600` and
+    rotating on every call each failed the token-file test.
+    The sixth **did not bite** and found a real hole rather than a test gap:
+    `install` writing no `Bearer` header at all left the suite green — a Codex
+    401'd on every turn, and quiet from both ends, since the receiver logs once
+    per process and Codex treats its own export failures as its own business.
+    Closed with `install_hands_codex_the_token_the_receiver_will_ask_for`; the
+    mutation now fails it.
+    An existing test caught a real bug during the work: `dry_run_creates_nothing`
+    failed because `artifacts()` minted the token on demand and `--dry-run`
+    calls `artifacts()`. Split into `existing_token` (read-only, used by
+    artifacts, so `check` and `uninstall` are also read-only) and `shared_token`
+    (read-or-create, called once by a non-dry install and by the daemon).
+    Known gap, deliberate → **T8g**: `check` verifies the endpoint but not the
+    header, so a `config.toml` carrying a token the receiver no longer accepts
+    still reports intact. `must_point_at` is a single value and its error names
+    it, which a bearer token must not be; closing it properly needs the field to
+    carry a label beside each needle, and that is its own change.
+  - [ ] **T8g** — `check` catches a Codex wired with a token this receiver will
+    not accept, without printing the token.
 
 - [ ] **T9** — Export correctness. Dependency: T3.
   Files: `src/export.rs`, `src/buffer.rs`, `Cargo.toml`

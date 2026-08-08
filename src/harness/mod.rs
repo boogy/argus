@@ -512,6 +512,14 @@ fn is_ours(entry: &Value, source: &str) -> bool {
 // ---------------------------------------------------------------------------
 
 pub fn install(home: &Path, dry_run: bool) -> Result<()> {
+    // Minted here rather than lazily inside `artifacts`, which a dry run also
+    // calls: creating the token file is a write, and "would update" must not
+    // leave anything behind. Not gated on a Codex being detected — the file is
+    // one line in our own data directory, and threading detection into it
+    // would trade that for a rule about ordering.
+    if !dry_run && let Err(e) = crate::adapters::codex::shared_token() {
+        eprintln!("warning: could not create the Codex receiver token: {e}");
+    }
     for d in detect(home) {
         let Some(h) = harness_by_id(d.id) else {
             continue;
@@ -1478,6 +1486,44 @@ mod tests {
         assert!(
             checked > 0,
             "no harness writes {endpoint} any more — this test now guards nothing"
+        );
+        unsafe {
+            std::env::remove_var("ARGUS_DATA_DIR");
+        }
+    }
+
+    /// The receiver rejects an OTLP post that does not present the token, so a
+    /// Codex not *told* the token is a Codex whose telemetry is 401'd on every
+    /// turn. Both halves are quiet — the receiver logs once per process, Codex
+    /// treats an export failure as its own business — so this would read as
+    /// "Codex just isn't very chatty" for as long as nobody looked.
+    #[test]
+    fn install_hands_codex_the_token_the_receiver_will_ask_for() {
+        let home = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("ARGUS_DATA_DIR", home.path().join("data"));
+        }
+        let token = crate::adapters::codex::shared_token().unwrap();
+        let d = Detection {
+            id: "codex",
+            signals: vec![Signal::ConfigDir],
+            config_home: home.path().join("codex"),
+            binary: None,
+        };
+        let written = harness_by_id("codex")
+            .unwrap()
+            .artifacts(&d, Scope::User)
+            .iter()
+            .filter_map(|a| match a {
+                Artifact::TomlEdit { edits, .. } => Some(edits),
+                _ => None,
+            })
+            .flatten()
+            .map(|e| e.value.to_string())
+            .collect::<String>();
+        assert!(
+            written.contains(&format!("Bearer {token}")),
+            "install writes no credential Codex can present to our own receiver"
         );
         unsafe {
             std::env::remove_var("ARGUS_DATA_DIR");

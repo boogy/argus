@@ -82,6 +82,17 @@ impl Harness for Codex {
         let mut otlp_http = toml_edit::InlineTable::new();
         otlp_http.insert("endpoint", endpoint.clone().into());
         otlp_http.insert("protocol", "json".into());
+        // Loopback authenticates nobody, so the receiver requires this and
+        // Codex is the only thing told it. Read, never created: a dry run and
+        // `check` come through here too. A missing token is not fatal to the
+        // install — the rest of the wiring is worth having, and the receiver
+        // refuses everything in that state anyway, so the gap cannot be a way
+        // in, only a capture outage that `check` reports.
+        if let Some(token) = crate::adapters::codex::existing_token() {
+            let mut headers = toml_edit::InlineTable::new();
+            headers.insert("authorization", format!("Bearer {token}").into());
+            otlp_http.insert("headers", toml_edit::Value::InlineTable(headers));
+        }
         let mut exporter = toml_edit::InlineTable::new();
         exporter.insert("otlp-http", toml_edit::Value::InlineTable(otlp_http));
         otel["exporter"] = toml_edit::value(toml_edit::Value::InlineTable(exporter));

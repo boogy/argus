@@ -108,7 +108,7 @@ unset keys keep their default.
 | `buffer.max_events`          | `100000`           | SQLite buffer cap; oldest events are dropped once full (offline-first, not unbounded).                                                                                                                           |
 | `buffer.max_bytes`           | `268435456`        | Second cap, on stored event text (256 MiB). A row cap is not a disk bound — 100k pasted file contents is a very different size from 100k prompts. Whichever binds first wins; both are re-read on a config reload. |
 | `spool.max_bytes`            | `67108864`         | Ceiling on the hand-off spool (64 MiB). It grows exactly while the daemon is down and nothing is draining it; over the cap the oldest undelivered files are deleted and the count rides out on the next envelope as an `event.type=loss`, `loss.reason=spool_full` record. Read fresh on every hook, so a change applies immediately. |
-| `codex.otlp_listen`          | `127.0.0.1:4xxxx`  | Local address the daemon listens on for Codex's `[otel]` OTLP/JSON export. The port defaults to one derived from the data directory (40000–49151), because loopback is machine-wide, not per-user: on a shared fixed port the second account's daemon fails to bind while its Codex keeps posting prompts into the *first* account's audit trail. |
+| `codex.otlp_listen`          | `127.0.0.1:4xxxx`  | Local address the daemon listens on for Codex's `[otel]` OTLP/JSON export. The port defaults to one derived from the data directory (40000–49151), because loopback is machine-wide, not per-user: on a shared fixed port the second account's daemon fails to bind while its Codex keeps posting prompts into the *first* account's audit trail. The receiver requires a bearer token (see below); posts without it get `401` and are not recorded. |
 | `integrity.enabled`          | `true`             | Periodically re-verify the daemon's own hook/plugin wiring is intact. A tampered/removed hook emits an `event.type=integrity`, `integrity.status=broken` record at `WARN`. On by default (security control).      |
 | `integrity.interval_secs`    | `3600`             | Wiring self-check interval (floor `30`). Broken findings re-emit each cycle until re-install, so the alert stays live.                                                                                            |
 
@@ -192,6 +192,17 @@ extra_patterns = ["ACME-[0-9]{6}"]
   path: per-tool adapter parsing → secret redaction → durable SQLite buffering
   → batched OTLP/JSON export with exponential backoff. It also drains the
   spool directory and polls remote config.
+- **Codex OTLP receiver** is the one input that is not a local socket, because
+  Codex exports over HTTP. Loopback is not an authentication boundary — every
+  process on the machine, under any account, can post to `127.0.0.1` — so the
+  receiver requires a bearer token: 256 bits generated at install into
+  `<data-dir>/codex-otlp.token` (mode `0600`, in the `0700` data directory) and
+  copied into Codex's `[otel]` exporter headers. Without it, anything on the
+  box could write fabricated prompts and tool calls into the record of what the
+  agents did. A post without the token gets `401` and is not parsed, forwarded
+  or buffered. If Codex telemetry stops arriving, its `config.toml` is carrying
+  a token this install does not know (a restored profile, a wiped data
+  directory); the daemon logs this once and `argus install` re-wires it.
 - **Install** (`argus install`) detects installed tools from four independent
   signals and idempotently wires each one — see the per-tool fidelity table
   above. `--dry-run` prints planned changes, and the signals behind them,

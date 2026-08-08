@@ -92,14 +92,82 @@ pub async fn bind_listener(cfg: Arc<RwLock<Config>>) -> anyhow::Result<TcpListen
     Ok(TcpListener::bind(addr).await?)
 }
 
+/// The token if one has already been minted, without minting one.
+///
+/// Split out because `artifacts` is called by `install --dry-run`, by `check`
+/// and by `uninstall`, none of which may write: a dry run that created this
+/// file would be reporting what it *would* do while doing something.
+pub fn existing_token() -> Option<String> {
+    let token = std::fs::read_to_string(crate::paths::codex_token_path())
+        .ok()?
+        .trim()
+        .to_string();
+    (!token.is_empty()).then_some(token)
+}
+
+/// The secret Codex presents on every OTLP post, created on first use.
+///
+/// Loopback is not an authentication boundary. Any process on the machine,
+/// under any account, can connect to `127.0.0.1` and post — so until this,
+/// anything at all could write fabricated prompts and tool calls into the
+/// audit trail, which is a poor property for the record of what the agents on
+/// this machine did. The per-user port from T8e narrowed *who collides*, not
+/// who can reach it: a listening port is not a secret, `lsof` lists it.
+///
+/// Read back rather than regenerated, because `install` copies this same value
+/// into Codex's `[otel]` headers — rotating it on every daemon start would
+/// leave every already-wired Codex talking to a receiver that now refuses it.
+///
+/// 256 bits, as two v4 UUIDs: `uuid` is already in the tree, and pulling in an
+/// RNG crate to produce the same thing would be new supply chain for nothing.
+pub fn shared_token() -> anyhow::Result<String> {
+    if let Some(token) = existing_token() {
+        return Ok(token);
+    }
+    let path = crate::paths::codex_token_path();
+    let token = format!(
+        "{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    );
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+        #[cfg(unix)]
+        let _ = std::fs::set_permissions(dir, std::os::unix::fs::PermissionsExt::from_mode(0o700));
+    }
+    // Opened `0600` rather than chmod'ed after: between a default-mode create
+    // and the chmod there is a window in which the secret is on disk and
+    // world-readable, and that window is the whole of what this file protects.
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
+    {
+        use std::io::Write;
+        opts.open(&path)?.write_all(token.as_bytes())?;
+    }
+    Ok(token)
+}
+
 /// Codex OTLP/JSON receiver: minimal HTTP/1.1 server bound to
 /// `codex.otlp_listen` (loopback by default) that accepts `POST /v1/logs`
 /// and forwards parsed logRecords into `tx`. Never crashes the daemon: a
 /// bind failure just disables the listener, and per-connection errors
 /// (bad HTTP, oversized bodies, malformed JSON) are dropped silently.
 pub async fn otlp_listener(cfg: Arc<RwLock<Config>>, tx: Sender<Envelope>) {
+    // Resolved before the bind, and fatal to the listener if it fails: a
+    // receiver that cannot tell Codex from anything else on loopback is worse
+    // than no receiver, because it still fills the trail and still looks
+    // healthy in `status`.
+    let token = match shared_token() {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!("codex otlp listener disabled: no receiver token: {e}");
+            return;
+        }
+    };
     match bind_listener(cfg).await {
-        Ok(listener) => serve(listener, tx).await,
+        Ok(listener) => serve(listener, tx, token).await,
         Err(e) => tracing::warn!("codex otlp listener disabled: {e}"),
     }
 }
@@ -107,25 +175,30 @@ pub async fn otlp_listener(cfg: Arc<RwLock<Config>>, tx: Sender<Envelope>) {
 const MAX_BODY_BYTES: usize = 10_000_000;
 
 /// Minimal HTTP/1.1 server: enough for Codex's OTLP/JSON POSTs on localhost.
-pub async fn serve(listener: TcpListener, tx: Sender<Envelope>) {
+pub async fn serve(listener: TcpListener, tx: Sender<Envelope>, token: String) {
+    let token: Arc<str> = token.into();
     loop {
         let Ok((stream, _)) = listener.accept().await else {
             continue;
         };
         let tx = tx.clone();
-        tokio::spawn(handle_conn(stream, tx));
+        tokio::spawn(handle_conn(stream, tx, token.clone()));
     }
 }
 
-async fn handle_conn(stream: tokio::net::TcpStream, tx: Sender<Envelope>) {
+async fn handle_conn(stream: tokio::net::TcpStream, tx: Sender<Envelope>, token: Arc<str>) {
     let _ = tokio::time::timeout(
         std::time::Duration::from_secs(10),
-        handle_conn_inner(stream, tx),
+        handle_conn_inner(stream, tx, token),
     )
     .await;
 }
 
-async fn handle_conn_inner(mut stream: tokio::net::TcpStream, tx: Sender<Envelope>) {
+async fn handle_conn_inner(
+    mut stream: tokio::net::TcpStream,
+    tx: Sender<Envelope>,
+    token: Arc<str>,
+) {
     let mut buf = Vec::with_capacity(8192);
     let mut tmp = [0u8; 4096];
     // Read until end of headers, then content-length worth of body.
@@ -173,7 +246,14 @@ async fn handle_conn_inner(mut stream: tokio::net::TcpStream, tx: Sender<Envelop
         return;
     }
     let head = String::from_utf8_lossy(&buf[..headers_end]);
-    let ok = head.starts_with("POST /v1/logs ") || head.starts_with("POST /v1/logs?");
+    let addressed = head.starts_with("POST /v1/logs ") || head.starts_with("POST /v1/logs?");
+    // Authenticated before parsed, so an unauthenticated caller cannot even
+    // reach the JSON path: nothing is forwarded, and the body is not touched.
+    let authenticated = bearer(&head).is_some_and(|t| same_secret(t, &token));
+    if addressed && !authenticated {
+        warn_once_about_rejections();
+    }
+    let ok = addressed && authenticated;
     if ok && let Ok(v) = serde_json::from_slice::<Value>(&buf[headers_end..body_end]) {
         for record in flatten_otlp_records(&v) {
             let _ = tx
@@ -188,7 +268,14 @@ async fn handle_conn_inner(mut stream: tokio::net::TcpStream, tx: Sender<Envelop
                 .await;
         }
     }
-    let status = if ok { "200 OK" } else { "404 Not Found" };
+    // 404 for a path we do not serve, 401 for ours without the secret: saying
+    // "not found" to a Codex whose token has gone stale would send whoever
+    // debugs it looking for a routing problem that isn't there.
+    let status = match (addressed, authenticated) {
+        (true, true) => "200 OK",
+        (true, false) => "401 Unauthorized",
+        _ => "404 Not Found",
+    };
     let _ = stream
         .write_all(
             format!(
@@ -197,6 +284,49 @@ async fn handle_conn_inner(mut stream: tokio::net::TcpStream, tx: Sender<Envelop
             .as_bytes(),
         )
         .await;
+}
+
+/// The credential out of an `Authorization: Bearer <token>` request line.
+///
+/// Header names and the scheme are both case-insensitive per RFC 9110, and
+/// reqwest, Codex and curl do not agree on how they spell either — matching
+/// only the capitalisation we happen to write would reject a well-formed
+/// client and look exactly like a wrong token.
+fn bearer(head: &str) -> Option<&str> {
+    let line = head
+        .lines()
+        .find(|l| l.to_ascii_lowercase().starts_with("authorization:"))?;
+    let value = line.split_once(':')?.1.trim();
+    let (scheme, credential) = value.split_once(' ')?;
+    scheme
+        .eq_ignore_ascii_case("bearer")
+        .then(|| credential.trim())
+}
+
+/// Compared without an early exit on the first differing byte.
+///
+/// The length is allowed to leak — it is fixed and public — but the bytes are
+/// not: `==` on strings stops at the first mismatch, and over enough requests
+/// that timing recovers the secret one byte at a time. The attacker here is
+/// already local, which is precisely why they can measure it well.
+fn same_secret(presented: &str, expected: &str) -> bool {
+    let (a, b) = (presented.as_bytes(), expected.as_bytes());
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+/// Once per process: a rejected post means Codex is wired with a stale token
+/// or none, which is a silent capture outage — but the same misconfiguration
+/// repeats on every turn, and a per-request log would bury the daemon's own
+/// output in it.
+fn warn_once_about_rejections() {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    WARNED.call_once(|| {
+        tracing::warn!(
+            "rejected an unauthenticated POST to the codex otlp receiver. If Codex \
+             telemetry has stopped arriving, its config.toml carries a token this \
+             install does not know; re-run `argus install`."
+        );
+    });
 }
 
 fn find_headers_end(buf: &[u8]) -> Option<usize> {
@@ -368,6 +498,143 @@ mod tests {
         );
     }
 
+    const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    /// Returns the bound address and the receiving end, so each test says only
+    /// what it is actually about.
+    async fn receiver() -> (
+        std::net::SocketAddr,
+        tokio::sync::mpsc::Receiver<crate::event::Envelope>,
+    ) {
+        let cfg = std::sync::Arc::new(std::sync::RwLock::new(crate::config::Config::default()));
+        cfg.write().unwrap().codex.otlp_listen = "127.0.0.1:0".into();
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        let bound = super::bind_listener(cfg).await.unwrap();
+        let addr = bound.local_addr().unwrap();
+        tokio::spawn(super::serve(bound, tx, TOKEN.into()));
+        (addr, rx)
+    }
+
+    fn logs() -> serde_json::Value {
+        json!({"resourceLogs": [{"scopeLogs": [{"logRecords": [{
+            "eventName": "codex.user_prompt",
+            "attributes": [{"key": "prompt", "value": {"stringValue": "forged"}}]
+        }]}]}]})
+    }
+
+    /// The whole point. Loopback is reachable by every process and every
+    /// account on the machine, so without this any of them could write
+    /// prompts and tool calls into the audit trail of what the *agents* did —
+    /// a security record its subject can author. Rejecting must also mean
+    /// forwarding nothing: a 401 that still enqueued the body would be the
+    /// same hole with a different status line.
+    #[tokio::test]
+    async fn an_unauthenticated_post_is_rejected_and_forwards_nothing() {
+        let (addr, mut rx) = receiver().await;
+        let resp = reqwest::Client::new()
+            .post(format!("http://{addr}/v1/logs"))
+            .json(&logs())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 401);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv())
+                .await
+                .is_err(),
+            "a rejected post still reached the pipeline"
+        );
+    }
+
+    /// Presenting *a* bearer token is not presenting *the* one — the check has
+    /// to compare the credential, not merely notice the header.
+    #[tokio::test]
+    async fn a_wrong_token_is_rejected() {
+        let (addr, mut rx) = receiver().await;
+        for wrong in [
+            format!("Bearer {}", "f".repeat(TOKEN.len())),
+            format!("Bearer {}", &TOKEN[..TOKEN.len() - 1]),
+            format!("Bearer {TOKEN}extra"),
+            "Bearer".into(),
+            format!("Basic {TOKEN}"),
+        ] {
+            let resp = reqwest::Client::new()
+                .post(format!("http://{addr}/v1/logs"))
+                .header("authorization", &wrong)
+                .json(&logs())
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(resp.status().as_u16(), 401, "accepted {wrong:?}");
+        }
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv())
+                .await
+                .is_err(),
+            "a rejected post still reached the pipeline"
+        );
+    }
+
+    /// Both the header name and the scheme are case-insensitive per RFC 9110.
+    /// Codex, curl and reqwest do not agree on how they spell either, so
+    /// matching our own capitalisation would reject a correct client and be
+    /// indistinguishable from a wrong token.
+    #[tokio::test]
+    async fn the_scheme_and_header_name_are_matched_case_insensitively() {
+        let (addr, mut rx) = receiver().await;
+        for header in ["AUTHORIZATION", "authorization"] {
+            for scheme in ["Bearer", "bearer", "BEARER"] {
+                let resp = reqwest::Client::new()
+                    .post(format!("http://{addr}/v1/logs"))
+                    .header(header, format!("{scheme} {TOKEN}"))
+                    .json(&logs())
+                    .send()
+                    .await
+                    .unwrap();
+                assert!(
+                    resp.status().is_success(),
+                    "{header}: {scheme} was rejected"
+                );
+                assert!(
+                    tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+                        .await
+                        .unwrap()
+                        .is_some()
+                );
+            }
+        }
+    }
+
+    /// `install` copies the token into Codex's config once; a daemon that
+    /// minted a fresh one per start would refuse the very client it wired.
+    #[test]
+    fn the_token_is_created_once_and_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("ARGUS_DATA_DIR", dir.path());
+        }
+        let first = super::shared_token().unwrap();
+        assert_eq!(first.len(), 64, "256 bits of secret, hex encoded");
+        assert_eq!(super::shared_token().unwrap(), first);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(crate::paths::codex_token_path())
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(
+                mode & 0o777,
+                0o600,
+                "the token is a bearer credential; anything else on the machine \
+                 that can read it can post to the receiver"
+            );
+        }
+        unsafe {
+            std::env::remove_var("ARGUS_DATA_DIR");
+        }
+    }
+
     #[tokio::test]
     async fn oversized_content_length_does_not_panic_and_listener_survives() {
         let cfg = std::sync::Arc::new(std::sync::RwLock::new(crate::config::Config::default()));
@@ -375,7 +642,7 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel(8);
         let bound = super::bind_listener(cfg.clone()).await.unwrap();
         let addr = bound.local_addr().unwrap();
-        tokio::spawn(super::serve(bound, tx));
+        tokio::spawn(super::serve(bound, tx, TOKEN.into()));
         // hostile request: absurd Content-Length, no body
         {
             use tokio::io::AsyncWriteExt;
@@ -389,6 +656,7 @@ mod tests {
         let body = serde_json::json!({"resourceLogs":[{"scopeLogs":[{"logRecords":[{"eventName":"codex.conversation_starts","attributes":[]}]}]}]});
         let resp = reqwest::Client::new()
             .post(format!("http://{addr}/v1/logs"))
+            .header("authorization", format!("Bearer {TOKEN}"))
             .json(&body)
             .send()
             .await
@@ -406,9 +674,10 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel(8);
         let bound = super::bind_listener(cfg.clone()).await.unwrap();
         let addr = bound.local_addr().unwrap();
-        tokio::spawn(super::serve(bound, tx));
+        tokio::spawn(super::serve(bound, tx, TOKEN.into()));
         let resp = reqwest::Client::new()
             .post(format!("http://{addr}/v1/logsXXX"))
+            .header("authorization", format!("Bearer {TOKEN}"))
             .body("x")
             .send()
             .await
@@ -423,7 +692,7 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);
         let bound = super::bind_listener(cfg.clone()).await.unwrap();
         let addr = bound.local_addr().unwrap();
-        tokio::spawn(super::serve(bound, tx));
+        tokio::spawn(super::serve(bound, tx, TOKEN.into()));
 
         let body = json!({"resourceLogs": [{"scopeLogs": [{"logRecords": [{
             "eventName": "codex.user_prompt",
@@ -431,6 +700,7 @@ mod tests {
         }]}]}]});
         let resp = reqwest::Client::new()
             .post(format!("http://{addr}/v1/logs"))
+            .header("authorization", format!("Bearer {TOKEN}"))
             .json(&body)
             .send()
             .await
