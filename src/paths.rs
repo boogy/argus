@@ -185,8 +185,56 @@ pub fn socket_name() -> String {
     }
     #[cfg(windows)]
     {
-        r"\\.\pipe\argus".to_string()
+        windows_pipe_name(&data_dir())
     }
+}
+
+/// The Windows endpoint for the install rooted at `dir`.
+///
+/// Unix needs no such thing: the socket is a file *inside* the per-user data
+/// directory, so the filesystem namespaces it. The Windows pipe namespace is
+/// machine-global and flat, so the previous `\\.\pipe\argus` was a single name
+/// shared by every account on the box. Two users' daemons fought over it and
+/// whichever bound first received the other's hook payloads — raw and
+/// pre-redaction, since redaction happens daemon-side. Worse, any process at
+/// all could pre-create the name and simply be handed them.
+///
+/// Not `#[cfg(windows)]`: the guarantee is that two users get two names, and a
+/// guarantee that can only be tested on the platform CI runs least often is one
+/// nobody will notice breaking.
+pub fn windows_pipe_name(dir: &Path) -> String {
+    format!(r"\\.\pipe\argus-{:016x}", endpoint_discriminator(dir))
+}
+
+/// Per-install discriminator for [`windows_pipe_name`].
+///
+/// Keyed on the data directory rather than the user name because that is what
+/// the Unix socket path is already keyed on, and it makes `ARGUS_DATA_DIR`
+/// behave the way it reads: two data directories are two installs and must not
+/// share one daemon. Hashing also means no user name reaches anything that can
+/// enumerate `\\.\pipe\`, and no path character has to be reconciled with what
+/// the pipe namespace accepts.
+///
+/// FNV-1a, spelled out, rather than `DefaultHasher`: the daemon, the shim and
+/// the opencode TypeScript plugin must all derive the *same* name, and
+/// `DefaultHasher`'s output is explicitly not guaranteed stable across Rust
+/// releases — a toolchain bump would silently rename the endpoint and cut every
+/// running daemon off from its shims. Kept in step with `socketPath()` in
+/// `plugins/opencode/argus.ts`; `the_discriminator_is_pinned_to_a_known_value`
+/// is what the two implementations are checked against.
+pub fn endpoint_discriminator(dir: &Path) -> u64 {
+    // Windows paths are case-insensitive, and the two implementations do not
+    // read the directory from the same place — this side resolves it through
+    // `SHGetKnownFolderPath`, the plugin reads `%LOCALAPPDATA%`. They agree on
+    // the directory; they need not agree on how it is spelled.
+    let key = dir.to_string_lossy().to_lowercase();
+    let key = key.trim_end_matches(['\\', '/']);
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in key.as_bytes() {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
 }
 
 #[cfg(test)]
@@ -219,6 +267,86 @@ mod tests {
         assert!(!socket_name().is_empty());
         unsafe {
             std::env::remove_var("ARGUS_DATA_DIR");
+        }
+    }
+
+    const ALICE: &str = r"C:\Users\alice\AppData\Local\argus";
+    const BOB: &str = r"C:\Users\bob\AppData\Local\argus";
+
+    /// The reason the discriminator exists. Before it, every account on a
+    /// Windows machine raced for `\\.\pipe\argus`, and the loser's hook
+    /// payloads — raw prompts, tool inputs, file paths, all pre-redaction —
+    /// went to whoever won.
+    #[test]
+    fn two_users_do_not_share_one_windows_endpoint() {
+        assert_ne!(
+            windows_pipe_name(Path::new(ALICE)),
+            windows_pipe_name(Path::new(BOB)),
+            "two accounts resolved to one pipe; the second user's prompts go to the first"
+        );
+    }
+
+    /// An override is a separate install with a separate buffer, so it gets a
+    /// separate daemon — otherwise `ARGUS_DATA_DIR` moves the database and
+    /// leaves the transport pointing at whatever bound the shared name first.
+    #[test]
+    fn a_different_data_dir_is_a_different_endpoint() {
+        assert_ne!(
+            windows_pipe_name(Path::new(ALICE)),
+            windows_pipe_name(Path::new(r"D:\argus-test")),
+        );
+    }
+
+    /// Both sides must land on the same name from a directory neither spells
+    /// identically: this side resolves it through `SHGetKnownFolderPath`, the
+    /// opencode plugin reads `%LOCALAPPDATA%`. A case difference splitting the
+    /// endpoint would look exactly like a daemon that is not running.
+    #[test]
+    fn spelling_of_the_same_directory_does_not_split_the_endpoint() {
+        let canonical = endpoint_discriminator(Path::new(ALICE));
+        for equivalent in [
+            r"c:\users\alice\appdata\local\argus",
+            r"C:\USERS\ALICE\APPDATA\LOCAL\ARGUS",
+            r"C:\Users\alice\AppData\Local\argus\",
+        ] {
+            assert_eq!(
+                endpoint_discriminator(Path::new(equivalent)),
+                canonical,
+                "{equivalent} resolved to a different endpoint than {ALICE}"
+            );
+        }
+    }
+
+    /// Pinned because the guarantee is cross-language: `socketPath()` in
+    /// `plugins/opencode/argus.ts` reimplements this, and nothing in either
+    /// build compares the two. Without a fixed value, "improving" the hash on
+    /// one side is a silent, green-tested outage of the plugin's fast path.
+    #[test]
+    fn the_discriminator_is_pinned_to_a_known_value() {
+        assert_eq!(
+            windows_pipe_name(Path::new(ALICE)),
+            r"\\.\pipe\argus-a82d74d39a3ee778"
+        );
+        assert_eq!(
+            windows_pipe_name(Path::new(BOB)),
+            r"\\.\pipe\argus-06ab4e4444656aaf"
+        );
+    }
+
+    /// The pin above only binds this side. Nothing in either build compares the
+    /// two implementations, and disagreement is silent: the plugin's socket
+    /// simply never connects and every event falls back to spawning the shim
+    /// binary — correct, and one process per event. Checking the constants is
+    /// not checking the algorithm, but it is the drift that actually happens.
+    #[test]
+    fn the_opencode_plugin_still_hashes_the_same_way() {
+        let shim = include_str!("../plugins/opencode/argus.ts");
+        for constant in ["0xcbf29ce484222325n", "0x100000001b3n", r"pipe\\argus-$"] {
+            assert!(
+                shim.contains(constant),
+                "the opencode plugin no longer derives the endpoint the way \
+                 `endpoint_discriminator` does: {constant} is gone"
+            );
         }
     }
 

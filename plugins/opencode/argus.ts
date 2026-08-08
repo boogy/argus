@@ -11,15 +11,40 @@ import type { Plugin } from "@opencode-ai/plugin";
 let sock: Socket | null = null;
 let sockBroken = false;
 
+// FNV-1a over the data directory, matching `endpoint_discriminator` in
+// src/paths.rs. The Windows pipe namespace is machine-global and flat, so the
+// name has to carry something per-user or every account on the box shares one
+// endpoint. Case-folded and stripped of a trailing separator because this side
+// reads %LOCALAPPDATA% while the Rust side resolves SHGetKnownFolderPath: same
+// directory, not necessarily the same spelling.
+//
+// Pinned on the Rust side by `the_discriminator_is_pinned_to_a_known_value`;
+// `C:\Users\alice\AppData\Local\argus` must hash to a82d74d39a3ee778. Change
+// one implementation and the plugin's fast path silently stops finding the
+// daemon (it still works — it just falls back to spawning the shim per event).
+function discriminator(dir: string): string {
+  const key = dir.toLowerCase().replace(/[\\/]+$/, "");
+  let hash = 0xcbf29ce484222325n;
+  for (const byte of Buffer.from(key, "utf8")) {
+    hash = BigInt.asUintN(64, (hash ^ BigInt(byte)) * 0x100000001b3n);
+  }
+  return hash.toString(16).padStart(16, "0");
+}
+
+function dataDir(): string {
+  if (process.env.ARGUS_DATA_DIR) return process.env.ARGUS_DATA_DIR;
+  if (process.platform === "win32")
+    return `${process.env.LOCALAPPDATA}\\argus`;
+  if (process.platform === "darwin")
+    return `${process.env.HOME}/Library/Application Support/argus`;
+  return `${process.env.XDG_DATA_HOME ?? `${process.env.HOME}/.local/share`}/argus`;
+}
+
 function socketPath(): string {
   if (process.env.ARGUS_SOCKET) return process.env.ARGUS_SOCKET;
-  if (process.platform === "win32") return "\\\\.\\pipe\\argus";
-  const dataDir =
-    process.env.ARGUS_DATA_DIR ??
-    (process.platform === "darwin"
-      ? `${process.env.HOME}/Library/Application Support/argus`
-      : `${process.env.XDG_DATA_HOME ?? `${process.env.HOME}/.local/share`}/argus`);
-  return `${dataDir}/argus.sock`;
+  if (process.platform === "win32")
+    return `\\\\.\\pipe\\argus-${discriminator(dataDir())}`;
+  return `${dataDir()}/argus.sock`;
 }
 
 function sendViaSocket(frame: string): boolean {

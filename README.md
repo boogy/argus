@@ -174,8 +174,12 @@ extra_patterns = ["ACME-[0-9]{6}"]
 ```
 
 - **Hook shim** (`argus hook`) is the only thing on the host tool's
-  critical path. It tries the daemon over a local socket (Unix domain socket /
-  Windows named pipe via `interprocess`) with a 250ms deadline; on timeout or
+  critical path. It tries the daemon over a local socket (Unix domain socket at
+  `<data-dir>/argus.sock`; on Windows a named pipe `\\.\pipe\argus-<id>`, where
+  `<id>` is a hash of the data directory — the pipe namespace is machine-global
+  and flat, so without it every account on the machine would share one endpoint
+  and hook payloads would reach whichever daemon bound first) with a 250ms
+  deadline; on timeout or
   daemon-not-running it falls back to writing a JSONL spool file and
   autospawns the daemon. It never blocks the host tool and never fails loudly
   — a broken hook must not break Claude Code, opencode, or Codex.

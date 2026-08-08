@@ -432,12 +432,50 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
     frame each failed the matching test. The last of those was found *by* the
     mutation — the EOF-without-newline path was inherited from `lines()` and
     had never been tested, and it is the opencode plugin's path.
-  - [ ] **T8b** — Per-user socket/pipe name; `bind` distinguishes our own
-    daemon from a foreign owner.
-  - [ ] **T8c** — Windows owner-only DACL. Resolve first: `interprocess 2.4.2`
-    exposes no security-descriptor API, so this likely needs raw `windows-sys`
-    `CreateNamedPipeW`. If too invasive, ship T8b's name alone and document
-    the residual squatting risk rather than leaving the global pipe.
+  - [x] **T8b** — Per-user endpoint name. Files: `src/paths.rs`,
+    `plugins/opencode/argus.ts`, `README.md`
+    Unix already had one: the socket is a file inside the per-user data
+    directory, so the filesystem namespaces it. The Windows pipe namespace is
+    machine-global and flat, and `\\.\pipe\argus` was a single name every
+    account on the machine raced for — the loser's hook payloads, raw and
+    pre-redaction because redaction is daemon-side, went to whoever won.
+    Keyed on the data directory rather than the user name: it is what the Unix
+    path is already keyed on, it makes `ARGUS_DATA_DIR` read the way it behaves
+    (two data directories are two installs, not one shared daemon), it keeps
+    the user name out of anything that enumerates `\\.\pipe\`, and it cannot
+    produce a character the pipe namespace rejects.
+    FNV-1a spelled out rather than `DefaultHasher`, whose output is explicitly
+    not stable across Rust releases — a toolchain bump would rename the
+    endpoint and cut every running daemon off from its shims. `windows_pipe_name`
+    is compiled on all platforms on purpose: a guarantee testable only on the
+    platform CI runs least often is one nobody notices breaking.
+    Case-folded and stripped of a trailing separator because the two
+    implementations do not read the directory from the same place — Rust via
+    `SHGetKnownFolderPath`, the plugin via `%LOCALAPPDATA%`. They agree on the
+    directory, not necessarily its spelling, and a split there looks exactly
+    like a daemon that is not running.
+    **The plan's upgrade note (line 441) asked for a fallback probe of the
+    legacy name for one release. Deliberately not shipped:** it would reopen
+    the hole this task closes, and it is unnecessary. Daemon and shim are one
+    binary, so the only window is an old daemon still resident while a new shim
+    runs; the shim then fails to connect and spools, and the next daemon start
+    replays it. T7d/T7e made that path lossless — the spool is exactly the
+    mechanism for this.
+    Mutation-verified, five of five: reverting to the global name, dropping the
+    case fold, dropping the trailing-separator trim, and perturbing the FNV
+    basis each failed the matching test; changing the hash constant in the
+    *TypeScript* failed `the_opencode_plugin_still_hashes_the_same_way`. That
+    last guard checks constants, not algorithms — but silent cross-language
+    drift is the failure that actually happens here, and it is invisible: the
+    plugin keeps working, one spawned process per event.
+  - [ ] **T8c** — Owner-only endpoint; `bind` distinguishes our own daemon from
+    a foreign owner. **The plan's feasibility worry does not hold** —
+    `interprocess 2.4.2` ships
+    `os::windows::local_socket::ListenerOptionsExt::security_descriptor` and
+    `os::unix::local_socket::ListenerOptionsExt::mode`, so no raw `windows-sys`
+    `CreateNamedPipeW` and no new dependency. Unix also needs the uid check:
+    `bind` currently reads any successful `Stream::connect` as "daemon already
+    running", so a squatter both silences argus and looks healthy doing it.
   - [ ] **T8d** — Per-user Codex OTLP port + install-generated bearer token in
     the Codex `[otel]` headers, checked by the listener.
 
