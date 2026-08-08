@@ -91,6 +91,7 @@ dependencies = [
  "clap",
  "dirs",
  "interprocess",
+ "libc",
  "regex",
  "reqwest",
  "rusqlite",

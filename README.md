@@ -179,7 +179,9 @@ extra_patterns = ["ACME-[0-9]{6}"]
   `<id>` is a hash of the data directory — the pipe namespace is machine-global
   and flat, so without it every account on the machine would share one endpoint
   and hook payloads would reach whichever daemon bound first) with a 250ms
-  deadline; on timeout or
+  deadline. The daemon refuses to bind an endpoint another account owns rather
+  than reporting it as "already running" — a squatted socket that looks like a
+  healthy install is a silent kill switch. On timeout or
   daemon-not-running it falls back to writing a JSONL spool file and
   autospawns the daemon. It never blocks the host tool and never fails loudly
   — a broken hook must not break Claude Code, opencode, or Codex.

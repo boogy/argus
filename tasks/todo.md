@@ -468,15 +468,59 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
     last guard checks constants, not algorithms — but silent cross-language
     drift is the failure that actually happens here, and it is invisible: the
     plugin keeps working, one spawned process per event.
-  - [ ] **T8c** — Owner-only endpoint; `bind` distinguishes our own daemon from
-    a foreign owner. **The plan's feasibility worry does not hold** —
-    `interprocess 2.4.2` ships
+  - [x] **T8c** — Unix: bind only an endpoint we own. Files: `src/ipc.rs`,
+    `src/daemon.rs`, `Cargo.toml`, `README.md`
+    `bind` read *any* successful `Stream::connect` as "our daemon is already
+    running" and exited quietly, so a squatter got the same answer as a healthy
+    install: argus never starts, `status` reports a reachable daemon, and the
+    hook payloads — raw, since redaction is daemon-side — go to whoever is
+    listening. For a security monitor that is the worst outcome available,
+    because the absence of events reads as the absence of activity. `bind` now
+    checks ownership *before* liveness and reports a foreign owner as its own
+    error; `daemon::run` logs the reason instead of printing "already running"
+    over everything.
+    Two checks, because they fail independently: the socket file's uid, and the
+    directory's — anyone who can write the directory can replace the socket
+    whatever the socket says. `symlink_metadata` rather than `metadata`, or a
+    planted symlink reports its target's owner instead of the planter's.
+    Skipped under `ARGUS_SOCKET`: an explicit path is the user's choice the way
+    `ARGUS_DATA_DIR` is, and silently chmodding `/tmp` is not ours to do.
+    `create_dir_all` on the way past fixes a latent bug found here — `bind` is
+    the first thing `run` does, so before this a first `argus daemon` on a
+    machine no hook had fired on failed on the missing data directory and
+    logged "daemon already running".
+    Socket mode 0600 via `interprocess`'s `ListenerOptionsExt::mode`, which
+    `fchmod`s before `bind` and so has no umask race. Darwin returns
+    `Unsupported` (`fchmod` on a socket is `EINVAL`) and leaves no file behind,
+    so the retry without it is correct rather than a workaround: Darwin ignores
+    socket modes on connect anyway, and the 0700 directory is what carries the
+    guarantee there. `MODE_FALLBACKS` exists because that difference is
+    otherwise invisible — on Darwin "mode applied" and "mode never asked for"
+    produce byte-identical sockets, so a bind that stopped requesting it would
+    ship green. The test asserts the property (nothing outside this uid can
+    reach the endpoint) rather than a mode, since the two platforms reach it
+    differently and either mode alone would be wrong on one of them.
+    Direct `libc` dependency added for `getuid`, unix-only; already in the tree
+    under `interprocess` and `rusqlite`.
+    Mutation-verified, five of five: skipping the whole check, accepting a
+    foreign uid, leaving the directory as found, never requesting the socket
+    mode, and reporting a foreign owner as "daemon already running" each failed
+    the matching test. The fourth only bites because of `MODE_FALLBACKS`; the
+    fifth needed a second attempt — the first kept the format arguments, so the
+    substrings the test looked for survived a message that no longer said
+    anything, and the test was strengthened to assert the two cases *differ*.
+    Known gap, deliberate: distinguishing a foreign-owned symlink from our own
+    needs a second uid, so `symlink_metadata` vs `metadata` is unfalsifiable
+    without root. Not faked with a mock filesystem — the check is one `stat`
+    syscall, and a mock of it would only assert that the mock was called.
+  - [ ] **T8d** — Windows: owner-only DACL on the pipe. **The plan's
+    feasibility worry does not hold** — `interprocess 2.4.2` ships
     `os::windows::local_socket::ListenerOptionsExt::security_descriptor` and
-    `os::unix::local_socket::ListenerOptionsExt::mode`, so no raw `windows-sys`
-    `CreateNamedPipeW` and no new dependency. Unix also needs the uid check:
-    `bind` currently reads any successful `Stream::connect` as "daemon already
-    running", so a squatter both silences argus and looks healthy doing it.
-  - [ ] **T8d** — Per-user Codex OTLP port + install-generated bearer token in
+    `SecurityDescriptor::deserialize` (SDDL), so no raw `CreateNamedPipeW`.
+    Getting the current user's SID still needs `windows-sys`. Not runtime-
+    testable here, but `cargo check --target x86_64-pc-windows-gnu` works
+    locally with `CC=zig cc` and `cargo test` runs on `windows-latest` in CI.
+  - [ ] **T8e** — Per-user Codex OTLP port + install-generated bearer token in
     the Codex `[otel]` headers, checked by the listener.
 
 - [ ] **T9** — Export correctness. Dependency: T3.

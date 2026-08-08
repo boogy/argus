@@ -27,9 +27,15 @@ fn effective_batch_size(cfg: &ExportCfg) -> usize {
 pub async fn run() -> Result<()> {
     // Single-instance guard: if another daemon already holds the socket, exit
     // cleanly rather than fighting over it.
-    let Ok(listener) = ipc::Listener::bind() else {
-        tracing::info!("daemon already running; exiting");
-        return Ok(());
+    // Not always "already running" — `bind` also refuses an endpoint another
+    // account owns, and reporting that as the ordinary case is how a squatted
+    // socket stays invisible.
+    let listener = match ipc::Listener::bind() {
+        Ok(listener) => listener,
+        Err(e) => {
+            tracing::info!("not starting: {e:#}");
+            return Ok(());
+        }
     };
     // Before anything opens the buffer: an upgrade may need to bring one over
     // from the pre-0.2 location. Only the daemon does this, and only while it
