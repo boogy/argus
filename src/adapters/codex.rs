@@ -1,7 +1,7 @@
 use crate::adapters::extract_fqdns;
 use crate::config::{CaptureCfg, Config};
 use crate::event::{Envelope, Event, EventKind};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::sync::{Arc, RwLock};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -174,18 +174,16 @@ async fn handle_conn_inner(mut stream: tokio::net::TcpStream, tx: Sender<Envelop
     }
     let head = String::from_utf8_lossy(&buf[..headers_end]);
     let ok = head.starts_with("POST /v1/logs ") || head.starts_with("POST /v1/logs?");
-    if ok {
-        if let Ok(v) = serde_json::from_slice::<Value>(&buf[headers_end..body_end]) {
-            for record in flatten_otlp_records(&v) {
-                let _ = tx
-                    .send(Envelope {
-                        source: "codex".into(),
-                        received_at: chrono::Utc::now(),
-                        event: None,
-                        payload: record,
-                    })
-                    .await;
-            }
+    if ok && let Ok(v) = serde_json::from_slice::<Value>(&buf[headers_end..body_end]) {
+        for record in flatten_otlp_records(&v) {
+            let _ = tx
+                .send(Envelope {
+                    source: "codex".into(),
+                    received_at: chrono::Utc::now(),
+                    event: None,
+                    payload: record,
+                })
+                .await;
         }
     }
     let status = if ok { "200 OK" } else { "404 Not Found" };

@@ -1,7 +1,7 @@
 use crate::adapters::{cap_text, cap_value, extract_files_for_tool, extract_net_for_tool};
 use crate::config::CaptureCfg;
 use crate::event::{Envelope, Event, EventKind, Meta};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 pub fn parse(env: &Envelope, capture: &CaptureCfg) -> Vec<Event> {
     parse_hook("claude-code", &env.payload, capture)
@@ -34,7 +34,10 @@ pub(crate) fn parse_hook(source: &'static str, p: &Value, capture: &CaptureCfg) 
         e.meta = meta.clone();
         e
     };
-    let hook = p.get("hook_event_name").and_then(Value::as_str).unwrap_or("");
+    let hook = p
+        .get("hook_event_name")
+        .and_then(Value::as_str)
+        .unwrap_or("");
     let max = capture.max_field_bytes;
 
     match hook {
@@ -132,14 +135,13 @@ pub(crate) fn parse_hook(source: &'static str, p: &Value, capture: &CaptureCfg) 
                 action: hook.into(),
                 detail: Value::Null,
             })];
-            if capture.assistant_messages {
-                if let Some(text) = p.get("last_assistant_message").and_then(Value::as_str) {
-                    if !text.is_empty() {
-                        events.push(mk(EventKind::AssistantMessage {
-                            text: cap_text(text, max),
-                        }));
-                    }
-                }
+            if capture.assistant_messages
+                && let Some(text) = p.get("last_assistant_message").and_then(Value::as_str)
+                && !text.is_empty()
+            {
+                events.push(mk(EventKind::AssistantMessage {
+                    text: cap_text(text, max),
+                }));
             }
             events
         }
@@ -443,16 +445,20 @@ mod tests {
             env(json!({"hook_event_name": "Stop", "last_assistant_message": "secret"})),
             &cfg,
         );
-        assert!(!events
-            .iter()
-            .any(|e| matches!(&e.kind, EventKind::AssistantMessage { .. })));
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(&e.kind, EventKind::AssistantMessage { .. }))
+        );
     }
 
     #[test]
     fn session_start_and_end_carry_detail() {
         let events = adapters::parse(
-            env(json!({"hook_event_name": "SessionStart", "source": "resume",
-                       "model": "claude-fable-5"})),
+            env(
+                json!({"hook_event_name": "SessionStart", "source": "resume",
+                       "model": "claude-fable-5"}),
+            ),
             &CaptureCfg::default(),
         );
         let EventKind::Session { action, detail } = &events[0].kind else {
@@ -509,32 +515,40 @@ mod tests {
         assert_eq!((*tokens_before, *tokens_after), (Some(150000), Some(30000)));
 
         let events = adapters::parse(
-            env(json!({"hook_event_name": "Notification", "message": "needs input",
-                       "type": "idle_prompt"})),
+            env(
+                json!({"hook_event_name": "Notification", "message": "needs input",
+                       "type": "idle_prompt"}),
+            ),
             &CaptureCfg::default(),
         );
         assert!(matches!(&events[0].kind,
             EventKind::Notification { category, .. } if category == "idle_prompt"));
 
         let events = adapters::parse(
-            env(json!({"hook_event_name": "StopFailure", "error_type": "rate_limit",
-                       "error_message": "429"})),
+            env(
+                json!({"hook_event_name": "StopFailure", "error_type": "rate_limit",
+                       "error_message": "429"}),
+            ),
             &CaptureCfg::default(),
         );
         assert!(matches!(&events[0].kind,
             EventKind::Error { context, .. } if context == "rate_limit"));
 
         let events = adapters::parse(
-            env(json!({"hook_event_name": "ConfigChange", "source": "user_settings",
-                       "path": "/h/.claude/settings.json"})),
+            env(
+                json!({"hook_event_name": "ConfigChange", "source": "user_settings",
+                       "path": "/h/.claude/settings.json"}),
+            ),
             &CaptureCfg::default(),
         );
         assert!(matches!(&events[0].kind,
             EventKind::FileChange { action, .. } if action == "config_changed:user_settings"));
 
         let events = adapters::parse(
-            env(json!({"hook_event_name": "InstructionsLoaded", "path": "/r/CLAUDE.md",
-                       "reason": "session_start"})),
+            env(
+                json!({"hook_event_name": "InstructionsLoaded", "path": "/r/CLAUDE.md",
+                       "reason": "session_start"}),
+            ),
             &CaptureCfg::default(),
         );
         assert!(matches!(&events[0].kind,
@@ -574,8 +588,10 @@ mod tests {
         };
         let big = "z".repeat(10_000);
         let events = adapters::parse(
-            env(json!({"hook_event_name": "PostToolUse", "tool_name": "Bash",
-                       "tool_input": {"command": "ls"}, "tool_response": {"stdout": big}})),
+            env(
+                json!({"hook_event_name": "PostToolUse", "tool_name": "Bash",
+                       "tool_input": {"command": "ls"}, "tool_response": {"stdout": big}}),
+            ),
             &cfg,
         );
         let EventKind::ToolUse { output, .. } = &events[0].kind else {

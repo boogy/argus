@@ -1,7 +1,7 @@
 use crate::config::ExportCfg;
 use crate::event::{Event, EventKind};
 use anyhow::{Context, Result};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 pub fn to_otlp_body(events: &[Event]) -> Value {
     let (host, user) = events
@@ -114,10 +114,10 @@ fn record(e: &Event) -> Value {
         ("permission.mode", &e.meta.permission_mode),
         ("llm.model", &e.meta.model),
     ] {
-        if let Some(v) = val {
-            if !attrs.iter().any(|a| a["key"] == *key) {
-                attrs.push(attr(key, v));
-            }
+        if let Some(v) = val
+            && !attrs.iter().any(|a| a["key"] == *key)
+        {
+            attrs.push(attr(key, v));
         }
     }
     attrs.insert(0, attr("event.type", event_type));
@@ -250,11 +250,7 @@ mod tests {
                 let url = req.url().to_string();
                 let status = if url == "/v1/logs" {
                     count += 1;
-                    if count == 1 {
-                        200
-                    } else {
-                        500
-                    }
+                    if count == 1 { 200 } else { 500 }
                 } else {
                     500
                 };

@@ -29,12 +29,11 @@ pub fn run(source: &str, event: Option<&str>, arg_payload: Option<&str>) {
 /// empty/whitespace-only stdin falls back to the positional argv payload
 /// (Codex's notify invocation, which passes no stdin).
 fn choose_payload(stdin: &str, arg: Option<&str>) -> String {
-    if stdin.trim().is_empty() {
-        if let Some(arg) = arg {
-            if !arg.trim().is_empty() {
-                return arg.to_string();
-            }
-        }
+    if stdin.trim().is_empty()
+        && let Some(arg) = arg
+        && !arg.trim().is_empty()
+    {
+        return arg.to_string();
     }
     stdin.to_string()
 }
@@ -92,9 +91,15 @@ mod tests {
     #[test]
     fn falls_back_to_spool_when_no_daemon() {
         let dir = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("ARGUS_DATA_DIR", dir.path()); }
-        unsafe { std::env::set_var("ARGUS_SOCKET", dir.path().join("nope.sock")); }
-        unsafe { std::env::set_var("ARGUS_NO_AUTOSPAWN", "1"); }
+        unsafe {
+            std::env::set_var("ARGUS_DATA_DIR", dir.path());
+        }
+        unsafe {
+            std::env::set_var("ARGUS_SOCKET", dir.path().join("nope.sock"));
+        }
+        unsafe {
+            std::env::set_var("ARGUS_NO_AUTOSPAWN", "1");
+        }
 
         let started = std::time::Instant::now();
         deliver(
@@ -124,7 +129,9 @@ mod tests {
     #[test]
     fn send_with_deadline_gives_up_promptly_when_unreachable() {
         let dir = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("ARGUS_SOCKET", dir.path().join("nope.sock")); }
+        unsafe {
+            std::env::set_var("ARGUS_SOCKET", dir.path().join("nope.sock"));
+        }
 
         let envelope = Envelope {
             source: "claude-code".to_string(),
@@ -150,9 +157,15 @@ mod tests {
     #[test]
     fn event_hint_lands_in_envelope() {
         let dir = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("ARGUS_DATA_DIR", dir.path()); }
-        unsafe { std::env::set_var("ARGUS_SOCKET", dir.path().join("nope.sock")); }
-        unsafe { std::env::set_var("ARGUS_NO_AUTOSPAWN", "1"); }
+        unsafe {
+            std::env::set_var("ARGUS_DATA_DIR", dir.path());
+        }
+        unsafe {
+            std::env::set_var("ARGUS_SOCKET", dir.path().join("nope.sock"));
+        }
+        unsafe {
+            std::env::set_var("ARGUS_NO_AUTOSPAWN", "1");
+        }
         deliver("copilot", Some("preToolUse"), r#"{"toolName":"bash"}"#);
         let drained = crate::spool::drain().unwrap();
         assert_eq!(drained[0].event.as_deref(), Some("preToolUse"));
@@ -169,8 +182,12 @@ mod tests {
     #[test]
     fn malformed_stdin_is_swallowed_not_panicked() {
         let dir = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("ARGUS_DATA_DIR", dir.path()); }
-        unsafe { std::env::set_var("ARGUS_NO_AUTOSPAWN", "1"); }
+        unsafe {
+            std::env::set_var("ARGUS_DATA_DIR", dir.path());
+        }
+        unsafe {
+            std::env::set_var("ARGUS_NO_AUTOSPAWN", "1");
+        }
         deliver("claude-code", None, "not json at all"); // must not panic
     }
 

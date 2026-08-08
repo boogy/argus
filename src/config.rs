@@ -262,7 +262,9 @@ mod tests {
     #[test]
     fn defaults_when_no_files() {
         let dir = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("ARGUS_DATA_DIR", dir.path()); }
+        unsafe {
+            std::env::set_var("ARGUS_DATA_DIR", dir.path());
+        }
         let cfg = load();
         assert!(cfg.redaction.enabled);
         assert!(cfg.capture.prompts);
@@ -273,7 +275,9 @@ mod tests {
     #[test]
     fn remote_cache_overrides_local_file() {
         let dir = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("ARGUS_DATA_DIR", dir.path()); }
+        unsafe {
+            std::env::set_var("ARGUS_DATA_DIR", dir.path());
+        }
         std::fs::create_dir_all(dir.path()).unwrap();
         std::fs::write(
             crate::paths::config_path(),
@@ -297,7 +301,9 @@ mod tests {
     #[test]
     fn type_mismatched_remote_layer_is_skipped_not_poisoning() {
         let dir = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("ARGUS_DATA_DIR", dir.path()); }
+        unsafe {
+            std::env::set_var("ARGUS_DATA_DIR", dir.path());
+        }
         std::fs::create_dir_all(dir.path()).unwrap();
         std::fs::write(
             crate::paths::config_path(),

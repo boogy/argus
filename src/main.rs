@@ -81,11 +81,7 @@ fn main() -> Result<()> {
             };
             // Exit code is the contract for monitors: 0 = intact, 2 = broken.
             std::process::exit(
-                if argus::integrity::check_and_report(
-                    do_hooks,
-                    do_config,
-                    remote_url.as_deref(),
-                ) {
+                if argus::integrity::check_and_report(do_hooks, do_config, remote_url.as_deref()) {
                     0
                 } else {
                     2

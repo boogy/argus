@@ -1,10 +1,10 @@
 use crate::event::Envelope;
 use crate::paths;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use interprocess::local_socket::{
-    tokio::{prelude::*, Stream as AsyncStream},
-    traits::Stream as _,
     GenericFilePath, ListenerOptions, Stream, ToFsName,
+    tokio::{Stream as AsyncStream, prelude::*},
+    traits::Stream as _,
 };
 #[cfg(windows)]
 use interprocess::local_socket::{GenericNamespaced, ToNsName};
@@ -71,10 +71,10 @@ impl Listener {
         // probe connection is dropped immediately; the accept side already
         // tolerates a zero-byte connection (`lines.next_line()` returns
         // `Ok(None)` on EOF and the handler just exits).
-        if let Ok(n) = name() {
-            if Stream::connect(n).is_ok() {
-                return Err(anyhow!("daemon already running"));
-            }
+        if let Ok(n) = name()
+            && Stream::connect(n).is_ok()
+        {
+            return Err(anyhow!("daemon already running"));
         }
         // No live daemon: remove a stale socket file left by a crashed
         // daemon (Unix only) before binding.
@@ -115,7 +115,9 @@ mod tests {
     #[tokio::test]
     async fn shim_send_reaches_daemon_listener() {
         let sock = std::env::temp_dir().join(format!("lm-ipc-{}.sock", std::process::id()));
-        unsafe { std::env::set_var("ARGUS_SOCKET", &sock); }
+        unsafe {
+            std::env::set_var("ARGUS_SOCKET", &sock);
+        }
 
         let listener = Listener::bind().unwrap();
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);
@@ -137,7 +139,9 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(got.source, "claude-code");
-        unsafe { std::env::remove_var("ARGUS_SOCKET"); }
+        unsafe {
+            std::env::remove_var("ARGUS_SOCKET");
+        }
     }
 
     /// A malformed (non-JSON) frame must be logged and dropped, not crash the
@@ -147,7 +151,9 @@ mod tests {
     async fn malformed_frame_is_dropped_without_crashing_loop() {
         let sock =
             std::env::temp_dir().join(format!("lm-ipc-malformed-{}.sock", std::process::id()));
-        unsafe { std::env::set_var("ARGUS_SOCKET", &sock); }
+        unsafe {
+            std::env::set_var("ARGUS_SOCKET", &sock);
+        }
 
         let listener = Listener::bind().unwrap();
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);
@@ -181,13 +187,17 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(got.source, "claude-code");
-        unsafe { std::env::remove_var("ARGUS_SOCKET"); }
+        unsafe {
+            std::env::remove_var("ARGUS_SOCKET");
+        }
     }
 
     #[tokio::test]
     async fn second_bind_fails_while_daemon_alive() {
         let sock = std::env::temp_dir().join(format!("lm-ipc-guard-{}.sock", std::process::id()));
-        unsafe { std::env::set_var("ARGUS_SOCKET", &sock); }
+        unsafe {
+            std::env::set_var("ARGUS_SOCKET", &sock);
+        }
         let listener = Listener::bind().unwrap();
         let (tx, _rx) = tokio::sync::mpsc::channel(8);
         tokio::spawn(listener.accept_loop(tx));
@@ -197,6 +207,8 @@ mod tests {
             second.is_err(),
             "second bind must fail while first daemon is alive"
         );
-        unsafe { std::env::remove_var("ARGUS_SOCKET"); }
+        unsafe {
+            std::env::remove_var("ARGUS_SOCKET");
+        }
     }
 }

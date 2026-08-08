@@ -5,7 +5,7 @@
 use crate::adapters::{cap_text, cap_value, extract_files_for_tool, extract_net_for_tool};
 use crate::config::CaptureCfg;
 use crate::event::{Envelope, Event, EventKind, Meta};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// Get the camelCase field, falling back to its snake_case twin.
 fn field<'a>(p: &'a Value, camel: &str, snake: &str) -> Option<&'a Value> {
@@ -127,8 +127,7 @@ pub fn parse(env: &Envelope, capture: &CaptureCfg) -> Vec<Event> {
                     .unwrap_or(""),
                 max,
             ),
-            context: sfield(p, "errorContext", "error_context")
-                .unwrap_or_else(|| "unknown".into()),
+            context: sfield(p, "errorContext", "error_context").unwrap_or_else(|| "unknown".into()),
         })],
         "notification" => vec![mk(EventKind::Notification {
             message: cap_text(p.get("message").and_then(Value::as_str).unwrap_or(""), max),
@@ -190,7 +189,10 @@ mod tests {
         assert!(matches!(&events[0].kind, EventKind::Prompt { text } if text == "add tests"));
 
         let events = adapters::parse(
-            env("sessionStart", json!({"sessionId": "cp1", "source": "startup"})),
+            env(
+                "sessionStart",
+                json!({"sessionId": "cp1", "source": "startup"}),
+            ),
             &CaptureCfg::default(),
         );
         assert!(matches!(&events[0].kind,
@@ -300,7 +302,10 @@ mod tests {
         assert!(matches!(&events[0].kind,
             EventKind::Session { action, .. } if action == "subagentStart"));
         assert_eq!(events[0].meta.agent_type.as_deref(), Some("reviewer"));
-        assert_eq!(events[0].meta.transcript_path.as_deref(), Some("/t/sub.json"));
+        assert_eq!(
+            events[0].meta.transcript_path.as_deref(),
+            Some("/t/sub.json")
+        );
 
         let events = adapters::parse(
             env("preCompact", json!({"sessionId": "cp1", "trigger": "auto"})),

@@ -264,8 +264,10 @@ mod tests {
             ..CaptureCfg::default()
         };
         let events = adapters::parse(
-            env(json!({"event": "chat.message", "message": {"role": "assistant"},
-                       "parts": [{"type": "text", "text": "secret"}]})),
+            env(
+                json!({"event": "chat.message", "message": {"role": "assistant"},
+                       "parts": [{"type": "text", "text": "secret"}]}),
+            ),
             &cfg,
         );
         assert!(events.is_empty());
