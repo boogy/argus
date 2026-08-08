@@ -121,6 +121,7 @@ mod tests {
         let env = Envelope {
             source: "some-future-tool".into(),
             received_at: chrono::Utc::now(),
+            truncated: false,
             event: None,
             payload: serde_json::json!({"x": 1}),
         };

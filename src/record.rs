@@ -197,6 +197,7 @@ mod tests {
         Envelope {
             source: source.into(),
             received_at: chrono::Utc::now(),
+            truncated: false,
             event: event.map(String::from),
             payload,
         }

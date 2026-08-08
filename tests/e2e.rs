@@ -46,6 +46,7 @@ async fn hook_event_flows_to_mock_collector() {
         None,
         r#"{"hook_event_name":"PreToolUse","session_id":"e2e","tool_name":"Bash",
             "tool_input":{"command":"curl -H 'Authorization: Bearer ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789' https://api.internal.example.com/v1"}}"#,
+        false,
     );
 
     let body = rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
@@ -65,6 +66,7 @@ async fn hook_event_flows_to_mock_collector() {
         r#"{"sessionId":"cp-e2e","cwd":"/repo","toolName":"bash",
             "toolArgs":{"command":"curl https://api.copilot-test.example.com/v1"},
             "toolResult":{"resultType":"success","textResultForLlm":"ok"}}"#,
+        false,
     );
 
     let body = rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();

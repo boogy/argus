@@ -259,7 +259,34 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
     test. `scrub_event` still matches `EventKind` exhaustively, so the compiler
     forced a redaction decision on the new variant rather than letting it
     default to unscrubbed.
-  - [ ] **T7b** — Shim stdin truncation is counted and reported.
+  - [x] **T7b** — Shim stdin truncation is reported. Files: `src/hook.rs`,
+    `src/event.rs`, `src/harness/mod.rs`, `src/spool.rs`, plus `truncated: false`
+    at the 17 remaining `Envelope` literals
+    `read_capped` capped stdin at 8 MiB and told nobody, so an oversized tool
+    result arrived looking like a complete one. It now reads one byte *past*
+    the cap — without that byte a payload ending exactly at the cap and one cut
+    off are indistinguishable — and returns whether there was more.
+    A second, worse bug fell out of the same read: `read_to_string` over a
+    `Take` that ends mid-codepoint returns `InvalidData` **and leaves the
+    buffer untouched**, so the entire 8 MiB was discarded to avoid half a
+    character. For non-ASCII text a byte cap lands mid-character most of the
+    time. The read is byte-oriented now and backs up to the last boundary.
+    The flag rides on the `Envelope` rather than being reported by the shim:
+    the shim is a short-lived process on the host tool's critical path, with no
+    buffer and no exporter, and has no business making a second IPC round trip
+    to say the first one was incomplete. The daemon turns it into an
+    `EventKind::Loss` at the `harness::parse` choke point, *ahead* of the
+    events it qualifies — a truncated payload usually still parses, since it is
+    the tail that is missing, so the caveat cannot be inferred from a parse
+    failure and a reader seeing a tool call with no result needs it before
+    drawing the obvious wrong conclusion. Attributed to the host tool, not to
+    argus: which agent emitted an 8 MiB payload is the actionable half.
+    Mutation-verified, four of four — but the fourth exposed a hole first.
+    Dropping the extra byte, dropping the boundary backup, and silencing the
+    `parse` arm each failed a test; dropping the flag from the wire
+    (`skip_serializing`) passed everything, because the shim and the daemon are
+    different processes and nothing asserted the flag survived between them.
+    `a_truncation_survives_the_spool` closes that, and fails under the mutation.
   - [ ] **T7c** — `buffer.max_bytes` / `max_spool_bytes`, re-read from live config.
   - [ ] **T7d** — Incremental spool drain, delete after the buffer commits.
 

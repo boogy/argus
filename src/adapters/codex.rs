@@ -180,6 +180,7 @@ async fn handle_conn_inner(mut stream: tokio::net::TcpStream, tx: Sender<Envelop
                 .send(Envelope {
                     source: "codex".into(),
                     received_at: chrono::Utc::now(),
+                    truncated: false,
                     event: None,
                     payload: record,
                 })
@@ -254,6 +255,7 @@ mod tests {
         Envelope {
             source: "codex".into(),
             received_at: chrono::Utc::now(),
+            truncated: false,
             event: None,
             payload,
         }

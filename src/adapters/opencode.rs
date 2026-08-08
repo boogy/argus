@@ -152,6 +152,7 @@ mod tests {
         Envelope {
             source: "opencode".into(),
             received_at: chrono::Utc::now(),
+            truncated: false,
             event: None,
             payload,
         }

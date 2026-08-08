@@ -911,7 +911,31 @@ fn write_json(path: &Path, doc: &Value) -> Result<()> {
 /// can forget to (telemetry-gaps #8).
 pub fn parse(envelope: Envelope, capture: &CaptureCfg) -> Vec<Event> {
     let received_at = envelope.received_at;
+    let (truncated, source) = (envelope.truncated, envelope.source.clone());
     let mut events = dispatch(envelope, capture);
+    if truncated {
+        // Ahead of the events it qualifies, not after them: a reader who sees
+        // a tool call with no result should learn that the payload was cut
+        // before drawing the obvious wrong conclusion from the absence. The
+        // event is attributed to the host tool rather than to argus, since
+        // which agent produced an 8 MiB payload is the actionable half.
+        events.insert(
+            0,
+            Event::new(
+                &source,
+                None,
+                None,
+                crate::event::EventKind::Loss {
+                    reason: "stdin_truncated".into(),
+                    count: 1,
+                    detail: format!(
+                        "hook payload exceeded the {} MiB stdin cap; the tail was discarded                          before parsing, so the event that follows is incomplete",
+                        crate::hook::MAX_STDIN_BYTES / (1024 * 1024)
+                    ),
+                },
+            ),
+        );
+    }
     for e in &mut events {
         e.ts = received_at;
     }
@@ -937,6 +961,53 @@ fn dispatch(envelope: Envelope, capture: &CaptureCfg) -> Vec<Event> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A truncated payload still parses — it is the *tail* that is missing, so
+    /// the leading fields an adapter reads are usually intact and the event
+    /// looks perfectly ordinary. That is exactly why the caveat has to be
+    /// emitted alongside it rather than inferred from a parse failure.
+    #[test]
+    fn a_truncated_payload_announces_itself_ahead_of_the_event_it_spoils() {
+        let mut env = Envelope {
+            source: "claude-code".into(),
+            received_at: chrono::Utc::now(),
+            truncated: true,
+            event: None,
+            payload: serde_json::json!({
+                "hook_event_name": "UserPromptSubmit",
+                "session_id": "s1",
+                "prompt": "hi",
+            }),
+        };
+        let events = parse(env.clone(), &CaptureCfg::default());
+        let crate::event::EventKind::Loss {
+            reason,
+            count,
+            detail,
+        } = &events[0].kind
+        else {
+            panic!("a cut-off payload reached the collector with nothing said about it");
+        };
+        assert_eq!(reason, "stdin_truncated");
+        assert_eq!(*count, 1);
+        assert!(detail.contains('8'), "the cap belongs in the message");
+        assert_eq!(
+            events[0].source, "claude-code",
+            "attributed to the tool that produced the oversized payload"
+        );
+        assert!(
+            events.len() > 1,
+            "the event itself must still be delivered, incomplete or not"
+        );
+
+        env.truncated = false;
+        assert!(
+            !parse(env, &CaptureCfg::default())
+                .iter()
+                .any(|e| matches!(e.kind, crate::event::EventKind::Loss { .. })),
+            "an intact payload must not claim a gap"
+        );
+    }
 
     #[test]
     fn powershell_uses_call_operator_and_quotes() {

@@ -211,6 +211,7 @@ mod tests {
         Envelope {
             source: "claude-code".into(),
             received_at: chrono::Utc::now(),
+            truncated: false,
             event: None,
             payload,
         }

@@ -10,7 +10,18 @@ pub struct Envelope {
     /// payloads carry no event-name field (Copilot's camelCase payloads).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub event: Option<String>,
+    /// Set when the shim's stdin hit `hook::MAX_STDIN_BYTES` and the tail was
+    /// discarded. Travels with the envelope rather than being reported from
+    /// the shim, because the shim is a short-lived process on the host tool's
+    /// critical path: it has no buffer, no exporter and no business making a
+    /// second IPC round trip to say that the first one was incomplete.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub truncated: bool,
     pub payload: serde_json::Value,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// Cross-tool context attached to every event. Adapters populate whatever
@@ -127,8 +138,9 @@ pub enum EventKind {
     /// Silent loss is the failure mode a monitoring tool cannot afford: a
     /// buffer that quietly discards its oldest rows under load looks exactly
     /// like a quiet afternoon, and the periods most likely to overflow it are
-    /// the periods most worth having. `count` is the number of events lost,
-    /// `reason` the mechanism that lost them.
+    /// the periods most worth having. `reason` is the mechanism; `count` is
+    /// how many events the gap accounts for — destroyed outright, or, for a
+    /// payload cut off at the shim's stdin cap, delivered incomplete.
     Loss {
         reason: String,
         count: u64,
@@ -238,6 +250,7 @@ mod tests {
         let env = Envelope {
             source: "opencode".into(),
             received_at: chrono::Utc::now(),
+            truncated: false,
             event: None,
             payload: serde_json::json!({"event": "tool.execute.before"}),
         };

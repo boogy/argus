@@ -74,6 +74,7 @@ mod tests {
         let env = Envelope {
             source: "codex".into(),
             received_at: chrono::Utc::now(),
+            truncated: false,
             event: None,
             payload: serde_json::json!({"k": "v"}),
         };
@@ -84,6 +85,28 @@ mod tests {
         assert!(drain().unwrap().is_empty());
     }
 
+    /// The shim that notices the truncation and the daemon that reports it are
+    /// different processes, so the flag is only worth anything if it survives
+    /// the wire. It is skipped when false to keep the common envelope small,
+    /// and that is exactly the kind of attribute that silently swallows the
+    /// true case if it is written a shade too broadly.
+    #[test]
+    fn a_truncation_survives_the_spool() {
+        let _dir = setup();
+        let env = Envelope {
+            source: "codex".into(),
+            received_at: chrono::Utc::now(),
+            truncated: true,
+            event: None,
+            payload: serde_json::json!({"k": "v"}),
+        };
+        append(&env).unwrap();
+        assert!(
+            drain().unwrap()[0].truncated,
+            "the daemon has no other way to know the payload was cut"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn spooled_file_is_owner_only_0600() {
@@ -92,6 +115,7 @@ mod tests {
         let env = Envelope {
             source: "codex".into(),
             received_at: chrono::Utc::now(),
+            truncated: false,
             event: None,
             payload: serde_json::json!({"secret": "sk-raw"}),
         };

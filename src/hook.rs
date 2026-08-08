@@ -5,11 +5,32 @@ use crate::event::Envelope;
 /// read+parse well under the IPC deadline budget.
 pub const MAX_STDIN_BYTES: usize = 8 * 1024 * 1024;
 
-pub fn read_capped(r: &mut impl std::io::Read) -> String {
+/// Read at most `MAX_STDIN_BYTES`, and say whether there was more.
+///
+/// Reads one byte *past* the cap on purpose: a `take` that stops exactly at
+/// the cap cannot distinguish a payload that happened to end there from one
+/// that was cut off, and a truncation nobody reports is precisely the silent
+/// gap this is meant to close.
+///
+/// Byte-oriented rather than `read_to_string` for a second reason. Cutting at
+/// a fixed byte offset lands mid-codepoint for most non-ASCII text, and
+/// `read_to_string` answers that with `InvalidData` *and an untouched buffer*
+/// — the whole 8 MiB discarded to avoid half a character. Backing up to the
+/// last boundary keeps everything up to the break.
+pub fn read_capped(r: &mut impl std::io::Read) -> (String, bool) {
     use std::io::Read;
-    let mut input = String::new();
-    let _ = r.take(MAX_STDIN_BYTES as u64).read_to_string(&mut input);
-    input
+    let mut bytes = Vec::new();
+    let _ = r.take(MAX_STDIN_BYTES as u64 + 1).read_to_end(&mut bytes);
+    let truncated = bytes.len() > MAX_STDIN_BYTES;
+    if truncated {
+        let mut cut = MAX_STDIN_BYTES;
+        // A continuation byte is 0b10xxxxxx; anything else starts a character.
+        while cut > 0 && bytes[cut] & 0xC0 == 0x80 {
+            cut -= 1;
+        }
+        bytes.truncate(cut);
+    }
+    (String::from_utf8_lossy(&bytes).into_owned(), truncated)
 }
 
 /// Entry point for `argus hook --source X [--event NAME]`. Must never
@@ -20,9 +41,11 @@ pub fn read_capped(r: &mut impl std::io::Read) -> String {
 /// argv argument; `arg_payload` carries that when present. `event` is the
 /// event-name hint for tools whose payloads carry no event-name field.
 pub fn run(source: &str, event: Option<&str>, arg_payload: Option<&str>) {
-    let input = read_capped(&mut std::io::stdin().lock());
+    let (input, truncated) = read_capped(&mut std::io::stdin().lock());
     let payload = choose_payload(&input, arg_payload);
-    deliver(source, event, &payload);
+    // Falling back to argv means stdin was empty, so nothing of it was cut.
+    let truncated = truncated && payload == input;
+    deliver(source, event, &payload, truncated);
 }
 
 /// Pure selection logic: stdin wins when non-empty (the common case); an
@@ -40,13 +63,14 @@ fn choose_payload(stdin: &str, arg: Option<&str>) -> String {
 
 /// Testable core: wrap raw hook text and hand it off. Malformed JSON is
 /// preserved as a string payload so nothing is ever lost.
-pub fn deliver(source: &str, event: Option<&str>, raw: &str) {
+pub fn deliver(source: &str, event: Option<&str>, raw: &str, truncated: bool) {
     let payload =
         serde_json::from_str(raw).unwrap_or_else(|_| serde_json::Value::String(raw.to_string()));
     let envelope = Envelope {
         source: source.to_string(),
         received_at: chrono::Utc::now(),
         event: event.map(String::from),
+        truncated,
         payload,
     };
     // Before anything can parse, redact or reshape it — a fixture is only
@@ -122,6 +146,7 @@ mod tests {
             "claude-code",
             None,
             r#"{"hook_event_name":"UserPromptSubmit","prompt":"hi"}"#,
+            false,
         );
         assert!(
             started.elapsed() < std::time::Duration::from_secs(2),
@@ -152,6 +177,7 @@ mod tests {
         let envelope = Envelope {
             source: "claude-code".to_string(),
             received_at: chrono::Utc::now(),
+            truncated: false,
             event: None,
             payload: serde_json::json!({"hook_event_name": "UserPromptSubmit"}),
         };
@@ -182,7 +208,12 @@ mod tests {
         unsafe {
             std::env::set_var("ARGUS_NO_AUTOSPAWN", "1");
         }
-        deliver("copilot", Some("preToolUse"), r#"{"toolName":"bash"}"#);
+        deliver(
+            "copilot",
+            Some("preToolUse"),
+            r#"{"toolName":"bash"}"#,
+            false,
+        );
         let drained = crate::spool::drain().unwrap();
         assert_eq!(drained[0].event.as_deref(), Some("preToolUse"));
     }
@@ -191,8 +222,41 @@ mod tests {
     fn oversized_stdin_is_truncated_not_unbounded() {
         // read_capped is pure over any Read; 8MiB cap.
         let big = vec![b'a'; 9 * 1024 * 1024];
-        let s = read_capped(&mut std::io::Cursor::new(big));
+        let (s, truncated) = read_capped(&mut std::io::Cursor::new(big));
         assert_eq!(s.len(), MAX_STDIN_BYTES);
+        assert!(
+            truncated,
+            "8 MiB of a 9 MiB payload was discarded in silence"
+        );
+    }
+
+    /// The cap is a byte count, so it lands wherever it lands — including in
+    /// the middle of a character. `read_to_string` treats that as `InvalidData`
+    /// and leaves the buffer empty, which would throw away the whole payload
+    /// to avoid half a glyph.
+    #[test]
+    fn a_cut_through_a_character_costs_the_character_not_the_payload() {
+        let mut big = vec![b'a'; MAX_STDIN_BYTES - 1];
+        big.extend_from_slice("é".as_bytes()); // two bytes, straddling the cap
+        big.extend_from_slice(&[b'z'; 1024]);
+        let (s, truncated) = read_capped(&mut std::io::Cursor::new(big));
+        assert!(truncated);
+        assert_eq!(
+            s.len(),
+            MAX_STDIN_BYTES - 1,
+            "the read backed up to the character boundary and kept the rest"
+        );
+        assert!(s.ends_with('a'));
+    }
+
+    /// Exactly at the cap is a complete payload, not a truncated one: reading
+    /// one byte past the cap is what makes the two distinguishable.
+    #[test]
+    fn a_payload_that_ends_exactly_at_the_cap_is_not_truncated() {
+        let exact = vec![b'a'; MAX_STDIN_BYTES];
+        let (s, truncated) = read_capped(&mut std::io::Cursor::new(exact));
+        assert_eq!(s.len(), MAX_STDIN_BYTES);
+        assert!(!truncated);
     }
 
     #[test]
@@ -204,7 +268,7 @@ mod tests {
         unsafe {
             std::env::set_var("ARGUS_NO_AUTOSPAWN", "1");
         }
-        deliver("claude-code", None, "not json at all"); // must not panic
+        deliver("claude-code", None, "not json at all", false); // must not panic
     }
 
     #[test]
