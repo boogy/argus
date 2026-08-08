@@ -89,7 +89,11 @@ impl Harness for Codex {
         // TOML holds user-authored config, so there is no structured marker to
         // stamp the way shared JSON gets `_argus`; ownership is inferred from
         // the value pointing at us.
-        let markers = vec!["argus".to_string(), endpoint, LEGACY_ENDPOINT.to_string()];
+        let markers = vec![
+            "argus".to_string(),
+            endpoint.clone(),
+            LEGACY_ENDPOINT.to_string(),
+        ];
         vec![
             Artifact::TomlEdit {
                 path: d.config_home.join("config.toml"),
@@ -99,6 +103,7 @@ impl Harness for Codex {
                         value: toml_edit::value(notify),
                         only_if_absent: true,
                         ours_markers: markers.clone(),
+                        must_point_at: None,
                         argv_tail: Some(NOTIFY_TAIL),
                     },
                     TomlEditOp {
@@ -106,6 +111,7 @@ impl Harness for Codex {
                         value: toml_edit::Item::Table(otel),
                         only_if_absent: true,
                         ours_markers: markers,
+                        must_point_at: Some(endpoint),
                         argv_tail: None,
                     },
                 ],

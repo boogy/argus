@@ -137,7 +137,7 @@ pub struct CodexCfg {
 impl Default for CodexCfg {
     fn default() -> Self {
         Self {
-            otlp_listen: "127.0.0.1:4327".into(),
+            otlp_listen: crate::paths::default_otlp_listen(),
         }
     }
 }
@@ -300,7 +300,16 @@ mod tests {
         assert!(cfg.redaction.enabled);
         assert!(cfg.capture.prompts);
         assert_eq!(cfg.remote.poll_interval_secs, 300);
-        assert_eq!(cfg.codex.otlp_listen, "127.0.0.1:4327");
+        // Loopback is machine-wide, so the port cannot be: see
+        // `paths::otlp_port`. Asserted as a property, since the value depends
+        // on the temporary data directory this test happens to get.
+        let (host, port) = cfg.codex.otlp_listen.rsplit_once(':').unwrap();
+        assert_eq!(host, "127.0.0.1", "the receiver must stay off the network");
+        let port: u16 = port.parse().unwrap();
+        assert!(
+            (40_000..49_152).contains(&port),
+            "port {port} is outside the band reserved for per-install endpoints"
+        );
     }
 
     #[test]

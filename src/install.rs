@@ -115,7 +115,12 @@ mod tests {
 
         let codex = std::fs::read_to_string(home.path().join(".codex/config.toml")).unwrap();
         assert!(codex.contains("otel"));
-        assert!(codex.contains("127.0.0.1:4327"));
+        // The port is derived from the data directory, not fixed: assert what
+        // install actually writes matches what the daemon will bind.
+        assert!(
+            codex.contains(&crate::config::load().codex.otlp_listen),
+            "codex must be pointed at the endpoint this install listens on: {codex}"
+        );
         assert!(codex.contains("notify"));
     }
 
@@ -386,7 +391,7 @@ mod tests {
         assert!(text.contains("# my custom codex config"));
         assert!(text.contains("model = \"o3\""));
         assert!(text.contains("otel"));
-        assert!(text.contains("127.0.0.1:4327"));
+        assert!(text.contains(&crate::config::load().codex.otlp_listen));
     }
 
     /// The check that used to be missing entirely. Every config file below is

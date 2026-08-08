@@ -114,6 +114,13 @@ pub struct TomlEditOp {
     pub only_if_absent: bool,
     /// Substrings identifying an existing value as ours, for uninstall.
     pub ours_markers: Vec<String>,
+    /// Set when being *ours* is not enough and the value must name one exact
+    /// thing (Codex's OTLP endpoint). `ours_markers` deliberately includes
+    /// endpoints older argus versions wrote, so uninstall still recognises what
+    /// it left behind — but a config pointing at an endpoint nothing listens on
+    /// any more captures nothing, and matching a legacy marker would report
+    /// that as wired. `check` uses this instead when it is set.
+    pub must_point_at: Option<String>,
     /// Set when the value is an argv array whose first element is the argus
     /// binary (Codex's `notify`). `check` then confirms the trailing arguments
     /// still match *and* that element 0 still names a runnable program — the
@@ -852,8 +859,20 @@ fn verify(artifact: &Artifact) -> std::result::Result<(), String> {
                     }
                     None => {
                         let s = item.to_string();
-                        if !e.ours_markers.iter().any(|m| s.contains(m.as_str())) {
-                            return Err(format!("{} no longer points at argus", e.key));
+                        match &e.must_point_at {
+                            Some(exact) if !s.contains(exact.as_str()) => {
+                                return Err(format!(
+                                    "{} does not point at {exact} — nothing is listening on the \
+                                     endpoint it names, so this tool is wired to a receiver that \
+                                     no longer exists. Re-run `argus install`.",
+                                    e.key
+                                ));
+                            }
+                            Some(_) => {}
+                            None if !e.ours_markers.iter().any(|m| s.contains(m.as_str())) => {
+                                return Err(format!("{} no longer points at argus", e.key));
+                            }
+                            None => {}
                         }
                     }
                 }
@@ -1333,6 +1352,7 @@ mod tests {
                     value: toml_edit::Item::None,
                     only_if_absent: true,
                     ours_markers: vec!["argus".into()],
+                    must_point_at: None,
                     argv_tail: Some(TAIL),
                 },
                 TomlEditOp {
@@ -1340,6 +1360,7 @@ mod tests {
                     value: toml_edit::Item::None,
                     only_if_absent: true,
                     ours_markers: vec!["127.0.0.1".into()],
+                    must_point_at: None,
                     argv_tail: None,
                 },
             ],
@@ -1375,6 +1396,92 @@ mod tests {
         std::fs::remove_file(&exe).unwrap();
         let err = verify(&artifact).unwrap_err();
         assert!(err.contains("notify points at a missing"), "{err}");
+    }
+
+    /// A Codex wired by an older argus points at the fixed port that the
+    /// per-install one replaced. It is still recognisably ours — `uninstall`
+    /// must keep removing it — but nothing listens there any more, so `check`
+    /// reporting it as wired would be the same silent capture stop the whole
+    /// integrity check exists to catch.
+    #[test]
+    fn verify_rejects_a_codex_wired_to_an_endpoint_nothing_listens_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let artifact = Artifact::TomlEdit {
+            path: path.clone(),
+            edits: vec![TomlEditOp {
+                key: "otel",
+                value: toml_edit::Item::None,
+                only_if_absent: true,
+                // Deliberately still a marker, as it is in the real harness.
+                ours_markers: vec!["http://127.0.0.1:4327".into()],
+                must_point_at: Some("http://127.0.0.1:41234".into()),
+                argv_tail: None,
+            }],
+        };
+
+        let stale = "[otel]\nexporter = { otlp-http = { endpoint = 'http://127.0.0.1:4327' } }\n";
+        std::fs::write(&path, stale).unwrap();
+        let err = verify(&artifact).unwrap_err();
+        assert!(
+            err.contains("http://127.0.0.1:41234") && err.contains("argus install"),
+            "the error must name the endpoint we listen on and how to fix it: {err}"
+        );
+
+        let current = stale.replace("4327", "41234");
+        std::fs::write(&path, &current).unwrap();
+        assert_eq!(verify(&artifact), Ok(()), "current endpoint must verify");
+    }
+
+    /// The stale-endpoint check above only proves the *mechanism* works; it
+    /// says nothing about any harness switching it on. An edit that points a
+    /// tool at this install's receiver and settles for `ours_markers` verifies
+    /// happily against an endpoint from an older argus that nothing listens on
+    /// any more — the exact failure `must_point_at` exists to catch, and one
+    /// that is silent, because `check` reports the wiring as intact.
+    #[test]
+    fn an_edit_naming_our_receiver_demands_that_exact_receiver() {
+        let home = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("ARGUS_DATA_DIR", home.path().join("data"));
+        }
+        let endpoint = format!("http://{}", crate::config::load().codex.otlp_listen);
+        let mut checked = 0usize;
+        for h in HARNESSES {
+            let d = Detection {
+                id: h.id(),
+                signals: vec![Signal::ConfigDir],
+                config_home: home.path().join(h.id()),
+                binary: None,
+            };
+            for a in h.artifacts(&d, Scope::User) {
+                let Artifact::TomlEdit { path, edits } = a else {
+                    continue;
+                };
+                for e in edits {
+                    if !e.value.to_string().contains(&endpoint) {
+                        continue;
+                    }
+                    checked += 1;
+                    assert_eq!(
+                        e.must_point_at.as_deref(),
+                        Some(endpoint.as_str()),
+                        "{}: {} writes our endpoint but `check` would accept any \
+                         marker match, so a config left pointing at a receiver \
+                         from an older install passes as healthy",
+                        path.display(),
+                        e.key
+                    );
+                }
+            }
+        }
+        assert!(
+            checked > 0,
+            "no harness writes {endpoint} any more — this test now guards nothing"
+        );
+        unsafe {
+            std::env::remove_var("ARGUS_DATA_DIR");
+        }
     }
 
     /// An `OwnedFile` verifies by looking for its markers, so a marker that is

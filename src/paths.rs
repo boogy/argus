@@ -206,7 +206,27 @@ pub fn windows_pipe_name(dir: &Path) -> String {
     format!(r"\\.\pipe\argus-{:016x}", endpoint_discriminator(dir))
 }
 
-/// Per-install discriminator for [`windows_pipe_name`].
+/// The loopback address this install's Codex OTLP receiver listens on.
+pub fn default_otlp_listen() -> String {
+    format!("127.0.0.1:{}", otlp_port(&data_dir()))
+}
+
+/// The port for the install rooted at `dir`.
+///
+/// Loopback is machine-wide, not per-user: on the fixed port this replaced, the
+/// second account to start a daemon simply failed to bind and logged that its
+/// listener was disabled, while its Codex — configured with the same fixed port
+/// — went on posting prompts into the *first* account's audit trail and out
+/// through that account's exporter. Neither side saw anything wrong.
+///
+/// 40000..49152 is above the ranges anything common has registered and below
+/// the dynamic range the kernel draws outbound source ports from, so a stable
+/// choice here does not lose a race with an ephemeral one.
+pub fn otlp_port(dir: &Path) -> u16 {
+    (40_000 + endpoint_discriminator(dir) % 9_152) as u16
+}
+
+/// Per-install discriminator for [`windows_pipe_name`] and [`otlp_port`].
 ///
 /// Keyed on the data directory rather than the user name because that is what
 /// the Unix socket path is already keyed on, and it makes `ARGUS_DATA_DIR`
@@ -331,6 +351,28 @@ mod tests {
             windows_pipe_name(Path::new(BOB)),
             r"\\.\pipe\argus-06ab4e4444656aaf"
         );
+    }
+
+    /// Loopback is shared by every account on the machine, so the fixed port
+    /// this replaced meant the second user's daemon failed to bind while their
+    /// Codex kept posting prompts into the first user's audit trail.
+    #[test]
+    fn two_users_do_not_share_one_otlp_port() {
+        assert_ne!(otlp_port(Path::new(ALICE)), otlp_port(Path::new(BOB)));
+    }
+
+    /// Below 49152, where the kernel starts handing out ephemeral source ports
+    /// for outbound connections: a stable choice inside that range would lose
+    /// the occasional race and disable the listener for the day.
+    #[test]
+    fn the_otlp_port_stays_out_of_the_ephemeral_range() {
+        for dir in [ALICE, BOB, "/home/carol/.local/share/argus", "/"] {
+            let port = otlp_port(Path::new(dir));
+            assert!(
+                (40_000..49_152).contains(&port),
+                "{dir} maps to {port}, outside the reserved band"
+            );
+        }
     }
 
     /// The pin above only binds this side. Nothing in either build compares the

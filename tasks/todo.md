@@ -553,8 +553,45 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
     caught only by the Windows test, which no local run executes. Nothing short
     of a Windows host or a push to CI closes that, and faking it with a mock
     listener would assert only that the mock was called.
-  - [ ] **T8e** — Per-user Codex OTLP port + install-generated bearer token in
-    the Codex `[otel]` headers, checked by the listener.
+  - [x] **T8e** — Per-user Codex OTLP port, and `check` held to it. Files:
+    `src/paths.rs`, `src/config.rs`, `src/harness/mod.rs`, `src/harness/codex.rs`,
+    `src/install.rs`, `README.md`
+    T8b and T8d namespaced the *pipe*; the Codex receiver was still on a fixed
+    `127.0.0.1:4327`. Loopback is machine-wide, not per-user, so that port was
+    the same cross-account collision T8b fixed, one layer down and quieter: the
+    second account's daemon failed to bind and logged its listener disabled,
+    while that account's Codex — configured with the identical fixed port — went
+    on posting prompts into the *first* account's audit trail and out through
+    the first account's exporter. Neither side saw anything wrong. The port is
+    now derived from the data directory through the same discriminator as the
+    pipe name, into 40000..49152: above what anything common registers, and
+    below where the kernel starts drawing ephemeral source ports, which a stable
+    choice inside that range would lose a race against now and then.
+    Changing the port opened a second, worse hole. `ours_markers` deliberately
+    lists `LEGACY_ENDPOINT` so `uninstall` still recognises what older versions
+    wrote, and `check` passed on *any* marker match — so a host upgraded into
+    the new port would keep a `config.toml` naming the old one, capture nothing,
+    and be reported intact. New `TomlEditOp::must_point_at` makes `check` demand
+    the exact current endpoint for that edit while uninstall keeps the broad
+    markers, and the error names the endpoint and says to re-run `argus install`.
+    Three mutations. Reverting `otlp_port` to the fixed constant failed both new
+    `paths` tests and `config::defaults_when_no_files`. Neutralising the
+    `must_point_at` arm in `verify` failed the stale-endpoint test.
+    The third **did not bite**, and that was the useful one: dropping
+    `must_point_at` from the Codex `otel` op left the suite green, because the
+    stale-endpoint test builds its own `TomlEditOp` and so proved the mechanism
+    while proving nothing about any harness switching it on — the gap and the
+    bug were the same shape. Closed with
+    `an_edit_naming_our_receiver_demands_that_exact_receiver`, which walks every
+    harness's artifacts and requires that an edit writing this install's
+    endpoint declare it, and asserts it found at least one such edit so the test
+    cannot quietly degrade into guarding nothing. Re-run, the mutation fails it.
+    Three tests already pinned `127.0.0.1:4327` as a literal and broke here;
+    each was rewritten to assert the property (loopback host, port in band,
+    agreement with the loaded config) rather than the constant — their failing
+    was the evidence the change reached what installs actually write.
+  - [ ] **T8f** — Install-generated bearer token in the Codex `[otel]` headers,
+    checked by the listener; unauthenticated `POST /v1/logs` rejected.
 
 - [ ] **T9** — Export correctness. Dependency: T3.
   Files: `src/export.rs`, `src/buffer.rs`, `Cargo.toml`
