@@ -125,9 +125,12 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
   pi.dev are not installed here, so their mappings stay provisional until a
   human records a real session and re-runs `make record-fixtures`.
 
-- [ ] **T6** — Hot-path hardening. Dependency: T3.
+- [x] **T6** — Hot-path hardening. Dependency: T3.
   Split along the pre-marked line: T6a = per-event CPU + Windows console;
-  T6b = SQLite/config/exporter/paths changes.
+  T6b = SQLite/config/exporter; T6c = data directory, which came out of T6b
+  as its own commit rather than sharing one — it is a data-location change,
+  not a cost change, and the only one of the three that can move a user's
+  existing files.
 
   - [x] **T6a** — Per-event cost. Files: `src/event.rs`, `src/redact.rs`,
     `src/hook.rs`, `src/record.rs`
@@ -190,9 +193,33 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
     `tests/throughput.rs` asserts floors, not rates — CI runners are too noisy
     to gate on a number, so each bound is set where only a structural regression
     can cross it, and the real figures are printed for a human.
-  - [ ] **T6c** — `src/paths.rs`: `data_local_dir()` on Windows (Roaming
-    AppData syncs a live SQLite WAL to a domain server) plus a copy-then-verify
-    migration of an existing roaming buffer that tolerates a locked WAL.
+  - [x] **T6c** — Data directory. Files: `src/paths.rs`, `src/daemon.rs`
+    The buffer lived in `dirs::data_dir()`, which on Windows is *Roaming*
+    AppData: synchronised to a file server at logon and logoff on any
+    domain-joined machine. It copies `events.db`, `-wal` and `-shm`
+    independently and at moments of its own choosing, so what reaches the
+    server is a torn snapshot — and what comes back at the next logon can land
+    on top of a newer local buffer. Roaming a security audit trail to every
+    machine the user logs into is a poor idea on its own merits besides. Now
+    `data_local_dir()`, which is the same path off Windows (verified on this
+    machine: both resolve to `~/Library/Application Support`), so nothing moves
+    there and `legacy_data_dir()` is `None`.
+    An existing roaming buffer is migrated once, at daemon startup, under the
+    single-instance socket so two daemons cannot race. Copy-then-verify and
+    never destructive: each file is read back byte-identical (streamed, since
+    the buffer is capped in rows and not bytes) and the source directory is
+    removed only when every last file passes. A still-running old daemon holds
+    `-wal`/`-shm` under a mandatory lock on Windows, so those copies can fail
+    while the database itself succeeds — tolerated, and it costs only the
+    cleanup. The skip guard tests for `events.db` at the destination rather
+    than for a non-empty directory, because a hook firing before the first
+    daemon start spools a file there, and that must not strand the user's
+    history in the old location forever.
+    Mutation-verified, four of four: trusting the copy without reading it back,
+    dropping the existing-buffer guard, guarding on a non-empty directory
+    instead of on the buffer, and removing the source unconditionally each
+    failed the matching test. The copier is injected, so the locked-file and
+    truncated-write paths are exercised on a platform that has neither.
 
 - [ ] **T7** — Durability and loss visibility. Dependency: T6.
   Files: `src/buffer.rs`, `src/spool.rs`, `src/config.rs`, `src/event.rs`, `src/hook.rs`

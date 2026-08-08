@@ -31,6 +31,20 @@ pub async fn run() -> Result<()> {
         tracing::info!("daemon already running; exiting");
         return Ok(());
     };
+    // Before anything opens the buffer: an upgrade may need to bring one over
+    // from the pre-0.2 location. Only the daemon does this, and only while it
+    // holds the single-instance socket, so two of them cannot race over it.
+    match crate::paths::migrate_legacy_data_dir() {
+        crate::paths::Migration::Skipped => {}
+        crate::paths::Migration::Moved { files } => {
+            tracing::info!("migrated {files} files from the previous data directory")
+        }
+        crate::paths::Migration::Partial { files, left } => tracing::warn!(
+            "migrated {files} files from the previous data directory; {} could not be copied \
+             and were left in place: {left:?}",
+            left.len()
+        ),
+    }
     std::fs::create_dir_all(crate::paths::data_dir())?;
 
     let shared_cfg = Arc::new(RwLock::new(config::load()));
