@@ -900,7 +900,25 @@ fn write_json(path: &Path, doc: &Value) -> Result<()> {
 }
 
 /// Dispatch a raw envelope to its harness adapter.
+///
+/// Every event coming out of here is stamped with the envelope's capture time
+/// rather than the parse time. `Event::new` uses `Utc::now()`, which is when
+/// the *daemon* got around to the payload — for anything that sat in the spool
+/// while the daemon was down, or arrived during a burst, that is minutes or
+/// hours after the tool actually did the thing. On a SIEM timeline the whole
+/// backlog then lands in a single spike at drain time, and ordering within a
+/// session is lost. Stamping here rather than in each adapter means no adapter
+/// can forget to (telemetry-gaps #8).
 pub fn parse(envelope: Envelope, capture: &CaptureCfg) -> Vec<Event> {
+    let received_at = envelope.received_at;
+    let mut events = dispatch(envelope, capture);
+    for e in &mut events {
+        e.ts = received_at;
+    }
+    events
+}
+
+fn dispatch(envelope: Envelope, capture: &CaptureCfg) -> Vec<Event> {
     for h in HARNESSES {
         if h.id() == envelope.source {
             return h.parse(&envelope, capture);

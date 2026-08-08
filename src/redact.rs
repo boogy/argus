@@ -38,8 +38,17 @@ const BUILTIN: &[(&str, &str)] = &[
     ),
 ];
 
+/// Counts regex-set compilations. Building a `Redactor` recompiles every
+/// pattern, so the daemon caches one and rebuilds only on a config change —
+/// a guarantee that is invisible in the output and therefore counted here.
+#[cfg(test)]
+pub(crate) static REDACTOR_BUILDS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 impl Redactor {
     pub fn new(cfg: &RedactionCfg) -> Self {
+        #[cfg(test)]
+        REDACTOR_BUILDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         // A pattern that fails to compile is dropped from *both* the rule list
         // and the set, in one pass, so rule `i` and set index `i` always name
         // the same pattern. Building the set from `BUILTIN` directly would

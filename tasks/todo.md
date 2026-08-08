@@ -153,9 +153,46 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
     failed the matching test. Untested seam: the two `#[cfg(windows)]` blocks
     are compiled by the CI Windows job but asserted by nothing — the local
     cross-check is blocked, `libsqlite3-sys` needs a mingw C toolchain.
-  - [ ] **T6b** — SQLite/config/exporter. Files: `src/paths.rs`,
-    `src/buffer.rs`, `src/daemon.rs`, `src/export.rs`, `src/harness/mod.rs`,
+  - [x] **T6b** — SQLite/config/exporter. Files: `src/buffer.rs`,
+    `src/daemon.rs`, `src/export.rs`, `src/harness/mod.rs`, `src/redact.rs`,
     new `tests/throughput.rs`
+    Four costs, each paid per event or per flush cycle for no benefit.
+    `Buffer::push_batch` writes a whole fan-out under one transaction and trims
+    once at the end; one host payload routinely becomes several events, and each
+    used to charge its own implicit transaction *and* its own `ORDER BY seq DESC
+    ... OFFSET` scan to enforce a cap only the last of them could cross. `push`
+    is now a batch of one, so the cap semantics are unchanged.
+    `peek_batch` reads the rows out and releases the connection before
+    deserializing them — the JSON work needs no database, and holding the lock
+    across it stalled every arriving event behind the export loop.
+    The daemon reached into the `RwLock` three times per envelope, each time
+    cloning the **entire** `Config` to read one field; `Pipeline` caches the
+    redactor and the capture settings and rebuilds only when a fingerprint says
+    the config behind them changed. `capture` had to be added to that
+    fingerprint — it was absent while it was re-read per event, and caching it
+    without widening the fingerprint would have made live config changes
+    silently never take effect.
+    `Exporter` shares one process-wide `reqwest::Client`. It was rebuilt every
+    flush, discarding all keep-alive connections and paying a fresh TCP+TLS
+    handshake to the collector every ten seconds, forever.
+    `Event.ts` is now the envelope's `received_at`, stamped at the single
+    `harness::parse` choke point so no adapter can forget and the unknown-source
+    `Raw` fallback is covered too (telemetry-gaps #8). Without it an outage
+    erased the timeline spooling exists to preserve: an hour of work landing on
+    the collector as one spike at drain time.
+    Three more `#[cfg(test)]` probe counters (`TRIMS`, `CLIENT_BUILDS`,
+    `REDACTOR_BUILDS`) make the invisible guarantees assertable; `peek_batch`'s
+    lock scope is guarded by a `try_lock` assertion instead, having no natural
+    test. Mutation-verified, six of six: trimming per event, holding the lock
+    across deserialization, dropping `capture` from the fingerprint, rebuilding
+    the pipeline unconditionally, building a client per `Exporter`, and dropping
+    the `ts` stamp each failed the matching test.
+    `tests/throughput.rs` asserts floors, not rates — CI runners are too noisy
+    to gate on a number, so each bound is set where only a structural regression
+    can cross it, and the real figures are printed for a human.
+  - [ ] **T6c** — `src/paths.rs`: `data_local_dir()` on Windows (Roaming
+    AppData syncs a live SQLite WAL to a domain server) plus a copy-then-verify
+    migration of an existing roaming buffer that tolerates a locked WAL.
 
 - [ ] **T7** — Durability and loss visibility. Dependency: T6.
   Files: `src/buffer.rs`, `src/spool.rs`, `src/config.rs`, `src/event.rs`, `src/hook.rs`

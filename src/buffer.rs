@@ -8,6 +8,12 @@ pub struct Buffer {
     max_events: u64,
 }
 
+/// Counts trim queries. The trim is the expensive part of a write, and a
+/// batch that trims once looks identical from the outside to one that trims
+/// per event — so the cost has to be counted to be asserted on.
+#[cfg(test)]
+static TRIMS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 impl Buffer {
     pub fn open(max_events: u64) -> Result<Self> {
         // A cap of 0 would make the trim-to-cap DELETE below (OFFSET 0) wipe
@@ -51,30 +57,66 @@ impl Buffer {
     }
 
     pub fn push(&self, e: &Event) -> Result<()> {
+        self.push_batch(std::slice::from_ref(e))
+    }
+
+    /// Append a whole batch under one transaction, then trim once.
+    ///
+    /// One host payload routinely fans out into several events, and `push`
+    /// charged each of them its own implicit transaction *and* its own
+    /// trim-to-cap query — an `ORDER BY seq DESC ... OFFSET max_events` scan
+    /// repeated per event, to enforce a cap that only the last of them could
+    /// possibly cross. Batching keeps the cap exactly where it was (a single
+    /// `push` is a batch of one, so nothing about the per-event path changes)
+    /// while a burst pays for one commit and one trim.
+    pub fn push_batch(&self, events: &[Event]) -> Result<()> {
+        if events.is_empty() {
+            return Ok(());
+        }
         // A poisoned lock only means a panic elsewhere mid-operation; the SQLite connection itself is still usable.
-        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        conn.execute(
-            "INSERT INTO events (body) VALUES (?1)",
-            [serde_json::to_string(e)?],
-        )?;
-        conn.execute(
-            "DELETE FROM events WHERE seq <= (
-                SELECT seq FROM events ORDER BY seq DESC LIMIT 1 OFFSET ?1
-            )",
-            [self.max_events as i64],
-        )?;
+        let mut conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let tx = conn.transaction()?;
+        {
+            let mut stmt = tx.prepare_cached("INSERT INTO events (body) VALUES (?1)")?;
+            for e in events {
+                stmt.execute([serde_json::to_string(e)?])?;
+            }
+            #[cfg(test)]
+            TRIMS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            tx.prepare_cached(
+                "DELETE FROM events WHERE seq <= (
+                    SELECT seq FROM events ORDER BY seq DESC LIMIT 1 OFFSET ?1
+                )",
+            )?
+            .execute([self.max_events as i64])?;
+        }
+        tx.commit()?;
         Ok(())
     }
 
     pub fn peek_batch(&self, n: usize) -> Result<Vec<(i64, Event)>> {
-        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        let mut stmt = conn.prepare("SELECT seq, body FROM events ORDER BY seq ASC LIMIT ?1")?;
-        let rows = stmt.query_map([n as i64], |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
-        })?;
-        let mut out = Vec::new();
-        for row in rows {
-            let (seq, body) = row?;
+        // Read out the rows, then drop the connection before parsing them.
+        // Deserializing a full batch is the expensive half of this call, and
+        // it needs no database at all — holding the lock across it stalls
+        // every arriving event behind the export loop's JSON work.
+        let rows: Vec<(i64, String)> = {
+            let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+            let mut stmt =
+                conn.prepare_cached("SELECT seq, body FROM events ORDER BY seq ASC LIMIT ?1")?;
+            let mapped = stmt.query_map([n as i64], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?;
+            mapped.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        // Structural guarantees are easy to undo by accident, so make this one
+        // falsifiable: moving the parse back inside the block above trips here.
+        #[cfg(test)]
+        assert!(
+            self.conn.try_lock().is_ok(),
+            "peek_batch must not hold the connection while deserializing"
+        );
+        let mut out = Vec::with_capacity(rows.len());
+        for (seq, body) in rows {
             match serde_json::from_str(&body) {
                 Ok(e) => out.push((seq, e)),
                 Err(err) => tracing::warn!("skipping corrupt buffered event seq={seq}: {err}"),
@@ -165,6 +207,27 @@ mod tests {
             b.len().unwrap() >= 1,
             "max_events=0 must not delete every row on push"
         );
+    }
+
+    #[test]
+    fn a_batch_costs_one_trim_and_still_honours_the_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("ARGUS_DATA_DIR", dir.path());
+        }
+        let b = Buffer::open(3).unwrap();
+        let batch: Vec<Event> = (0..5).map(ev).collect();
+        TRIMS.store(0, std::sync::atomic::Ordering::Relaxed);
+        b.push_batch(&batch).unwrap();
+        assert_eq!(
+            TRIMS.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "one trim per batch, not one per event"
+        );
+        assert_eq!(b.len().unwrap(), 3, "the cap still holds across a batch");
+        let kept = b.peek_batch(10).unwrap();
+        let first = serde_json::to_string(&kept[0].1).unwrap();
+        assert!(first.contains("p2"), "oldest two dropped, got {first}");
     }
 
     #[test]

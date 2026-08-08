@@ -57,7 +57,7 @@ pub async fn run() -> Result<()> {
         tx.clone(),
     ));
 
-    let max_events = read_cfg(&shared_cfg).buffer.max_events;
+    let max_events = with_cfg(&shared_cfg, |c| c.buffer.max_events);
     let buffer = Arc::new(Buffer::open(max_events)?);
 
     let export_handle = tokio::spawn(export_loop(buffer.clone(), shared_cfg.clone()));
@@ -66,27 +66,22 @@ pub async fn run() -> Result<()> {
         buffer.clone(),
     ));
 
-    // Pipeline: parse -> redact -> buffer. Redactor rebuilt when redaction
-    // config changes (cheap fingerprint check, avoids rebuilding regexes on
-    // every event).
-    let mut redactor = Redactor::new(&read_cfg(&shared_cfg).redaction);
-    let mut redactor_gen = config_fingerprint(&shared_cfg);
+    // Pipeline: parse -> redact -> buffer. Both derived pieces are rebuilt
+    // only when the fingerprint says the config behind them changed.
+    let mut pipeline = Pipeline::build(&shared_cfg);
 
     // Shared by both select arms so a drained-on-shutdown envelope goes
     // through the exact same parse -> redact -> buffer pipeline as one
     // received during normal operation.
     let mut process = |envelope: Envelope| {
-        let current = config_fingerprint(&shared_cfg);
-        if current != redactor_gen {
-            redactor = Redactor::new(&read_cfg(&shared_cfg).redaction);
-            redactor_gen = current;
-        }
-        let capture = read_cfg(&shared_cfg).capture.clone();
-        for event in adapters::parse(envelope, &capture) {
-            let event = redactor.scrub_event(event);
-            if let Err(e) = buffer.push(&event) {
-                tracing::error!("buffer push failed: {e}");
-            }
+        pipeline.refresh(&shared_cfg);
+        let events: Vec<_> = adapters::parse(envelope, &pipeline.capture)
+            .into_iter()
+            .map(|e| pipeline.redactor.scrub_event(e))
+            .collect();
+        // One payload commonly becomes several events; write them together.
+        if let Err(e) = buffer.push_batch(&events) {
+            tracing::error!("buffer push failed: {e}");
         }
     };
 
@@ -124,7 +119,7 @@ async fn export_loop(buffer: Arc<Buffer>, cfg: Arc<RwLock<config::Config>>) {
     let mut backoff = 1u64;
     loop {
         let (flush, batch_size, exporter) = {
-            let export_cfg = read_cfg(&cfg).export.clone();
+            let export_cfg = with_cfg(&cfg, |c| c.export.clone());
             (
                 effective_flush_secs(&export_cfg),
                 effective_batch_size(&export_cfg),
@@ -159,7 +154,7 @@ async fn export_loop(buffer: Arc<Buffer>, cfg: Arc<RwLock<config::Config>>) {
 /// one export attempt and swallows failures (the batch stays buffered for
 /// the next daemon run either way).
 async fn final_flush(buffer: &Buffer, cfg: &Arc<RwLock<config::Config>>) {
-    let export_cfg = read_cfg(cfg).export.clone();
+    let export_cfg = with_cfg(cfg, |c| c.export.clone());
     let batch_size = effective_batch_size(&export_cfg);
     let Ok(batch) = buffer.peek_batch(batch_size) else {
         return;
@@ -174,11 +169,131 @@ async fn final_flush(buffer: &Buffer, cfg: &Arc<RwLock<config::Config>>) {
     }
 }
 
-fn read_cfg(cfg: &Arc<RwLock<config::Config>>) -> config::Config {
-    cfg.read().unwrap_or_else(|e| e.into_inner()).clone()
+/// Everything the per-envelope path derives from config, plus the fingerprint
+/// it was derived from.
+///
+/// The config sits behind an `RwLock` a poll loop may rewrite at any moment,
+/// and the previous code reached into it three times per envelope — each time
+/// cloning the *entire* `Config` (every table in it, remote URL, headers, the
+/// lot) to read one field. The regexes were already cached; the capture
+/// settings were not, and paid a full clone per event to read five booleans.
+struct Pipeline {
+    redactor: Redactor,
+    capture: config::CaptureCfg,
+    fingerprint: String,
 }
 
+impl Pipeline {
+    fn build(cfg: &Arc<RwLock<config::Config>>) -> Self {
+        let (redactor, capture) =
+            with_cfg(cfg, |c| (Redactor::new(&c.redaction), c.capture.clone()));
+        Pipeline {
+            redactor,
+            capture,
+            fingerprint: config_fingerprint(cfg),
+        }
+    }
+
+    /// Cheap on the common path: one string compare against a live config
+    /// read, and a rebuild only when it differs.
+    fn refresh(&mut self, cfg: &Arc<RwLock<config::Config>>) {
+        let current = config_fingerprint(cfg);
+        if current != self.fingerprint {
+            *self = Pipeline::build(cfg);
+            self.fingerprint = current;
+        }
+    }
+}
+
+fn with_cfg<T>(cfg: &Arc<RwLock<config::Config>>, f: impl FnOnce(&config::Config) -> T) -> T {
+    f(&cfg.read().unwrap_or_else(|e| e.into_inner()))
+}
+
+/// Must cover every field [`Pipeline`] caches, or a live config reload leaves
+/// the daemon running on the old value forever. `capture` was absent while it
+/// was re-read per event; caching it makes its inclusion load-bearing.
 fn config_fingerprint(cfg: &Arc<RwLock<config::Config>>) -> String {
-    let c = cfg.read().unwrap_or_else(|e| e.into_inner());
-    format!("{}:{:?}", c.redaction.enabled, c.redaction.extra_patterns)
+    with_cfg(cfg, |c| {
+        format!(
+            "{}:{:?}:{:?}",
+            c.redaction.enabled, c.redaction.extra_patterns, c.capture
+        )
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn shared() -> Arc<RwLock<config::Config>> {
+        Arc::new(RwLock::new(config::Config::default()))
+    }
+
+    /// Anything the pipeline caches must show up in the fingerprint. The
+    /// alternative is not a slow daemon but a wrong one: a live config change
+    /// that never takes effect, with nothing to indicate it was ignored.
+    #[test]
+    fn every_cached_setting_invalidates_the_pipeline() {
+        let cfg = shared();
+        let mut pipeline = Pipeline::build(&cfg);
+        let before = pipeline.fingerprint.clone();
+
+        cfg.write().unwrap().capture.prompts = !config::CaptureCfg::default().prompts;
+        assert_ne!(
+            config_fingerprint(&cfg),
+            before,
+            "a capture change must invalidate the cached pipeline"
+        );
+        pipeline.refresh(&cfg);
+        assert_eq!(
+            pipeline.capture.prompts,
+            !config::CaptureCfg::default().prompts,
+            "refresh must pick the new capture settings up"
+        );
+
+        let after_capture = pipeline.fingerprint.clone();
+        cfg.write().unwrap().redaction.extra_patterns = vec!["ACME-[0-9]{6}".into()];
+        assert_ne!(
+            config_fingerprint(&cfg),
+            after_capture,
+            "a redaction change must invalidate the cached pipeline"
+        );
+        pipeline.refresh(&cfg);
+        let scrubbed = pipeline
+            .redactor
+            .scrub_str("badge ACME-123456")
+            .into_owned();
+        assert!(
+            scrubbed.contains("[REDACTED:custom-0]"),
+            "refresh must rebuild the regexes: {scrubbed}"
+        );
+    }
+
+    /// An unchanged config must not rebuild anything — the rebuild recompiles
+    /// every redaction regex, which is exactly what the fingerprint exists to
+    /// avoid doing per event.
+    #[test]
+    fn an_unchanged_config_does_not_rebuild() {
+        use std::sync::atomic::Ordering::Relaxed;
+        let cfg = shared();
+        let mut pipeline = Pipeline::build(&cfg);
+        let before = crate::redact::REDACTOR_BUILDS.load(Relaxed);
+        for _ in 0..100 {
+            pipeline.refresh(&cfg);
+        }
+        assert_eq!(
+            crate::redact::REDACTOR_BUILDS.load(Relaxed),
+            before,
+            "an unchanged config recompiled the redaction patterns"
+        );
+
+        cfg.write().unwrap().redaction.enabled = !config::RedactionCfg::default().enabled;
+        pipeline.refresh(&cfg);
+        pipeline.refresh(&cfg);
+        assert_eq!(
+            crate::redact::REDACTOR_BUILDS.load(Relaxed),
+            before + 1,
+            "a change rebuilds exactly once, then settles"
+        );
+    }
 }

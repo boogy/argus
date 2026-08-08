@@ -141,13 +141,38 @@ pub struct Exporter {
     headers: std::collections::BTreeMap<String, String>,
 }
 
+/// Counts how many HTTP clients this process has actually built. The
+/// difference between one pool and a new pool per flush is invisible in the
+/// exported data and very visible on the wire, so it is counted.
+#[cfg(test)]
+static CLIENT_BUILDS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// One connection pool for the whole process.
+///
+/// `reqwest::Client` is a handle around a shared pool — cloning is cheap,
+/// *building* is not. The export loop constructed a fresh `Exporter` on every
+/// flush cycle, so each one threw away every keep-alive connection and paid a
+/// new TCP+TLS handshake to the collector, every ten seconds, forever. The
+/// endpoint and headers still come from the current config on each build; only
+/// the pool is shared, so a config reload keeps its connections.
+fn shared_client() -> reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            #[cfg(test)]
+            CLIENT_BUILDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(15))
+                .build()
+                .expect("reqwest client")
+        })
+        .clone()
+}
+
 impl Exporter {
     pub fn new(cfg: &ExportCfg) -> Self {
         Exporter {
-            client: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(15))
-                .build()
-                .expect("reqwest client"),
+            client: shared_client(),
             endpoint: cfg.otlp_endpoint.clone(),
             headers: cfg.headers.clone(),
         }
@@ -279,6 +304,21 @@ mod tests {
         assert!(
             err.is_err(),
             "non-2xx must surface as Err for at-least-once redelivery"
+        );
+    }
+
+    #[test]
+    fn every_exporter_shares_one_connection_pool() {
+        let cfg = crate::config::ExportCfg::default();
+        for _ in 0..32 {
+            let _ = Exporter::new(&cfg);
+        }
+        // Absolute count, not a delta: other tests build exporters too, and
+        // under every ordering the process must end up with exactly one pool.
+        assert_eq!(
+            CLIENT_BUILDS.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "the export loop rebuilds an Exporter per flush; the pool must survive that"
         );
     }
 }
