@@ -27,6 +27,7 @@ pub mod copilot;
 pub mod opencode;
 
 use crate::config::CaptureCfg;
+use crate::detect::{BinaryProbe, Env, Platform, detect};
 use crate::event::{Envelope, Event};
 use crate::integrity::Finding;
 use anyhow::Result;
@@ -160,46 +161,92 @@ pub enum Artifact {
 /// A config directory that signals a harness is installed.
 #[derive(Debug, Clone, Copy)]
 pub struct ConfigDir {
-    /// Environment variable that overrides the location (e.g. `COPILOT_HOME`).
-    pub env_override: Option<&'static str>,
+    /// `(variable, path relative to its value)` — an environment-rooted
+    /// location that wins over `rel` when the variable is set and non-empty
+    /// (`COPILOT_HOME`, `XDG_CONFIG_HOME`).
+    pub env: Option<(&'static str, &'static str)>,
     /// Path relative to the user's home directory.
     pub rel: &'static str,
+    /// Restrict this location to one platform; `None` matches all of them.
+    pub platform: Option<Platform>,
 }
 
 impl ConfigDir {
-    pub fn resolve(&self, home: &Path) -> PathBuf {
-        if let Some(key) = self.env_override
-            && let Ok(v) = std::env::var(key)
-            && !v.is_empty()
+    pub fn matches(&self, platform: Platform) -> bool {
+        self.platform.is_none_or(|p| p == platform)
+    }
+
+    pub fn resolve(&self, env: &Env) -> PathBuf {
+        if let Some((key, rel)) = self.env
+            && let Some(v) = env.var(key)
         {
-            return PathBuf::from(v);
+            return PathBuf::from(v).join(rel);
         }
-        home.join(self.rel)
+        env.home.join(self.rel)
     }
 }
 
-/// Declarative detection inputs.
-///
-/// T4 extends this with binaries, npm packages and brew formulae, and with
-/// per-platform config dirs; today only `config_dirs` is populated and
-/// consulted, which reproduces the previous "does the config dir exist"
-/// behaviour exactly.
+/// Declarative detection inputs. Each is one independent way to conclude the
+/// tool is present; see [`crate::detect`] for how they combine.
 pub struct Probes {
     pub config_dirs: &'static [ConfigDir],
+    /// Binary names the tool installs. A [`BinaryProbe::generic`] name needs
+    /// corroboration before it counts.
+    pub binaries: &'static [BinaryProbe],
+    /// Global npm package names, matched against `node_modules/<name>/` in the
+    /// binary's real path.
+    pub npm_packages: &'static [&'static str],
+    /// Homebrew formula names, matched against `Cellar/<name>/`.
+    pub brew_formulae: &'static [&'static str],
 }
 
 /// Which detection signal(s) fired for a harness.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Signal {
     ConfigDir,
-    // T4: Binary, NpmGlobal, Brew
+    Binary,
+    NpmGlobal,
+    Brew,
+}
+
+impl std::fmt::Display for Signal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Signal::ConfigDir => "config dir",
+            Signal::Binary => "binary",
+            Signal::NpmGlobal => "npm",
+            Signal::Brew => "brew",
+        })
+    }
 }
 
 /// A harness found on this machine.
 pub struct Detection {
     pub id: &'static str,
     pub signals: Vec<Signal>,
+    /// Where argus installs. The first declared location for this platform
+    /// when none exists yet — a tool installed but never run has no config
+    /// directory, and install creates it.
     pub config_home: PathBuf,
+    /// The tool's binary, when a binary signal fired. Reported by `status` and
+    /// `install --dry-run` so a surprising detection can be traced to a file.
+    pub binary: Option<PathBuf>,
+}
+
+impl Detection {
+    /// The signals that fired, for human output.
+    pub fn why(&self) -> String {
+        let mut s = self
+            .signals
+            .iter()
+            .map(Signal::to_string)
+            .collect::<Vec<_>>()
+            .join("+");
+        if let Some(b) = &self.binary {
+            s.push_str(&format!(" ({})", b.display()));
+        }
+        s
+    }
 }
 
 /// A harness-specific setting that silently disables capture (e.g. Codex's
@@ -433,35 +480,6 @@ fn check_command(cmd: &str) -> std::result::Result<(), String> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Detection
-// ---------------------------------------------------------------------------
-
-/// Every harness detected under `home`.
-///
-/// T4 replaces the config-dir-only probe with multi-signal detection (binary
-/// on PATH, npm global, brew) and per-platform layouts.
-pub fn detect(home: &Path) -> Vec<Detection> {
-    HARNESSES
-        .iter()
-        .filter_map(|h| detect_one(*h, home))
-        .collect()
-}
-
-fn detect_one(h: &dyn Harness, home: &Path) -> Option<Detection> {
-    for cd in h.probes().config_dirs {
-        let path = cd.resolve(home);
-        if path.exists() {
-            return Some(Detection {
-                id: h.id(),
-                signals: vec![Signal::ConfigDir],
-                config_home: path,
-            });
-        }
-    }
-    None
-}
-
 fn harness_by_id(id: &str) -> Option<&'static dyn Harness> {
     HARNESSES.iter().copied().find(|h| h.id() == id)
 }
@@ -491,6 +509,18 @@ pub fn install(home: &Path, dry_run: bool) -> Result<()> {
         let Some(h) = harness_by_id(d.id) else {
             continue;
         };
+        println!(
+            "{}detected {} via {}",
+            if dry_run { "[dry-run] " } else { "" },
+            h.display_name(),
+            d.why()
+        );
+        // A tool found only by its binary has never been run, so its config
+        // directory does not exist yet. Nothing extra is needed to create it:
+        // every artifact writer creates its own parent chain, and each writes
+        // under `config_home`. What matters is that the writers are the *only*
+        // thing that creates it, so a dry run — which returns before all of
+        // them — still leaves the disk exactly as it found it.
         for artifact in h.artifacts(&d, Scope::User) {
             apply(&artifact, h.display_name(), dry_run)?;
         }
@@ -662,11 +692,21 @@ fn revert(artifact: &Artifact) -> Result<()> {
     Ok(())
 }
 
-/// Wiring status for every *detected* harness. A harness the user never
-/// installed can't be tampered with, so it is absent rather than broken.
+/// Wiring status for every harness argus could have wired.
+///
+/// Detection is deliberately wider than this: `install` acts on a binary alone
+/// so a freshly-installed agent is covered before its first run. `check` must
+/// not, or a machine that merely has `claude` on `PATH` and was never wired
+/// reports broken forever. The config directory is the dividing line — argus
+/// only ever writes inside one, and install creates it — so its presence means
+/// "this host could have been wired", which is exactly the population a
+/// monitor wants to alert on.
 pub fn check(home: &Path) -> Vec<Finding> {
     let mut out = Vec::new();
     for d in detect(home) {
+        if !d.signals.contains(&Signal::ConfigDir) {
+            continue;
+        }
         let Some(h) = harness_by_id(d.id) else {
             continue;
         };
@@ -1178,6 +1218,7 @@ mod tests {
                 id: h.id(),
                 signals: vec![Signal::ConfigDir],
                 config_home: home.path().join(h.id()),
+                binary: None,
             };
             for a in h.artifacts(&d, Scope::User) {
                 let Artifact::OwnedFile {

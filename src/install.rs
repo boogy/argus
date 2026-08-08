@@ -10,7 +10,7 @@ use anyhow::Result;
 
 /// Home directory root. Overridable via `ARGUS_HOME` so tests never
 /// touch a real home directory.
-pub(crate) fn home() -> std::path::PathBuf {
+pub fn home() -> std::path::PathBuf {
     std::env::var("ARGUS_HOME")
         .map(Into::into)
         .unwrap_or_else(|_| dirs::home_dir().unwrap_or_else(|| ".".into()))
@@ -51,6 +51,16 @@ mod tests {
         // that points it at a temp file can't leak into the next one.
         unsafe {
             std::env::remove_var(crate::harness::BIN_ENV);
+        }
+        // Detection reads the real machine's PATH and config-dir overrides.
+        // Without pinning both, these tests assert on whichever agents the
+        // developer happens to have installed — `opencode` on this machine's
+        // PATH is enough to make "not installed" cases fail.
+        unsafe {
+            std::env::set_var(crate::detect::BIN_DIRS_ENV, dir.path().join("nobin"));
+            for k in ["XDG_CONFIG_HOME", "CODEX_HOME", "COPILOT_HOME"] {
+                std::env::remove_var(k);
+            }
         }
         std::fs::create_dir_all(dir.path().join(".claude")).unwrap();
         std::fs::create_dir_all(dir.path().join(".config/opencode")).unwrap();
@@ -466,6 +476,117 @@ mod tests {
             .find(|f| f.tool == "codex")
             .unwrap();
         assert!(!f.ok && f.detail.contains("otel missing from"), "{f:?}");
+    }
+
+    /// A dry run's whole contract is that it is safe to run anywhere. Now that
+    /// install *creates* config directories for a tool detected by its binary
+    /// alone, "writes nothing" has to be asserted against the tree, not
+    /// reviewed by eye.
+    #[test]
+    fn dry_run_creates_nothing() {
+        let home = fake_home();
+        std::fs::create_dir_all(home.path().join(".copilot")).unwrap();
+        fake_bin(home.path());
+        let before = tree(home.path());
+        run(true).unwrap();
+        assert_eq!(before, tree(home.path()), "dry run touched the filesystem");
+        // Guard against the assertion passing because `tree` sees nothing: the
+        // same call without --dry-run must change it.
+        run(false).unwrap();
+        assert_ne!(before, tree(home.path()));
+    }
+
+    /// A tool installed but never run has no config directory. Detection finds
+    /// it by its binary, and install has to create the directory or every
+    /// artifact below it lands nowhere.
+    #[test]
+    fn a_tool_found_only_by_its_binary_gets_its_config_dir_created() {
+        let home = fake_home();
+        std::fs::remove_dir_all(home.path().join(".claude")).unwrap();
+        let bin = home.path().join("nobin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let claude = bin.join(if cfg!(windows) {
+            "claude.exe"
+        } else {
+            "claude"
+        });
+        std::fs::write(&claude, "#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        run(false).unwrap();
+        let settings = home.path().join(".claude/settings.json");
+        assert!(settings.exists(), "binary-only detection must still wire");
+        assert!(
+            std::fs::read_to_string(&settings)
+                .unwrap()
+                .contains("argus"),
+            "hooks written into the freshly created config dir"
+        );
+    }
+
+    /// `check` deliberately does not follow detection all the way: a machine
+    /// with `claude` on PATH that was never wired is not broken, and reporting
+    /// it as broken would make the MDM exit code useless.
+    #[test]
+    fn check_ignores_a_tool_that_was_never_wired() {
+        let home = fake_home();
+        std::fs::remove_dir_all(home.path().join(".claude")).unwrap();
+        let bin = home.path().join("nobin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let claude = bin.join(if cfg!(windows) {
+            "claude.exe"
+        } else {
+            "claude"
+        });
+        std::fs::write(&claude, "#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        assert!(
+            crate::detect::detect(home.path())
+                .iter()
+                .any(|d| d.id == "claude-code"),
+            "precondition: the binary is detected"
+        );
+        assert!(
+            !crate::integrity::check(home.path())
+                .iter()
+                .any(|f| f.tool == "claude-code"),
+            "unwired tool must not be reported"
+        );
+    }
+
+    /// Every file under `root`, with its contents — the shape a dry run must
+    /// leave untouched.
+    fn tree(root: &std::path::Path) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+        fn walk(
+            dir: &std::path::Path,
+            out: &mut std::collections::BTreeMap<std::path::PathBuf, Vec<u8>>,
+        ) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for e in entries.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    // Record directories too: creating an empty one is still a
+                    // write, and it is the exact thing install now does.
+                    out.insert(p.clone(), Vec::new());
+                    walk(&p, out);
+                } else {
+                    out.insert(p.clone(), std::fs::read(&p).unwrap_or_default());
+                }
+            }
+        }
+        let mut out = std::collections::BTreeMap::new();
+        walk(root, &mut out);
+        out
     }
 
     #[test]

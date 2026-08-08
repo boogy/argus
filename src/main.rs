@@ -110,6 +110,19 @@ fn print_status() -> Result<()> {
         Err(e) => println!("buffered events: unavailable ({e})"),
     }
 
+    // Which tools argus would wire, and on what evidence. Printing the signal
+    // is what makes a surprising result diagnosable: "detected via binary"
+    // with no config dir means the tool has never been run, and a lone generic
+    // name is not shown here at all because it never counts.
+    let detected = argus::detect::detect(&argus::install::home());
+    if detected.is_empty() {
+        println!("tools: none detected");
+    } else {
+        for d in &detected {
+            println!("tool {}: {} -> {}", d.id, d.why(), d.config_home.display());
+        }
+    }
+
     let running = argus::ipc::is_daemon_running();
     println!(
         "daemon socket: {}",

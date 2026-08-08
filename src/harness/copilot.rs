@@ -1,5 +1,6 @@
 use super::{Artifact, CmdStyle, ConfigDir, Detection, Harness, Probes, Scope, hook_command};
 use crate::config::CaptureCfg;
+use crate::detect::BinaryProbe;
 use crate::event::{Envelope, Event};
 use serde_json::json;
 use std::borrow::Cow;
@@ -25,9 +26,13 @@ pub const EVENTS: &[&str] = &[
 ];
 
 const CONFIG_DIRS: &[ConfigDir] = &[ConfigDir {
-    env_override: Some("COPILOT_HOME"),
+    env: Some(("COPILOT_HOME", "")),
     rel: ".copilot",
+    platform: None,
 }];
+
+const BINARIES: &[BinaryProbe] = &[BinaryProbe::new("copilot")];
+const NPM: &[&str] = &["@github/copilot"];
 
 /// `s` as it appears *inside* a JSON string literal — the body of
 /// `serde_json`'s own output, minus the surrounding quotes. Needed because the
@@ -54,6 +59,9 @@ impl Harness for Copilot {
     fn probes(&self) -> Probes {
         Probes {
             config_dirs: CONFIG_DIRS,
+            binaries: BINARIES,
+            npm_packages: NPM,
+            brew_formulae: &[],
         }
     }
 

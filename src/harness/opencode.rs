@@ -1,5 +1,6 @@
 use super::{Artifact, ConfigDir, Detection, Harness, Probes, Scope};
 use crate::config::CaptureCfg;
+use crate::detect::{BinaryProbe, Platform};
 use crate::event::{Envelope, Event};
 use std::borrow::Cow;
 
@@ -18,10 +19,25 @@ fn markers() -> Vec<String> {
     ]
 }
 
-const CONFIG_DIRS: &[ConfigDir] = &[ConfigDir {
-    env_override: None,
-    rel: ".config/opencode",
-}];
+/// XDG on Unix, `%APPDATA%` on Windows. Declaration order is install order:
+/// the first entry that matches the platform is where a first-time install
+/// writes, so the env-rooted location has to come first.
+const CONFIG_DIRS: &[ConfigDir] = &[
+    ConfigDir {
+        env: Some(("XDG_CONFIG_HOME", "opencode")),
+        rel: ".config/opencode",
+        platform: None,
+    },
+    ConfigDir {
+        env: Some(("APPDATA", "opencode")),
+        rel: "AppData/Roaming/opencode",
+        platform: Some(Platform::Windows),
+    },
+];
+
+const BINARIES: &[BinaryProbe] = &[BinaryProbe::new("opencode")];
+const NPM: &[&str] = &["opencode-ai"];
+const BREW: &[&str] = &["opencode"];
 
 pub struct OpenCode;
 
@@ -37,6 +53,9 @@ impl Harness for OpenCode {
     fn probes(&self) -> Probes {
         Probes {
             config_dirs: CONFIG_DIRS,
+            binaries: BINARIES,
+            npm_packages: NPM,
+            brew_formulae: BREW,
         }
     }
 

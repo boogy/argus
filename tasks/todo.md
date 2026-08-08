@@ -63,8 +63,39 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
   `install_path` (`current_exe()` isn't controllable in-process); the function
   itself is tested directly.
 
-- [ ] **T4** — Cross-platform detection. Dependency: T3.
-  Files: new `src/detect.rs`, `src/harness/mod.rs`, `src/install.rs`, `src/main.rs`
+- [x] **T4** — Cross-platform detection. Dependency: T3.
+  Files: new `src/detect.rs`, `src/harness/mod.rs`, `src/install.rs`, `src/main.rs`,
+  `src/harness/{claude_code,codex,copilot,opencode}.rs`, `src/integrity.rs`,
+  `README.md`, `docs/adding-a-tool.md`
+  Detection is now four independent signals (config dir, binary, npm, brew)
+  instead of one home-dir `is_dir()`, which was wrong in both directions: it
+  missed a tool installed but never run, and it fired on a leftover empty
+  directory. Everything read from the outside world — **including the
+  platform** — arrives through `detect::Env`, so Windows `PATHEXT`, `%APPDATA%`
+  and verbatim `\\?\` paths are unit-tested from macOS; nothing in `detect.rs`
+  branches on `cfg!`. Provenance canonicalizes the found binary and matches
+  `/node_modules/<pkg>/` or `/cellar/<formula>/` on a lowercased, `/`-normalized
+  path. A *generic* binary name (`codex` — LaTeX tooling ships one too) needs
+  corroboration from another signal before it counts.
+  Two deliberate asymmetries, each guarded by a test: `install` acts on any
+  signal (so a fresh agent is wired before its first run) but `check` requires
+  `Signal::ConfigDir`, or a host that merely has `claude` on `PATH` and was
+  never wired would report broken forever and break the MDM exit-code contract.
+  And nothing creates `config_home` except the artifact writers themselves —
+  that is precisely what makes `--dry-run` provably write nothing.
+  New `ARGUS_BIN_DIRS` pins the searched prefixes; it is both the test isolation
+  seam (otherwise the suite asserts on whatever the developer has installed) and
+  the supported way to point a locked-down deployment at known prefixes.
+  Mutation-verified: generic-corroboration, the `check` ConfigDir filter, the
+  dry-run guard, `PATHEXT` handling, `\`→`/` normalization and the user-prefix
+  search were each neutralized in turn and the matching tests failed. Two
+  mutations did *not* bite and both were real findings, not test gaps: the
+  Windows extension check in `is_executable` was redundant with `exe_names`
+  (simplified, comment corrected), and an explicit `create_dir_all(config_home)`
+  in `install` was dead because every writer creates its own parent chain
+  (deleted rather than shipped untested). Real machine: `install --dry-run`
+  reports claude-code via config dir+binary+npm and opencode via
+  config dir+binary+brew, and nothing else.
 
 - [ ] **T5** — Payload recorder. Dependency: T3.
   Files: `src/hook.rs`, `Makefile`, `tests/fixtures/**`

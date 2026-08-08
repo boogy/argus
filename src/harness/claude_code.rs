@@ -1,5 +1,6 @@
 use super::{Artifact, ConfigDir, Detection, Harness, HookEvent, HookShape, Probes, Scope};
 use crate::config::CaptureCfg;
+use crate::detect::BinaryProbe;
 use crate::event::{Envelope, Event};
 
 /// Events we subscribe to, and whether the entry carries a `"matcher": "*"`.
@@ -31,9 +32,17 @@ pub const EVENTS: &[HookEvent] = &[
 ];
 
 const CONFIG_DIRS: &[ConfigDir] = &[ConfigDir {
-    env_override: None,
+    env: None,
     rel: ".claude",
+    platform: None,
 }];
+
+/// `claude` is distinctive enough to stand on its own as evidence.
+const BINARIES: &[BinaryProbe] = &[BinaryProbe::new("claude")];
+
+/// The npm package, which is how the CLI ships; the binary on `PATH` is a
+/// shim into `node_modules/@anthropic-ai/claude-code/`.
+const NPM: &[&str] = &["@anthropic-ai/claude-code"];
 
 pub struct ClaudeCode;
 
@@ -49,6 +58,9 @@ impl Harness for ClaudeCode {
     fn probes(&self) -> Probes {
         Probes {
             config_dirs: CONFIG_DIRS,
+            binaries: BINARIES,
+            npm_packages: NPM,
+            brew_formulae: &[],
         }
     }
 

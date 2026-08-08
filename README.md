@@ -175,16 +175,33 @@ extra_patterns = ["ACME-[0-9]{6}"]
   path: per-tool adapter parsing → secret redaction → durable SQLite buffering
   → batched OTLP/JSON export with exponential backoff. It also drains the
   spool directory and polls remote config.
-- **Install** (`argus install`) detects installed tools by home-dir
-  presence (`~/.claude`, `~/.config/opencode`, `~/.codex`, `~/.copilot`) and
-  idempotently wires each one — see the per-tool fidelity table above.
-  `--dry-run` prints planned changes without writing.
+- **Install** (`argus install`) detects installed tools from four independent
+  signals and idempotently wires each one — see the per-tool fidelity table
+  above. `--dry-run` prints planned changes, and the signals behind them,
+  without writing anything.
+
+  | Signal       | What it reads                                                          |
+  | ------------ | ---------------------------------------------------------------------- |
+  | `config dir` | `~/.claude`, `~/.codex`, `~/.copilot`, `$XDG_CONFIG_HOME/opencode` (`%APPDATA%\opencode` on Windows), honouring `COPILOT_HOME`/`CODEX_HOME` |
+  | `binary`     | the tool's binary on `PATH` **and** in the per-user prefixes a hook's `PATH` often omits (`~/.local/bin`, `~/.npm-global/bin`, `%APPDATA%\npm`, scoop shims, …); on Windows the candidates come from `PATHEXT` |
+  | `npm`        | that binary's real path resolving inside `node_modules/<package>/`      |
+  | `brew`       | …or inside `Cellar/<formula>/`                                          |
+
+  A config directory only appears once a tool has been *run*, so binary and
+  package signals are what let argus wire a freshly installed agent. In the
+  other direction, a binary whose name is an ordinary word (`codex`) is never
+  proof by itself — it counts only when a config dir or package provenance
+  corroborates it, otherwise a machine that has never had Codex gets wired and
+  then reported as broken forever.
 
 ## Troubleshooting
 
 - `argus status` — prints the resolved data dir, effective config
-  (endpoint, batch size, flush interval, redaction on/off), buffered event
-  count, and whether the daemon socket is reachable.
+  (endpoint, batch size, flush interval, redaction on/off), every detected tool
+  with the signals it was detected by, buffered event count, and whether the
+  daemon socket is reachable. A tool listed as `binary` with no `config dir`
+  has been installed but never run; a tool you expected and don't see is a
+  detection gap, not a wiring one.
 - `argus check` — one-shot integrity self-check for fleet monitoring;
   exits `0` (intact) or `2` (something broken). No daemon required. Intended for
   an MDM compliance script (Jamf Extension Attribute / Intune) or any monitoring

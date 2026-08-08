@@ -3,6 +3,7 @@ use super::{
     install_path,
 };
 use crate::config::CaptureCfg;
+use crate::detect::BinaryProbe;
 use crate::event::{Envelope, Event};
 
 /// Codex `hooks.json` events (verified against the Codex hooks docs:
@@ -23,9 +24,17 @@ pub const EVENTS: &[HookEvent] = &[
 ];
 
 const CONFIG_DIRS: &[ConfigDir] = &[ConfigDir {
-    env_override: None,
+    env: Some(("CODEX_HOME", "")),
     rel: ".codex",
+    platform: None,
 }];
+
+/// `codex` is an ordinary English word: LaTeX tooling, document managers and
+/// at least one package manager ship a binary by that name. Seeing it decides
+/// nothing on its own.
+const BINARIES: &[BinaryProbe] = &[BinaryProbe::generic("codex")];
+const NPM: &[&str] = &["@openai/codex"];
+const BREW: &[&str] = &["codex"];
 
 /// The endpoint baked into `config.toml` before it was configurable. Still
 /// recognised on uninstall so hosts wired by an older argus clean up.
@@ -50,6 +59,9 @@ impl Harness for Codex {
     fn probes(&self) -> Probes {
         Probes {
             config_dirs: CONFIG_DIRS,
+            binaries: BINARIES,
+            npm_packages: NPM,
+            brew_formulae: BREW,
         }
     }
 

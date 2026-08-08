@@ -222,6 +222,14 @@ mod tests {
     /// resolves it, so a placeholder path would be reported broken — correctly.
     fn wired_claude_home() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
+        // Pin detection to the fixture: an env-rooted config dir or a tool on
+        // the developer's PATH would otherwise add findings this test counts.
+        unsafe {
+            std::env::set_var(crate::detect::BIN_DIRS_ENV, dir.path().join("nobin"));
+            for k in ["XDG_CONFIG_HOME", "CODEX_HOME", "COPILOT_HOME"] {
+                std::env::remove_var(k);
+            }
+        }
         let claude = dir.path().join(".claude");
         std::fs::create_dir_all(&claude).unwrap();
         let exe = dir.path().join("argus");

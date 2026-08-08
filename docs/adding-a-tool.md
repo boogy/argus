@@ -20,7 +20,30 @@ argus supports a tool when three pieces exist:
 The `Harness` impl is declarative — describe the tool, don't write install
 logic:
 
-- `probes()` — where the tool's config lives, so detection finds it.
+- `probes()` — the evidence that the tool is installed. Four independent kinds,
+  and a tool is detected if *any* of them fires:
+  - `config_dirs` — where the tool's config lives. Each entry has an optional
+    env root (`("CODEX_HOME", "")`, `("XDG_CONFIG_HOME", "opencode")`), a
+    home-relative default, and an optional `platform` that scopes it to one OS.
+    **Declaration order is install order**: the first entry is where argus
+    writes when nothing exists on disk yet, so put the tool's own preferred
+    location first and platform-specific variants after it.
+  - `binaries` — the executable names to look for, on `PATH` *and* in the
+    per-user prefixes a hook's `PATH` routinely omits. Use `BinaryProbe::new`
+    for a name only this tool would own, and `BinaryProbe::generic` for an
+    ordinary word someone else might ship (`codex`); a generic name alone
+    never counts as detection, it only strengthens another signal.
+  - `npm_packages` / `brew_formulae` — the package names this tool ships
+    under. Detection canonicalizes the binary it found and checks whether the
+    real path runs through `node_modules/<package>/` or `Cellar/<formula>/`.
+    That is what corroborates a generic name, and it is what tells `status`
+    *how* the tool got there.
+
+  A config directory only exists once the tool has been **run**, so a
+  binary-or-package signal is what lets argus wire a freshly-installed agent
+  before its first launch. Everything detection reads from the outside world —
+  including the platform — arrives through `detect::Env`, so a Windows layout
+  is unit-testable from macOS; never reach for `cfg!` here.
 - `artifacts()` — the files argus writes. `OwnedFile` for a file with our own
   name (overwritten on install, deleted on uninstall); `JsonHooks` to merge
   entries into a shared hooks JSON; `TomlEdit` for key-level edits into shared
