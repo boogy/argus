@@ -33,6 +33,16 @@ enum Cmd {
     Uninstall,
     /// Show daemon/config status.
     Status,
+    /// Developer tool: promote recorded envelopes (ARGUS_RECORD_DIR) into
+    /// `tests/fixtures/<harness>/<event>.json`. Hidden because it is only
+    /// useful inside a checkout; driven by `make record-fixtures`.
+    #[command(hide = true)]
+    RecordFixtures {
+        #[arg(long, default_value = "target/recordings")]
+        from: std::path::PathBuf,
+        #[arg(long, default_value = "tests/fixtures")]
+        into: std::path::PathBuf,
+    },
     /// One-shot integrity self-check for MDM/monitoring (e.g. Jamf, Intune).
     /// Verifies hook wiring AND that remote policy is loaded and effective.
     /// With no flag, checks both. Exits 0 if intact, 2 if anything is broken.
@@ -68,6 +78,13 @@ fn main() -> Result<()> {
         Cmd::Install { dry_run } => argus::install::run(dry_run)?,
         Cmd::Uninstall => argus::install::uninstall()?,
         Cmd::Status => print_status()?,
+        Cmd::RecordFixtures { from, into } => {
+            let written = argus::record::promote(&from, &into)?;
+            for path in &written {
+                println!("{}", path.display());
+            }
+            println!("{} fixture(s) from {}", written.len(), from.display());
+        }
         Cmd::Check {
             hooks,
             config,

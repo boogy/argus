@@ -1,0 +1,11 @@
+{
+  "source": "opencode",
+  "received_at": "2026-01-01T00:00:00Z",
+  "payload": {
+    "sessionID": "ses_opencode_001",
+    "event": "file.edited",
+    "properties": {
+      "file": "/Users/dev/project/src/build.rs"
+    }
+  }
+}

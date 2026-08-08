@@ -1,0 +1,13 @@
+{
+  "source": "opencode",
+  "received_at": "2026-01-01T00:00:00Z",
+  "payload": {
+    "sessionID": "ses_opencode_001",
+    "event": "permission.asked",
+    "properties": {
+      "type": "bash",
+      "pattern": "git push *",
+      "sessionID": "ses_opencode_001"
+    }
+  }
+}

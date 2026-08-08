@@ -1,0 +1,108 @@
+//! Every committed fixture must still parse.
+//!
+//! `tests/fixtures/<harness>/<event>.json` is what `make record-fixtures`
+//! produces from a recorded session (see `src/record.rs`). The seed set is
+//! doc-derived — Codex, Copilot and pi.dev are not installed on the machine
+//! this was written on — so these tests are what stops a doc-derived guess
+//! from rotting silently: replace a fixture with a real recording and any
+//! adapter that was wrong about a field name fails here rather than in
+//! production, where a mismatch just looks like an event that never arrived.
+
+use argus::config::CaptureCfg;
+use argus::event::{Envelope, EventKind};
+use std::path::{Path, PathBuf};
+
+fn fixture_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
+}
+
+fn fixtures() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for harness in std::fs::read_dir(fixture_root())
+        .expect("fixtures dir")
+        .flatten()
+    {
+        if !harness.path().is_dir() {
+            continue;
+        }
+        for f in std::fs::read_dir(harness.path()).unwrap().flatten() {
+            if f.path().extension().is_some_and(|e| e == "json") {
+                out.push(f.path());
+            }
+        }
+    }
+    out.sort();
+    assert!(
+        !out.is_empty(),
+        "no fixtures found under {:?}",
+        fixture_root()
+    );
+    out
+}
+
+fn load(path: &Path) -> Envelope {
+    let text = std::fs::read_to_string(path).unwrap();
+    serde_json::from_str(&text)
+        .unwrap_or_else(|e| panic!("{} is not an Envelope: {e}", path.display()))
+}
+
+/// The layout is load-bearing: the adapter a fixture exercises is chosen by
+/// its directory, and `record-fixtures` overwrites by `<source>/<label>`. A
+/// hand-edited file in the wrong directory would test the wrong adapter.
+#[test]
+fn fixture_paths_match_the_envelopes_they_hold() {
+    for path in fixtures() {
+        let envelope = load(&path);
+        let dir = path
+            .parent()
+            .unwrap()
+            .file_name()
+            .unwrap()
+            .to_string_lossy();
+        let stem = path.file_stem().unwrap().to_string_lossy();
+        assert_eq!(
+            dir,
+            envelope.source,
+            "{} sits under the wrong harness",
+            path.display()
+        );
+        assert_eq!(
+            stem,
+            argus::record::label(&envelope),
+            "{} would be re-promoted under a different name",
+            path.display()
+        );
+    }
+}
+
+/// A fixture that parses to `Raw` is an adapter that does not understand its
+/// own tool's event — the exact failure this fixture set exists to catch.
+#[test]
+fn every_fixture_parses_into_a_recognised_event() {
+    for path in fixtures() {
+        let envelope = load(&path);
+        let events = argus::harness::parse(envelope.clone(), &CaptureCfg::default());
+        assert!(!events.is_empty(), "{} produced no events", path.display());
+        for e in &events {
+            assert_eq!(e.source, envelope.source, "{}", path.display());
+            assert!(
+                !matches!(e.kind, EventKind::Raw { .. }),
+                "{} fell through to Raw: the adapter does not handle this event",
+                path.display()
+            );
+        }
+    }
+}
+
+/// Wave 2 is implementable without a live session only if every harness has
+/// something to work against.
+#[test]
+fn every_harness_has_fixtures() {
+    for h in argus::harness::HARNESSES {
+        let dir = fixture_root().join(h.id());
+        let count = std::fs::read_dir(&dir)
+            .map(|rd| rd.flatten().count())
+            .unwrap_or(0);
+        assert!(count >= 3, "{} has {count} fixtures in {:?}", h.id(), dir);
+    }
+}

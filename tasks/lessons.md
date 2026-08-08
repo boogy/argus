@@ -22,6 +22,17 @@ correction; keep entries terse.
   && cond {` beats deleting the block: deleting orphans imports, breaks the
   build, and invites a destructive "just reset it" shortcut.
 
+- **A mutation that fails nothing is a finding, not a formality.** Twice in T4
+  the neutralized code broke no test, and neither time was the test at fault:
+  once the guard was redundant (an earlier filter already enforced it), once
+  the line was dead (every writer already created its parent chain). Ask
+  *which* before writing a new test — the answer is often "delete the line".
+
+- **Prove the escape, not the prefix.** `PathBuf::starts_with` is lexical, so
+  `into/../x` "starts with" `into`. A traversal test has to assert on
+  components (no `ParentDir`) or on canonicalized paths, or it passes against
+  the very input it was written to catch.
+
 - **`develop` was never verified on the current toolchain** — the edition-2024
   adoption commit (`8c8b3fd`) did not re-run `cargo fmt`, and a newer clippy
   added the `collapsible_if` lint (let-chains), which the existing code

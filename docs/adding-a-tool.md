@@ -76,6 +76,31 @@ so give it something falsifiable per artifact:
 Anything left unverified is silently permanent: before this, a `TomlEdit` was
 never checked at all, so a half-installed Codex reported healthy forever.
 
+## Fixtures
+
+Adapters written from documentation are guesses about field names, and a wrong
+guess is invisible in production — a mismatched field just looks like an event
+that never arrived. So capture what the tool really sends:
+
+```sh
+eval "$(make record)"     # exports ARGUS_RECORD_DIR
+# ...use the agent normally, then in another shell:
+make record-fixtures      # -> tests/fixtures/<harness>/<event>.json
+unset ARGUS_RECORD_DIR
+```
+
+Recording dumps every envelope the shim handles, verbatim and un-redacted,
+which is why `RECORD_DIR` lives under `target/`. Promotion is the step whose
+output is committed, so it redacts, normalizes the timestamp, and collapses
+repeats of an event into one file — re-running it on unchanged recordings
+leaves the tree clean.
+
+`tests/fixtures.rs` then asserts every fixture parses into a *recognized*
+event. A fixture that falls through to `EventKind::Raw` means the adapter does
+not understand its own tool, which is exactly the drift this exists to catch.
+The fixtures in the repo today are doc-derived seeds: replacing one with a real
+recording is how a mapping stops being provisional.
+
 Rules that keep the pipeline safe and fast:
 
 - Hooks are observe-only: exit 0, print nothing to stdout.

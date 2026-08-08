@@ -49,6 +49,10 @@ pub fn deliver(source: &str, event: Option<&str>, raw: &str) {
         event: event.map(String::from),
         payload,
     };
+    // Before anything can parse, redact or reshape it — a fixture is only
+    // worth having if it is what the tool really sent. Off by default and
+    // best-effort when on; see `record`.
+    crate::record::record(&envelope);
     if send_with_deadline(&envelope, std::time::Duration::from_millis(250)) {
         return;
     }

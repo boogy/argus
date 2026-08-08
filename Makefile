@@ -78,6 +78,22 @@ uninstall: release ## Remove argus wiring from all tools
 status: release ## Print daemon/config/buffer status
 	$(RELEASE) status
 
+## --- Fixtures ------------------------------------------------------------
+
+# Where the shim drops raw envelopes while recording. Under target/ because
+# recordings are un-redacted: they must never be mistaken for something to
+# commit.
+RECORD_DIR ?= target/recordings
+
+.PHONY: record
+record: ## Print the shell line that turns on payload recording
+	@echo 'export ARGUS_RECORD_DIR=$(abspath $(RECORD_DIR))'
+	@echo '# then use the agent normally; unset the variable to stop.'
+
+.PHONY: record-fixtures
+record-fixtures: ## Promote recordings into tests/fixtures/<harness>/<event>.json
+	$(CARGO) run -q -- record-fixtures --from $(RECORD_DIR) --into tests/fixtures
+
 ## --- Housekeeping --------------------------------------------------------
 
 .PHONY: audit

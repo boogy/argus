@@ -97,8 +97,33 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
   reports claude-code via config dir+binary+npm and opencode via
   config dir+binary+brew, and nothing else.
 
-- [ ] **T5** — Payload recorder. Dependency: T3.
-  Files: `src/hook.rs`, `Makefile`, `tests/fixtures/**`
+- [x] **T5** — Payload recorder. Dependency: T3.
+  Files: new `src/record.rs`, new `tests/fixtures.rs`, new `tests/fixtures/**`,
+  `src/hook.rs`, `src/lib.rs`, `src/main.rs`, `Makefile`, `README.md`,
+  `docs/adding-a-tool.md`
+  `ARGUS_RECORD_DIR` makes the shim dump every envelope verbatim before
+  anything parses or redacts it; `make record-fixtures` (hidden
+  `argus record-fixtures` subcommand) promotes a recording directory into
+  `tests/fixtures/<harness>/<event>.json`. The split matters: a recording is
+  raw and stays on the machine that made it (0600, under `target/`), a fixture
+  is committed, so promotion redacts, normalises `received_at` and collapses
+  repeats — re-running it on unchanged recordings leaves the tree clean.
+  Event labels come from each tool's own name field with the `--event` hint
+  winning, so fixture names are in the tool's vocabulary (`PreToolUse`,
+  `tool.execute.before`, `agent-turn-complete`). That label is a path
+  component built from payload content, so it is slugged and dot-only names
+  are rejected.
+  32 doc-derived seed fixtures across all four harnesses; `tests/fixtures.rs`
+  asserts each one parses into a *recognised* event, so an adapter that falls
+  through to `Raw` fails the suite instead of silently capturing nothing.
+  Mutation-verified: colliding recording filenames, a cached record dir,
+  inverted label precedence, an allowed `..` label, un-normalised timestamps,
+  skipped redaction, and a renamed adapter arm each failed the matching test.
+  One test was found to be weak in the process and fixed: `starts_with` is
+  lexical, so `into/../x` passed a traversal check it should have failed.
+  **Gates Wave 2 sign-off:** the seeds are doc-derived. Codex, Copilot and
+  pi.dev are not installed here, so their mappings stay provisional until a
+  human records a real session and re-runs `make record-fixtures`.
 
 - [ ] **T6** — Hot-path hardening. Dependency: T3.
   Files: `src/paths.rs`, `src/event.rs`, `src/redact.rs`, `src/buffer.rs`, `src/daemon.rs`, `src/export.rs`, `src/hook.rs`

@@ -1,0 +1,21 @@
+{
+  "source": "claude-code",
+  "received_at": "2026-01-01T00:00:00Z",
+  "payload": {
+    "session_id": "sess-claude-001",
+    "cwd": "/Users/dev/project",
+    "transcript_path": "/Users/dev/.claude/projects/project/sess-claude-001.jsonl",
+    "permission_mode": "default",
+    "model": "claude-opus-5",
+    "hook_event_name": "PostToolUse",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "cargo test --lib"
+    },
+    "tool_response": {
+      "stdout": "test result: ok. 149 passed",
+      "stderr": "",
+      "interrupted": false
+    }
+  }
+}

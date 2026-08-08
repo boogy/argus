@@ -138,6 +138,12 @@ extra_patterns = ["ACME-[0-9]{6}"]
   set `capture.prompts = false` and `capture.tool_inputs = false` — argus
   still emits metadata (which tool ran, which files, which hosts, session
   lifecycle) with content fields replaced by a `[not captured]` marker.
+- The one exception is the developer payload recorder: setting
+  `ARGUS_RECORD_DIR` makes the hook shim dump every envelope **raw**, before
+  redaction, so adapters can be written against what a tool actually sends.
+  It is off unless that variable is set, writes owner-only (0600) files, and
+  `make record-fixtures` redacts on the way into `tests/fixtures/`. See
+  [docs/adding-a-tool.md](docs/adding-a-tool.md).
 
 ## Architecture
 
