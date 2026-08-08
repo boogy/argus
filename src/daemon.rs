@@ -1,6 +1,6 @@
 use crate::{
-    adapters, buffer::Buffer, config, config::ExportCfg, event::Envelope, export::Exporter, ipc,
-    redact::Redactor, spool,
+    adapters, buffer::Buffer, config, config::ExportCfg, event::Envelope, event::Event,
+    event::EventKind, export::Exporter, ipc, redact::Redactor, spool,
 };
 use anyhow::Result;
 use std::sync::{Arc, RwLock};
@@ -140,8 +140,8 @@ pub async fn run() -> Result<()> {
 
 /// Export task: every `flush_interval_secs` (or sooner while backing off from
 /// a failure), peek a batch and try to export it. On success the batch is
-/// acked (at-least-once: only after a 2xx). On failure the batch stays
-/// buffered and the wait grows exponentially, capped at ~30x the flush
+/// acked (at-least-once: only after a 2xx). On a retryable failure the batch
+/// stays buffered and the wait grows exponentially, capped at ~30x the flush
 /// interval (~5 min at the default 10s flush).
 async fn export_loop(buffer: Arc<Buffer>, cfg: Arc<RwLock<config::Config>>) {
     let mut backoff = 1u64;
@@ -158,25 +158,91 @@ async fn export_loop(buffer: Arc<Buffer>, cfg: Arc<RwLock<config::Config>>) {
         tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
 
         record_losses(&buffer);
-        let Ok(batch) = buffer.peek_batch(batch_size) else {
-            continue;
-        };
-        if batch.is_empty() {
-            backoff = 1;
-            continue;
-        }
-        let events: Vec<_> = batch.iter().map(|(_, e)| e.clone()).collect();
-        match exporter.export(&events).await {
-            Ok(()) => {
-                let _ = buffer.ack(batch.last().unwrap().0);
-                backoff = 1;
-            }
-            Err(e) => {
-                tracing::warn!("export failed, will retry: {e}");
-                backoff = (backoff * 2).min(30);
-            }
+        match export_once(&buffer, &exporter, batch_size).await {
+            Attempt::Failed => backoff = (backoff * 2).min(30),
+            // A buffer we could not read says nothing about the collector, so
+            // it neither backs off nor clears a backoff already in progress.
+            Attempt::Unreadable => {}
+            Attempt::Idle | Attempt::Sent | Attempt::Dropped => backoff = 1,
         }
     }
+}
+
+/// What one export attempt did. The loop reads this to decide the next wait,
+/// and the shutdown flush reuses the same settlement rules.
+#[derive(Debug, PartialEq, Eq)]
+enum Attempt {
+    Unreadable,
+    Idle,
+    Sent,
+    /// The collector refused the batch for good. It has been dropped from the
+    /// queue and a record of the gap left in its place.
+    Dropped,
+    Failed,
+}
+
+/// The `reason` on the record left behind by a refused batch. Also what stops
+/// that record from becoming a batch of its own that gets refused, recorded,
+/// refused…: a collector rejecting *everything* would otherwise mint one new
+/// event per flush cycle forever, and the queue would never drain.
+const EXPORT_REJECTED: &str = "export_rejected";
+
+/// Peek one batch, send it, and settle it.
+///
+/// The settlement is the point. A 2xx acks. A retryable failure leaves the
+/// batch alone. A refusal — the collector read the request and said no — acks
+/// as well, because the alternative is a queue whose head can never be
+/// delivered and never be discarded: it is re-sent every cycle while newer
+/// events pile up behind it and are eventually evicted to make room. The batch
+/// is lost either way at that point; the difference is whether the events
+/// behind it are lost too, and whether anyone downstream is told.
+async fn export_once(buffer: &Buffer, exporter: &Exporter, batch_size: usize) -> Attempt {
+    let Ok(batch) = buffer.peek_batch(batch_size) else {
+        return Attempt::Unreadable;
+    };
+    if batch.is_empty() {
+        return Attempt::Idle;
+    }
+    let last_seq = batch.last().unwrap().0;
+    let events: Vec<_> = batch.iter().map(|(_, e)| e.clone()).collect();
+    match exporter.export(&events).await {
+        Ok(()) => {
+            let _ = buffer.ack(last_seq);
+            Attempt::Sent
+        }
+        Err(crate::export::Rejection::Transient(e)) => {
+            tracing::warn!("export failed, will retry: {e}");
+            Attempt::Failed
+        }
+        Err(crate::export::Rejection::Permanent { status, detail }) => {
+            tracing::error!(
+                "collector refused {} events with {status} ({detail}); dropping the batch so \
+                 the queue keeps moving",
+                events.len()
+            );
+            let _ = buffer.ack(last_seq);
+            if !is_gap_record(&events) {
+                let _ = buffer.push(&Event::new(
+                    "argus",
+                    None,
+                    None,
+                    EventKind::Loss {
+                        reason: EXPORT_REJECTED.into(),
+                        count: events.len() as u64,
+                        detail: format!("collector returned {status}: {detail}"),
+                    },
+                ));
+            }
+            Attempt::Dropped
+        }
+    }
+}
+
+/// Whether a batch is made of nothing but earlier reports of refusal.
+fn is_gap_record(events: &[Event]) -> bool {
+    events
+        .iter()
+        .all(|e| matches!(&e.kind, EventKind::Loss { reason, .. } if reason == EXPORT_REJECTED))
 }
 
 /// Replay one bounded batch of spooled envelopes, deleting each file only once
@@ -218,17 +284,8 @@ async fn final_flush(buffer: &Buffer, cfg: &Arc<RwLock<config::Config>>) {
     record_losses(buffer);
     let export_cfg = with_cfg(cfg, |c| c.export.clone());
     let batch_size = effective_batch_size(&export_cfg);
-    let Ok(batch) = buffer.peek_batch(batch_size) else {
-        return;
-    };
-    if batch.is_empty() {
-        return;
-    }
     let exporter = Exporter::new(&export_cfg);
-    let events: Vec<_> = batch.iter().map(|(_, e)| e.clone()).collect();
-    if exporter.export(&events).await.is_ok() {
-        let _ = buffer.ack(batch.last().unwrap().0);
-    }
+    export_once(buffer, &exporter, batch_size).await;
 }
 
 /// Everything the per-envelope path derives from config, plus the fingerprint
@@ -472,6 +529,104 @@ mod tests {
             crate::redact::REDACTOR_BUILDS.load(Relaxed),
             before + 1,
             "a change rebuilds exactly once, then settles"
+        );
+    }
+
+    /// A collector answering a fixed status, and the exporter pointed at it.
+    fn collector(status: u16) -> (Exporter, std::net::SocketAddr) {
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let addr = match server.server_addr() {
+            tiny_http::ListenAddr::IP(a) => a,
+            #[allow(unreachable_patterns)]
+            other => panic!("unexpected listen address {other:?}"),
+        };
+        std::thread::spawn(move || {
+            for req in server.incoming_requests() {
+                let _ = req.respond(
+                    tiny_http::Response::from_string("no").with_status_code(status as u32),
+                );
+            }
+        });
+        let cfg = config::ExportCfg {
+            otlp_endpoint: Some(format!("http://{addr}")),
+            ..Default::default()
+        };
+        (Exporter::new(&cfg), addr)
+    }
+
+    fn buffer_in(dir: &std::path::Path) -> Buffer {
+        unsafe {
+            std::env::set_var("ARGUS_DATA_DIR", dir);
+        }
+        Buffer::open(&config::BufferCfg::default()).unwrap()
+    }
+
+    fn prompt(n: u32) -> Event {
+        Event::new(
+            "claude-code",
+            None,
+            None,
+            EventKind::Prompt {
+                text: format!("p{n}"),
+            },
+        )
+    }
+
+    /// The wedge this exists to prevent: a batch the collector will never
+    /// accept, sitting at the head of the queue forever while everything
+    /// behind it is eventually evicted to make room.
+    #[tokio::test]
+    async fn a_refused_batch_drains_and_leaves_a_record_of_the_gap() {
+        let dir = tempfile::tempdir().unwrap();
+        let buffer = buffer_in(dir.path());
+        let (exporter, _addr) = collector(400);
+        for i in 0..3 {
+            buffer.push(&prompt(i)).unwrap();
+        }
+
+        assert_eq!(
+            export_once(&buffer, &exporter, 100).await,
+            Attempt::Dropped,
+            "a 400 must settle the batch, not park it"
+        );
+        let left = buffer.peek_batch(100).unwrap();
+        assert_eq!(left.len(), 1, "the three refused events must be gone");
+        match &left[0].1.kind {
+            EventKind::Loss {
+                reason,
+                count,
+                detail,
+            } => {
+                assert_eq!(reason, EXPORT_REJECTED);
+                assert_eq!(*count, 3, "the gap must say how many events it covers");
+                assert!(detail.contains("400"), "{detail}");
+            }
+            other => panic!("expected a loss record, got {other:?}"),
+        }
+
+        // …and the record of the gap does not itself become an endless source
+        // of new records when the collector refuses that too.
+        assert_eq!(export_once(&buffer, &exporter, 100).await, Attempt::Dropped);
+        assert!(buffer.is_empty().unwrap(), "the queue must reach empty");
+        assert_eq!(export_once(&buffer, &exporter, 100).await, Attempt::Idle);
+    }
+
+    /// The other half: an outage must not be mistaken for a refusal, or a
+    /// collector restart would silently destroy everything queued during it.
+    #[tokio::test]
+    async fn an_outage_keeps_the_batch_for_the_next_attempt() {
+        let dir = tempfile::tempdir().unwrap();
+        let buffer = buffer_in(dir.path());
+        let (exporter, _addr) = collector(503);
+        for i in 0..3 {
+            buffer.push(&prompt(i)).unwrap();
+        }
+
+        assert_eq!(export_once(&buffer, &exporter, 100).await, Attempt::Failed);
+        assert_eq!(
+            buffer.len().unwrap(),
+            3,
+            "a retryable failure must leave the batch buffered"
         );
     }
 }

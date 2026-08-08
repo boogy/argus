@@ -97,7 +97,7 @@ unset keys keep their default.
 | `export.otlp_endpoint`       | _(unset)_          | OTLP/JSON logs endpoint (`POST {endpoint}/v1/logs`). No endpoint = events stay buffered locally.                                                                                                                 |
 | `export.headers`             | `{}`               | Extra HTTP headers sent with each export (e.g. auth).                                                                                                                                                            |
 | `export.batch_size`          | `256`              | Max events per export batch.                                                                                                                                                                                     |
-| `export.flush_interval_secs` | `10`               | Export loop interval; backs off exponentially (capped ~30x) on repeated failures.                                                                                                                                |
+| `export.flush_interval_secs` | `10`               | Export loop interval; backs off exponentially (capped ~30x) on retryable failures (5xx, `408`, `429`, timeouts). A `4xx` refusal is not retried — see below.                                                     |
 | `capture.prompts`            | `true`             | Capture prompt text. `false` → events still emitted, text replaced with `[not captured]` (metadata-only mode).                                                                                                   |
 | `capture.tool_inputs`        | `true`             | Capture tool-call input JSON. `false` → tool events still emitted (name, files, FQDNs) without the input payload.                                                                                                |
 | `capture.tool_outputs`       | `true`             | Capture tool result/output JSON on post-tool events. `false` → output field left null.                                                                                                                           |
@@ -192,6 +192,18 @@ extra_patterns = ["ACME-[0-9]{6}"]
   path: per-tool adapter parsing → secret redaction → durable SQLite buffering
   → batched OTLP/JSON export with exponential backoff. It also drains the
   spool directory and polls remote config.
+
+  Export is at-least-once: a batch is deleted only after a 2xx, so a collector
+  outage costs nothing. A **refusal** is settled differently from an outage. A
+  `4xx` other than `408`/`429` means the collector read the request and said no
+  — an oversized record, a schema a validator rejects, a revoked key — and
+  re-sending it can only fail again. Retrying forever would park that batch at
+  the head of the queue while newer events pile up behind it and are eventually
+  evicted to make room: the one refused batch would cost every event after it.
+  So a refused batch is dropped, and a `loss` event naming the status and the
+  collector's own error text takes its place in the queue, which is what makes
+  the gap visible at the far end rather than an absence nobody can date.
+
 - **Codex OTLP receiver** is the one input that is not a local socket, because
   Codex exports over HTTP. Loopback is not an authentication boundary — every
   process on the machine, under any account, can post to `127.0.0.1` — so the

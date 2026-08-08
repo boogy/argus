@@ -191,11 +191,12 @@ impl Exporter {
         }
     }
 
-    pub async fn export(&self, events: &[Event]) -> Result<()> {
+    pub async fn export(&self, events: &[Event]) -> Result<(), Rejection> {
         let endpoint = self
             .endpoint
             .as_ref()
-            .context("no otlp_endpoint configured")?;
+            .context("no otlp_endpoint configured")
+            .map_err(Rejection::Transient)?;
         let mut req = self
             .client
             .post(format!("{}/v1/logs", endpoint.trim_end_matches('/')))
@@ -203,8 +204,80 @@ impl Exporter {
         for (k, v) in &self.headers {
             req = req.header(k, v);
         }
-        req.send().await?.error_for_status()?;
-        Ok(())
+        let response = req
+            .send()
+            .await
+            .map_err(|e| Rejection::Transient(e.into()))?;
+        let status = response.status();
+        if status.is_success() {
+            return Ok(());
+        }
+        if is_permanent(status.as_u16()) {
+            // The collector's own words about why, not just the code: whoever
+            // reads the resulting record has no request to inspect.
+            let body = response.text().await.unwrap_or_default();
+            return Err(Rejection::Permanent {
+                status: status.as_u16(),
+                detail: first_line(&body, 200),
+            });
+        }
+        Err(Rejection::Transient(anyhow::anyhow!(
+            "collector returned {status}"
+        )))
+    }
+}
+
+/// A failed export attempt, split by whether repeating it could ever succeed.
+///
+/// The distinction is the difference between a queue that drains and one that
+/// wedges. Every non-2xx used to retry forever, so a single batch the collector
+/// refuses — one oversized record, one event a schema validator dislikes, an
+/// API key revoked — sat at the head of the queue being re-sent until the
+/// buffer filled and started evicting *newer* events behind it. The export
+/// nobody was watching failed silently while the trail quietly stopped.
+#[derive(Debug)]
+pub enum Rejection {
+    /// Retry: the collector never got a chance to accept this.
+    Transient(anyhow::Error),
+    /// Do not retry: the collector understood the request and refused it.
+    Permanent { status: u16, detail: String },
+}
+
+impl std::fmt::Display for Rejection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Rejection::Transient(e) => write!(f, "{e}"),
+            Rejection::Permanent { status, detail } if detail.is_empty() => {
+                write!(f, "collector returned {status}")
+            }
+            Rejection::Permanent { status, detail } => {
+                write!(f, "collector returned {status}: {detail}")
+            }
+        }
+    }
+}
+
+/// `4xx` means the collector read the request and said no — except for the two
+/// that ask for the same request again later. `408 Request Timeout` and `429
+/// Too Many Requests` are refusals of the *moment*, not of the payload, and a
+/// busy collector answering 429 is the case backoff exists for; treating those
+/// as permanent would throw away exactly the batches sent when a fleet is
+/// noisiest.
+fn is_permanent(status: u16) -> bool {
+    (400..500).contains(&status) && status != 408 && status != 429
+}
+
+/// The collector's error text, bounded and kept to one line.
+///
+/// An error body can be an HTML page or a stack trace; this ends up inside an
+/// event that itself gets exported, so an unbounded copy would be a batch that
+/// grows each time it is refused.
+fn first_line(body: &str, max: usize) -> String {
+    let line = body.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+    let line = line.trim();
+    match line.char_indices().nth(max) {
+        Some((i, _)) => format!("{}…", &line[..i]),
+        None => line.to_string(),
     }
 }
 
@@ -347,6 +420,93 @@ mod tests {
             err.is_err(),
             "non-2xx must surface as Err for at-least-once redelivery"
         );
+    }
+
+    /// The two 4xx codes that mean "ask again", not "no".
+    #[test]
+    fn only_a_refusal_of_the_payload_counts_as_permanent() {
+        for retryable in [408, 429, 500, 502, 503, 504] {
+            assert!(!is_permanent(retryable), "{retryable} must be retried");
+        }
+        for refused in [400, 401, 403, 404, 413, 422] {
+            assert!(is_permanent(refused), "{refused} can never succeed");
+        }
+    }
+
+    /// The detail rides inside an event that is itself exported, so an error
+    /// page must not become a batch that grows every time it is refused.
+    #[test]
+    fn the_collectors_error_text_is_bounded_to_one_line() {
+        let html = format!("\n  <html>{}\n<body>more</body>", "x".repeat(9_000));
+        let got = first_line(&html, 200);
+        assert!(got.chars().count() <= 201, "{} chars", got.chars().count());
+        assert!(!got.contains('\n'));
+        assert!(got.starts_with("<html>"));
+        // A short first line followed by a stack trace: the length bound alone
+        // would let the whole trace through, so this is what proves the split.
+        assert_eq!(
+            first_line(
+                "bad request\n  at Collector.validate\n  at Server.handle",
+                200
+            ),
+            "bad request"
+        );
+        assert_eq!(first_line("", 200), "");
+        // A multi-byte boundary at the cut must not panic.
+        assert_eq!(first_line("ééé", 2), "éé…");
+    }
+
+    /// A collector that reads the batch and says no is not a collector that
+    /// might come back.
+    #[tokio::test]
+    async fn a_refusal_is_permanent_and_an_outage_is_not() {
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let addr = server.server_addr().to_string();
+        std::thread::spawn(move || {
+            let mut n = 0;
+            for req in server.incoming_requests() {
+                n += 1;
+                let (code, body) = if n == 1 {
+                    (400, "record 3: attribute value too long")
+                } else {
+                    (503, "upstream unavailable")
+                };
+                let _ = req.respond(tiny_http::Response::from_string(body).with_status_code(code));
+            }
+        });
+        let cfg = crate::config::ExportCfg {
+            otlp_endpoint: Some(format!("http://{addr}")),
+            ..Default::default()
+        };
+        let exporter = Exporter::new(&cfg);
+        let e = Event::new("codex", None, None, EventKind::Prompt { text: "p".into() });
+
+        match exporter.export(std::slice::from_ref(&e)).await {
+            Err(Rejection::Permanent { status, detail }) => {
+                assert_eq!(status, 400);
+                assert_eq!(detail, "record 3: attribute value too long");
+            }
+            other => panic!("400 must be permanent, got {other:?}"),
+        }
+        match exporter.export(std::slice::from_ref(&e)).await {
+            Err(Rejection::Transient(_)) => {}
+            other => panic!("503 must be transient, got {other:?}"),
+        }
+    }
+
+    /// A connect failure is not a refusal: nothing read the batch.
+    #[tokio::test]
+    async fn an_unreachable_collector_is_transient() {
+        let cfg = crate::config::ExportCfg {
+            // Port 1 on loopback: reserved, and nothing is listening.
+            otlp_endpoint: Some("http://127.0.0.1:1".into()),
+            ..Default::default()
+        };
+        let e = Event::new("codex", None, None, EventKind::Prompt { text: "p".into() });
+        match Exporter::new(&cfg).export(std::slice::from_ref(&e)).await {
+            Err(Rejection::Transient(_)) => {}
+            other => panic!("a connect failure must be retried, got {other:?}"),
+        }
     }
 
     #[test]

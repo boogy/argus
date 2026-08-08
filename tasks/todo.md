@@ -656,6 +656,46 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
 
 - [ ] **T9** — Export correctness. Dependency: T3.
   Files: `src/export.rs`, `src/buffer.rs`, `Cargo.toml`
+  Three behavioral changes, so three commits under the sizing rule.
+  - [x] **T9a** — Permanent vs transient export failures. Files:
+    `src/export.rs`, `src/daemon.rs`, `README.md`
+    Every non-2xx retried forever, which is right for an outage and wrong for a
+    refusal. A `4xx` means the collector read the request and said no — one
+    oversized record, a schema a validator dislikes, a revoked key — so the
+    batch sat at the head of the queue being re-sent every cycle while newer
+    events piled up behind it and were evicted to make room. The refused batch
+    was lost either way; what the retry loop added was losing everything after
+    it, silently.
+    `Rejection::{Transient, Permanent}` splits the two at the point where the
+    status code is still in hand. `408` and `429` stay transient: they refuse
+    the moment, not the payload, and 429 is precisely what backoff exists for —
+    classifying it permanent would discard the batches sent when a fleet is
+    busiest.
+    A refusal acks and leaves a record in the batch's place. `EventKind::Loss`
+    rather than the `Error` the plan named: this is a gap in the stream, which
+    is what T7 built `Loss` for — it carries a count and exports at `WARN`,
+    where `Error` carries neither and would ride the INFO firehose alongside
+    the events it says are missing.
+    That record is itself exported, hence two bounds on it. The collector's
+    error text is cut to one line and 200 chars, or an HTML error page becomes a
+    batch that grows every time it is refused. And a batch consisting only of
+    these records is acked *without* leaving another, or a collector refusing
+    everything would mint one new event per flush cycle forever and the queue
+    would never reach empty — the wedge this task removes, rebuilt out of its
+    own remedy.
+    `export_once` was extracted so the settlement rules are one function rather
+    than two divergent copies (the loop and the shutdown flush), and so they are
+    testable against a real buffer and a real collector.
+    Eight mutations, seven bit immediately: nothing permanent, `408`/`429`
+    permanent, no ack on refusal, ack on a transient failure, no record left
+    behind, and the amplification guard removed each failed a test.
+    The eighth — dropping the line split in the error text — **did not bite**,
+    a test gap rather than a hole: the one body it was checked against was
+    9 000 characters on its first line, so the length bound alone satisfied
+    every assertion. A short first line followed by a stack trace discriminates;
+    with that added, both the split and the length bound fail independently.
+  - [ ] **T9b** — Byte-budgeted batches computed in SQL from `length(body)`.
+  - [ ] **T9c** — Optional request gzip (new `flate2` dep).
 
 - [ ] **T10** — Claude Code field-mismatch fixes. Dependency: T4, T5.
   Files: `src/adapters/claude_code.rs`, `src/adapters/mod.rs`, `src/harness/claude_code.rs`
