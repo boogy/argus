@@ -126,8 +126,36 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
   human records a real session and re-runs `make record-fixtures`.
 
 - [ ] **T6** — Hot-path hardening. Dependency: T3.
-  Files: `src/paths.rs`, `src/event.rs`, `src/redact.rs`, `src/buffer.rs`, `src/daemon.rs`, `src/export.rs`, `src/hook.rs`
-  (Split point if it runs long: T6a = `OnceLock` + `RegexSet` + `CREATE_NO_WINDOW`; T6b = SQLite/config/exporter changes.)
+  Split along the pre-marked line: T6a = per-event CPU + Windows console;
+  T6b = SQLite/config/exporter/paths changes.
+
+  - [x] **T6a** — Per-event cost. Files: `src/event.rs`, `src/redact.rs`,
+    `src/hook.rs`, `src/record.rs`
+    `Event::new` spawned `hostname(1)` for **every event** — a `fork`+`exec` on
+    the daemon's hot path for an answer that cannot change while the process
+    lives. Host and username now resolve once through a `OnceLock`. The
+    guarantee is otherwise unfalsifiable (cached and uncached produce identical
+    events), so a `#[cfg(test)]` probe counter makes it assertable; the test
+    asserts the absolute count, not a delta, so it holds under any test order.
+    `Redactor` gained a `RegexSet` prefilter and `scrub_str` now returns
+    `Cow<str>`: one pass says which rules could match, so ordinary prose — very
+    nearly all of the stream — is not copied at all, and a string that does
+    match is rewritten once per *matching* rule instead of once per rule
+    (previously 10 full-string rewrites per string, unconditionally). Rule and
+    set indices are built from one filtered list so an uncompilable custom
+    pattern cannot misalign them, and the set falls open (`""` per rule) if it
+    ever fails to build — never closed.
+    `CREATE_NO_WINDOW` on both Windows spawns (daemon autospawn, `hostname`):
+    under a GUI-launched agent there is no console to inherit, so each spawn
+    flashed a window at the user.
+    Mutation-verified: dropping the `OnceLock`, building the set from `BUILTIN`
+    alone (misaligning custom-rule indices), and copying unconditionally each
+    failed the matching test. Untested seam: the two `#[cfg(windows)]` blocks
+    are compiled by the CI Windows job but asserted by nothing — the local
+    cross-check is blocked, `libsqlite3-sys` needs a mingw C toolchain.
+  - [ ] **T6b** — SQLite/config/exporter. Files: `src/paths.rs`,
+    `src/buffer.rs`, `src/daemon.rs`, `src/export.rs`, `src/harness/mod.rs`,
+    new `tests/throughput.rs`
 
 - [ ] **T7** — Durability and loss visibility. Dependency: T6.
   Files: `src/buffer.rs`, `src/spool.rs`, `src/config.rs`, `src/event.rs`, `src/hook.rs`

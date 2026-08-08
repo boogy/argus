@@ -74,17 +74,29 @@ fn send_with_deadline(envelope: &Envelope, deadline: std::time::Duration) -> boo
     matches!(rx.recv_timeout(deadline), Ok(true))
 }
 
+/// `CREATE_NO_WINDOW` from the Win32 process-creation flags. A hook runs
+/// inside the host agent's own process tree, which for a GUI-launched editor
+/// has no console — so every child it spawns gets a *new* console window
+/// flashed on screen. Observability that blinks at the user is not passive.
+#[cfg(windows)]
+pub(crate) const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 fn autospawn_daemon() {
     if std::env::var("ARGUS_NO_AUTOSPAWN").is_ok() {
         return;
     }
     if let Ok(exe) = std::env::current_exe() {
-        let _ = std::process::Command::new(exe)
-            .arg("daemon")
+        let mut cmd = std::process::Command::new(exe);
+        cmd.arg("daemon")
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn();
+            .stderr(std::process::Stdio::null());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+        let _ = cmd.spawn();
     }
 }
 

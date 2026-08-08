@@ -1,9 +1,18 @@
 use crate::config::RedactionCfg;
 use crate::event::{Event, EventKind};
-use regex::Regex;
+use regex::{Regex, RegexSet};
+use std::borrow::Cow;
 
 pub struct Redactor {
     rules: Vec<(String, Regex)>,
+    /// The same patterns as `rules`, in the same order, compiled into one
+    /// automaton. Almost no string a session produces contains a secret, and
+    /// this answers "which rules could possibly match" in a single pass over
+    /// the input — so the common case allocates nothing at all, and a string
+    /// that does match is rewritten once per *matching* rule instead of once
+    /// per rule. Indices are only meaningful because both are built from the
+    /// same filtered list; see `new`.
+    set: RegexSet,
     enabled: bool,
 }
 
@@ -31,38 +40,76 @@ const BUILTIN: &[(&str, &str)] = &[
 
 impl Redactor {
     pub fn new(cfg: &RedactionCfg) -> Self {
-        let mut rules: Vec<(String, Regex)> = BUILTIN
+        // A pattern that fails to compile is dropped from *both* the rule list
+        // and the set, in one pass, so rule `i` and set index `i` always name
+        // the same pattern. Building the set from `BUILTIN` directly would
+        // silently misalign every rule after the first bad pattern.
+        let named: Vec<(String, &str)> = BUILTIN
             .iter()
-            .filter_map(|(name, p)| Regex::new(p).ok().map(|r| (name.to_string(), r)))
+            .map(|(name, p)| ((*name).to_string(), *p))
+            .chain(
+                cfg.extra_patterns
+                    .iter()
+                    .enumerate()
+                    .map(|(i, p)| (format!("custom-{i}"), p.as_str())),
+            )
             .collect();
-        for (i, p) in cfg.extra_patterns.iter().enumerate() {
+        let mut rules: Vec<(String, Regex)> = Vec::with_capacity(named.len());
+        let mut patterns: Vec<&str> = Vec::with_capacity(named.len());
+        for (name, p) in &named {
             match Regex::new(p) {
-                Ok(r) => rules.push((format!("custom-{i}"), r)),
+                Ok(r) => {
+                    rules.push((name.clone(), r));
+                    patterns.push(p);
+                }
                 Err(e) => tracing::warn!("skipping invalid redaction pattern {p:?}: {e}"),
             }
         }
+        // Every pattern here already compiled individually, so the set can only
+        // fail on a size limit; an empty set matches nothing, which fails safe
+        // in the wrong direction — so fall back to "everything might match".
+        let set = RegexSet::new(&patterns).unwrap_or_else(|e| {
+            tracing::warn!("redaction prefilter unavailable, scanning every rule: {e}");
+            RegexSet::new(std::iter::repeat_n("", patterns.len())).expect("empty patterns compile")
+        });
         Redactor {
             rules,
+            set,
             enabled: cfg.enabled,
         }
     }
 
-    pub fn scrub_str(&self, s: &str) -> String {
+    /// Borrows when nothing matched — which is the overwhelmingly common case
+    /// on a text-heavy event stream.
+    pub fn scrub_str<'a>(&self, s: &'a str) -> Cow<'a, str> {
         if !self.enabled {
-            return s.to_string();
+            return Cow::Borrowed(s);
         }
-        let mut out = s.to_string();
-        for (name, re) in &self.rules {
-            out = re
-                .replace_all(&out, format!("[REDACTED:{name}]"))
-                .into_owned();
+        let mut out = Cow::Borrowed(s);
+        // Candidates come from the *original* string. A replacement inserts
+        // only `[REDACTED:<rule-name>]`, which none of these patterns match, so
+        // this cannot miss a match that the sequential scan would have found.
+        for i in self.set.matches(s) {
+            let (name, re) = &self.rules[i];
+            out = Cow::Owned(
+                re.replace_all(&out, format!("[REDACTED:{name}]"))
+                    .into_owned(),
+            );
         }
         out
     }
 
+    /// Rewrites in place, leaving the original allocation untouched when there
+    /// was nothing to redact.
+    fn scrub_in_place(&self, s: &mut String) {
+        if let Cow::Owned(scrubbed) = self.scrub_str(s) {
+            *s = scrubbed;
+        }
+    }
+
     fn scrub_json(&self, v: &mut serde_json::Value) {
         match v {
-            serde_json::Value::String(s) => *s = self.scrub_str(s),
+            serde_json::Value::String(s) => self.scrub_in_place(s),
             serde_json::Value::Array(a) => a.iter_mut().for_each(|x| self.scrub_json(x)),
             serde_json::Value::Object(o) => o.values_mut().for_each(|x| self.scrub_json(x)),
             _ => {}
@@ -81,7 +128,7 @@ impl Redactor {
         // on the record rather than an oversight.
         match &mut e.kind {
             EventKind::Prompt { text } | EventKind::AssistantMessage { text } => {
-                *text = self.scrub_str(text)
+                self.scrub_in_place(text)
             }
             EventKind::ToolUse {
                 tool: _,
@@ -95,13 +142,13 @@ impl Redactor {
                 self.scrub_json(input);
                 self.scrub_json(output);
                 if let Some(err) = error {
-                    *err = self.scrub_str(err);
+                    self.scrub_in_place(err);
                 }
             }
             // `name`/`agent_type` are tool identifiers, not user content.
             EventKind::Skill { name: _, args } => {
                 if let Some(a) = args {
-                    *a = self.scrub_str(a);
+                    self.scrub_in_place(a);
                 }
             }
             EventKind::Agent {
@@ -109,7 +156,7 @@ impl Redactor {
                 description,
             } => {
                 if let Some(d) = description {
-                    *d = self.scrub_str(d);
+                    self.scrub_in_place(d);
                 }
             }
             EventKind::Permission {
@@ -124,7 +171,7 @@ impl Redactor {
             | EventKind::Error {
                 message,
                 context: _,
-            } => *message = self.scrub_str(message),
+            } => self.scrub_in_place(message),
             EventKind::Session { action: _, detail } => self.scrub_json(detail),
             EventKind::Raw { payload } => self.scrub_json(payload),
             // Enumerated, fixed-vocabulary fields: nothing user-authored.
@@ -233,6 +280,25 @@ mod tests {
             let s = serde_json::to_string(&r().scrub_event(e)).unwrap();
             assert!(!s.contains("ghp_AbCdEf"), "leaked: {s}");
         }
+    }
+
+    #[test]
+    fn clean_text_is_not_reallocated() {
+        // Nearly everything flowing through here is ordinary prose and code.
+        // Paying ten full-string rewrites for each of those was the cost this
+        // prefilter exists to remove, so the borrow is the assertion.
+        let clean = "read src/main.rs and summarise the daemon loop for me";
+        assert!(
+            matches!(r().scrub_str(clean), Cow::Borrowed(_)),
+            "a string with no secret in it must not be copied"
+        );
+        assert!(
+            matches!(
+                r().scrub_str("token ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789"),
+                Cow::Owned(_)
+            ),
+            "a string that does match still has to be rewritten"
+        );
     }
 
     #[test]

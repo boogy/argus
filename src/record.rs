@@ -173,7 +173,7 @@ pub fn promote(from: &Path, into: &Path) -> Result<Vec<PathBuf>> {
 /// adapter reads structure, so a fixture has to keep it.
 fn scrub_value(redactor: &crate::redact::Redactor, value: Value) -> Value {
     match value {
-        Value::String(s) => Value::String(redactor.scrub_str(&s)),
+        Value::String(s) => Value::String(redactor.scrub_str(&s).into_owned()),
         Value::Array(items) => Value::Array(
             items
                 .into_iter()

@@ -131,13 +131,12 @@ impl Event {
         cwd: Option<String>,
         kind: EventKind,
     ) -> Self {
+        let identity = identity();
         Event {
             id: uuid::Uuid::new_v4().to_string(),
             ts: Utc::now(),
-            host: hostname(),
-            username: std::env::var("USER")
-                .or_else(|_| std::env::var("USERNAME"))
-                .unwrap_or_else(|_| "unknown".into()),
+            host: identity.host.clone(),
+            username: identity.username.clone(),
             source: source.to_string(),
             session_id,
             cwd,
@@ -147,9 +146,46 @@ impl Event {
     }
 }
 
+/// Who and where this process is. Neither answer can change while the process
+/// runs, and resolving the host costs a *process spawn*, so it is resolved
+/// once and reused. Before this, a busy session paid a `fork`+`exec` for every
+/// single event on the daemon's hot path.
+struct Identity {
+    host: String,
+    username: String,
+}
+
+/// Counts trips to the OS. Only the test that pins the caching behavior reads
+/// it; without it the guarantee is unfalsifiable — a per-event spawn and a
+/// cached one produce identical events.
+#[cfg(test)]
+pub(crate) static IDENTITY_PROBES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+fn identity() -> &'static Identity {
+    static IDENTITY: std::sync::OnceLock<Identity> = std::sync::OnceLock::new();
+    IDENTITY.get_or_init(|| {
+        #[cfg(test)]
+        IDENTITY_PROBES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Identity {
+            host: hostname(),
+            username: std::env::var("USER")
+                .or_else(|_| std::env::var("USERNAME"))
+                .unwrap_or_else(|_| "unknown".into()),
+        }
+    })
+}
+
 fn hostname() -> String {
-    std::process::Command::new("hostname")
-        .output()
+    let mut cmd = std::process::Command::new("hostname");
+    #[cfg(windows)]
+    {
+        // Same reason as the daemon autospawn: a bare `Command` under a
+        // GUI-launched agent flashes a console window at the user.
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(crate::hook::CREATE_NO_WINDOW);
+    }
+    cmd.output()
         .ok()
         .and_then(|o| String::from_utf8(o.stdout).ok())
         .map(|s| s.trim().to_string())
@@ -320,5 +356,30 @@ mod tests {
             "kind must be flattened, not nested"
         );
         assert!(v.get("id").is_some());
+    }
+
+    #[test]
+    fn identity_is_resolved_once_no_matter_how_many_events() {
+        for _ in 0..64 {
+            let e = Event::new(
+                "t",
+                None,
+                None,
+                EventKind::Prompt {
+                    text: "hello".into(),
+                },
+            );
+            assert!(!e.host.is_empty());
+            assert!(!e.username.is_empty());
+        }
+        // Other tests in this binary also build events, so the assertion is on
+        // the absolute count, not a delta — under any ordering the OS is asked
+        // exactly once. Resolving the host spawns `hostname(1)`; doing that per
+        // event is the difference between a syscall and a fork on the hot path.
+        assert_eq!(
+            super::IDENTITY_PROBES.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "host/username must be resolved once per process, not per event"
+        );
     }
 }
