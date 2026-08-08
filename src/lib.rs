@@ -4,6 +4,7 @@ pub mod config;
 pub mod daemon;
 pub mod event;
 pub mod export;
+pub mod harness;
 pub mod hook;
 pub mod install;
 pub mod integrity;

@@ -27,13 +27,19 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
 
 - [x] **T1** — CI matrix. Dependency: none.
   Files: `.github/workflows/ci.yml`, `tasks/todo.md`, `tasks/lessons.md`
-  Note: T1's own `make verify` was green on clippy + test; `fmt-check` on the
-  pre-existing baseline was repaired in a separate, non-`T`-prefixed commit
-  (the repo had never been fmt-checked on the current toolchain — see
-  `tasks/lessons.md`).
+  Note: T1 landed with `make verify` failing on the *pre-existing* baseline
+  (57 fmt diffs + 7 clippy errors — the repo had never been verified on the
+  current toolchain; see `tasks/lessons.md`). Repaired in `cfd499e`, a
+  separate non-`T`-prefixed commit, which is the first commit on `develop`
+  where `make verify` passes end to end.
 
-- [ ] **T2** — `trait Harness` + `Artifact` refactor. Dependency: T1.
-  Files: new `src/harness/*`, `src/install.rs`, `src/integrity.rs`, `src/adapters/mod.rs`, `src/redact.rs`, `src/lib.rs`
+- [x] **T2** — `trait Harness` + `Artifact` refactor. Dependency: T1.
+  Files: new `src/harness/*`, `src/install.rs`, `src/integrity.rs`, `src/adapters/mod.rs`, `src/redact.rs`, `src/lib.rs`, `docs/adding-a-tool.md`
+  Note: also fixed three bugs the duplication was hiding — orphaned empty
+  hook keys on uninstall (incl. sweeping ones left by older installs),
+  ownership by `"argus"`-anywhere substring, and unquoted hook commands.
+  `Scope::Managed`, `Signal::{Binary,NpmGlobal,Brew}` and `KillSwitch` are
+  declared but not yet populated (T3/T4/T15), marked in-source.
 
 - [ ] **T3** — Make `check` prove capture actually works. Dependency: T2.
   Files: `src/integrity.rs`, `src/install.rs`, `src/harness/{codex,mod}.rs`

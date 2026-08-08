@@ -18,8 +18,6 @@ use std::path::Path;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
-const MARKER: &str = "argus";
-
 /// One tool's wiring status. `ok == false` means capture for `tool` is
 /// (partly) blind — wiring removed or altered.
 #[derive(Debug, Clone, PartialEq)]
@@ -32,73 +30,12 @@ pub struct Finding {
 /// Check wiring for every *detected* tool (its home dir is present). A tool
 /// the user never installed can't be tampered with, so it's simply absent
 /// from the result rather than reported as broken.
+///
+/// Both the detection and the expected wiring come from the same
+/// [`crate::harness`] registry `install` writes from, so the two can no longer
+/// drift — previously each maintained its own copy of both.
 pub fn check(home: &Path) -> Vec<Finding> {
-    let mut out = Vec::new();
-    if home.join(".claude").exists() {
-        out.push(check_json_hooks(
-            "claude-code",
-            &home.join(".claude/settings.json"),
-            crate::install::CC_HOOKS.iter().map(|(e, _)| *e),
-        ));
-    }
-    if home.join(".config/opencode").exists() {
-        out.push(check_file(
-            "opencode",
-            &home.join(".config/opencode/plugin/argus.ts"),
-        ));
-    }
-    if home.join(".codex").exists() {
-        out.push(check_json_hooks(
-            "codex",
-            &home.join(".codex/hooks.json"),
-            crate::install::CODEX_HOOK_EVENTS.iter().map(|(e, _)| *e),
-        ));
-    }
-    let copilot = crate::install::copilot_dir(home);
-    if copilot.exists() {
-        out.push(check_file("copilot", &copilot.join("hooks/argus.json")));
-    }
-    out
-}
-
-/// A hooks JSON file (Claude Code `settings.json`, Codex `hooks.json`) is
-/// intact only if *every* expected event still carries an argus entry —
-/// so removing even one event's wiring is caught, not just wiping the file.
-fn check_json_hooks<'a>(tool: &str, path: &Path, events: impl Iterator<Item = &'a str>) -> Finding {
-    let broken = |detail: String| Finding {
-        tool: tool.into(),
-        ok: false,
-        detail,
-    };
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return broken(format!("{} unreadable", path.display()));
-    };
-    let doc: serde_json::Value = serde_json::from_str(&text).unwrap_or(serde_json::Value::Null);
-    let hooks = &doc["hooks"];
-    let missing: Vec<&str> = events
-        .filter(|e| !hooks[*e].to_string().contains(MARKER))
-        .collect();
-    if missing.is_empty() {
-        Finding {
-            tool: tool.into(),
-            ok: true,
-            detail: "wired".into(),
-        }
-    } else {
-        broken(format!("missing hooks: {}", missing.join(",")))
-    }
-}
-
-fn check_file(tool: &str, path: &Path) -> Finding {
-    Finding {
-        tool: tool.into(),
-        ok: path.exists(),
-        detail: if path.exists() {
-            "present".into()
-        } else {
-            format!("{} missing", path.display())
-        },
-    }
+    crate::harness::check(home)
 }
 
 /// Config integrity: verify that the fleet's *remote policy* is loaded and
@@ -138,7 +75,9 @@ pub fn check_config(expected_url: Option<&str>) -> Vec<Finding> {
             ));
         }
     } else if url.is_none() {
-        return broken("no [remote].url — host is not policy-managed; local config is authoritative".into());
+        return broken(
+            "no [remote].url — host is not policy-managed; local config is authoritative".into(),
+        );
     }
     let cache = crate::paths::cached_remote_config_path();
     let Ok(text) = std::fs::read_to_string(&cache) else {
@@ -146,10 +85,16 @@ pub fn check_config(expected_url: Option<&str>) -> Vec<Finding> {
     };
     let policy = match text.parse::<toml::Table>() {
         Ok(t) => t,
-        Err(e) => return broken(format!("remote policy cache is invalid TOML, not applied: {e}")),
+        Err(e) => {
+            return broken(format!(
+                "remote policy cache is invalid TOML, not applied: {e}"
+            ));
+        }
     };
     if policy.clone().try_into::<crate::config::Config>().is_err() {
-        return broken("remote policy cache is type-invalid — skipped by the loader, not effective".into());
+        return broken(
+            "remote policy cache is type-invalid — skipped by the loader, not effective".into(),
+        );
     }
     // Every leaf the policy sets must be reflected in the effective config.
     let effective = crate::config::merged_table();
@@ -277,10 +222,13 @@ mod tests {
         let claude = dir.path().join(".claude");
         std::fs::create_dir_all(&claude).unwrap();
         let mut hooks = serde_json::Map::new();
-        for (event, _) in crate::install::CC_HOOKS {
+        for ev in crate::harness::claude_code::EVENTS {
             hooks.insert(
-                (*event).into(),
-                serde_json::json!([{ "hooks": [{ "command": "/opt/argus hook" }] }]),
+                ev.name.into(),
+                serde_json::json!([{
+                    "hooks": [{ "command": "/opt/argus hook" }],
+                    "_argus": true,
+                }]),
             );
         }
         std::fs::write(
@@ -339,7 +287,9 @@ mod tests {
     #[test]
     fn check_and_report_reflects_wiring() {
         let home = wired_claude_home();
-        unsafe { std::env::set_var("ARGUS_HOME", home.path()); }
+        unsafe {
+            std::env::set_var("ARGUS_HOME", home.path());
+        }
         assert!(check_and_report(true, false, None), "fully wired => true");
         // strip one hook, as a tampering developer would
         let path = home.path().join(".claude/settings.json");
@@ -347,13 +297,20 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         doc["hooks"]["PreToolUse"] = serde_json::json!([]);
         std::fs::write(&path, doc.to_string()).unwrap();
-        assert!(!check_and_report(true, false, None), "broken wiring => false");
-        unsafe { std::env::remove_var("ARGUS_HOME"); }
+        assert!(
+            !check_and_report(true, false, None),
+            "broken wiring => false"
+        );
+        unsafe {
+            std::env::remove_var("ARGUS_HOME");
+        }
     }
 
     fn set_data_dir() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("ARGUS_DATA_DIR", dir.path()); }
+        unsafe {
+            std::env::set_var("ARGUS_DATA_DIR", dir.path());
+        }
         std::fs::create_dir_all(dir.path()).unwrap();
         dir
     }
@@ -364,13 +321,21 @@ mod tests {
         std::fs::write(crate::paths::config_path(), "[capture]\nprompts = true\n").unwrap();
         let f = &check_config(None)[0];
         assert!(!f.ok);
-        assert!(f.detail.contains("not policy-managed"), "detail: {}", f.detail);
+        assert!(
+            f.detail.contains("not policy-managed"),
+            "detail: {}",
+            f.detail
+        );
     }
 
     #[test]
     fn config_flags_when_remote_set_but_no_cache() {
         let _d = set_data_dir();
-        std::fs::write(crate::paths::config_path(), "[remote]\nurl = \"https://p\"\n").unwrap();
+        std::fs::write(
+            crate::paths::config_path(),
+            "[remote]\nurl = \"https://p\"\n",
+        )
+        .unwrap();
         let f = &check_config(None)[0];
         assert!(!f.ok);
         assert!(f.detail.contains("no cache"), "detail: {}", f.detail);
@@ -379,7 +344,11 @@ mod tests {
     #[test]
     fn config_ok_when_policy_loaded_and_effective() {
         let _d = set_data_dir();
-        std::fs::write(crate::paths::config_path(), "[remote]\nurl = \"https://p\"\n").unwrap();
+        std::fs::write(
+            crate::paths::config_path(),
+            "[remote]\nurl = \"https://p\"\n",
+        )
+        .unwrap();
         std::fs::write(
             crate::paths::cached_remote_config_path(),
             "[capture]\ntool_inputs = false\n[redaction]\nenabled = true\n",
@@ -413,7 +382,11 @@ mod tests {
             format!("[remote]\nurl = \"{url}\"\n"),
         )
         .unwrap();
-        std::fs::write(crate::paths::cached_remote_config_path(), "[redaction]\nenabled = true\n").unwrap();
+        std::fs::write(
+            crate::paths::cached_remote_config_path(),
+            "[redaction]\nenabled = true\n",
+        )
+        .unwrap();
         let fs = check_config(Some(url));
         assert!(fs.iter().all(|f| f.ok), "expected ok, got {fs:?}");
     }

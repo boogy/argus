@@ -73,15 +73,24 @@ impl Redactor {
         if !self.enabled {
             return e;
         }
+        // Every variant and every field is named — no `..`, no `_ =>`. This is
+        // the point of the match: a new secret-bearing field added to
+        // `EventKind` must not quietly ship unscrubbed to the SIEM, so it has
+        // to become a compile error here instead. Fields deliberately left
+        // alone are still listed, prefixed `_`, so skipping one is a decision
+        // on the record rather than an oversight.
         match &mut e.kind {
             EventKind::Prompt { text } | EventKind::AssistantMessage { text } => {
                 *text = self.scrub_str(text)
             }
             EventKind::ToolUse {
+                tool: _,
+                phase: _,
                 input,
                 output,
                 error,
-                ..
+                files: _,
+                fqdns: _,
             } => {
                 self.scrub_json(input);
                 self.scrub_json(output);
@@ -89,14 +98,48 @@ impl Redactor {
                     *err = self.scrub_str(err);
                 }
             }
-            EventKind::Skill { args: Some(a), .. } => *a = self.scrub_str(a),
-            EventKind::Permission { input, .. } => self.scrub_json(input),
-            EventKind::Notification { message, .. } | EventKind::Error { message, .. } => {
-                *message = self.scrub_str(message)
+            // `name`/`agent_type` are tool identifiers, not user content.
+            EventKind::Skill { name: _, args } => {
+                if let Some(a) = args {
+                    *a = self.scrub_str(a);
+                }
             }
-            EventKind::Session { detail, .. } => self.scrub_json(detail),
+            EventKind::Agent {
+                agent_type: _,
+                description,
+            } => {
+                if let Some(d) = description {
+                    *d = self.scrub_str(d);
+                }
+            }
+            EventKind::Permission {
+                tool: _,
+                action: _,
+                input,
+            } => self.scrub_json(input),
+            EventKind::Notification {
+                message,
+                category: _,
+            }
+            | EventKind::Error {
+                message,
+                context: _,
+            } => *message = self.scrub_str(message),
+            EventKind::Session { action: _, detail } => self.scrub_json(detail),
             EventKind::Raw { payload } => self.scrub_json(payload),
-            _ => {}
+            // Enumerated, fixed-vocabulary fields: nothing user-authored.
+            EventKind::Compact {
+                phase: _,
+                trigger: _,
+                tokens_before: _,
+                tokens_after: _,
+            }
+            | EventKind::FileChange { path: _, action: _ }
+            | EventKind::Integrity {
+                status: _,
+                tool: _,
+                detail: _,
+            } => {}
         }
         e
     }

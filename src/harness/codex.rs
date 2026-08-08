@@ -1,0 +1,106 @@
+use super::{
+    Artifact, ConfigDir, Detection, Harness, HookEvent, HookShape, Probes, Scope, TomlEditOp,
+    self_exe,
+};
+use crate::config::CaptureCfg;
+use crate::event::{Envelope, Event};
+
+/// Codex `hooks.json` events (verified against the Codex hooks docs:
+/// Claude-compatible `hooks.{Event}[]` schema, JSON payload on stdin with
+/// `hook_event_name`; non-managed hooks need one-time trust via `/hooks` in
+/// the Codex CLI).
+pub const EVENTS: &[HookEvent] = &[
+    HookEvent::new("SessionStart", false),
+    HookEvent::new("UserPromptSubmit", false),
+    HookEvent::new("PreToolUse", true),
+    HookEvent::new("PostToolUse", true),
+    HookEvent::new("PermissionRequest", true),
+    HookEvent::new("SubagentStart", false),
+    HookEvent::new("SubagentStop", false),
+    HookEvent::new("Stop", false),
+    HookEvent::new("PreCompact", false),
+    HookEvent::new("PostCompact", false),
+];
+
+const CONFIG_DIRS: &[ConfigDir] = &[ConfigDir {
+    env_override: None,
+    rel: ".codex",
+}];
+
+/// The endpoint baked into `config.toml` before it was configurable. Still
+/// recognised on uninstall so hosts wired by an older argus clean up.
+const LEGACY_ENDPOINT: &str = "http://127.0.0.1:4327";
+
+pub struct Codex;
+
+impl Harness for Codex {
+    fn id(&self) -> &'static str {
+        "codex"
+    }
+
+    fn display_name(&self) -> &'static str {
+        "Codex"
+    }
+
+    fn probes(&self) -> Probes {
+        Probes {
+            config_dirs: CONFIG_DIRS,
+        }
+    }
+
+    fn artifacts(&self, d: &Detection, _scope: Scope) -> Vec<Artifact> {
+        // Sourced from config so Codex's OTLP target and the daemon's actual
+        // listen address can't drift apart.
+        let endpoint = format!("http://{}", crate::config::load().codex.otlp_listen);
+        // `notify` is an argv array executed without a shell, so the program
+        // path is a distinct element and must NOT be shell-quoted.
+        let mut notify = toml_edit::Array::new();
+        notify.push(self_exe());
+        notify.push("hook");
+        notify.push("--source");
+        notify.push("codex");
+
+        let mut otel = toml_edit::Table::new();
+        otel["environment"] = toml_edit::value("prod");
+        let mut otlp_http = toml_edit::InlineTable::new();
+        otlp_http.insert("endpoint", endpoint.clone().into());
+        otlp_http.insert("protocol", "json".into());
+        let mut exporter = toml_edit::InlineTable::new();
+        exporter.insert("otlp-http", toml_edit::Value::InlineTable(otlp_http));
+        otel["exporter"] = toml_edit::value(toml_edit::Value::InlineTable(exporter));
+
+        // TOML holds user-authored config, so there is no structured marker to
+        // stamp the way shared JSON gets `_argus`; ownership is inferred from
+        // the value pointing at us.
+        let markers = vec!["argus".to_string(), endpoint, LEGACY_ENDPOINT.to_string()];
+        vec![
+            Artifact::TomlEdit {
+                path: d.config_home.join("config.toml"),
+                edits: vec![
+                    TomlEditOp {
+                        key: "notify",
+                        value: toml_edit::value(notify),
+                        only_if_absent: true,
+                        ours_markers: markers.clone(),
+                    },
+                    TomlEditOp {
+                        key: "otel",
+                        value: toml_edit::Item::Table(otel),
+                        only_if_absent: true,
+                        ours_markers: markers,
+                    },
+                ],
+            },
+            Artifact::JsonHooks {
+                path: d.config_home.join("hooks.json"),
+                events: EVENTS,
+                shape: HookShape::CommandArray,
+                source: "codex",
+            },
+        ]
+    }
+
+    fn parse(&self, env: &Envelope, cfg: &CaptureCfg) -> Vec<Event> {
+        crate::adapters::codex::parse(env, cfg)
+    }
+}

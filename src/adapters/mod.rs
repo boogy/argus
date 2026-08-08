@@ -4,35 +4,18 @@ pub mod copilot;
 pub mod opencode;
 
 use crate::config::CaptureCfg;
-use crate::event::{Envelope, Event, EventKind};
+use crate::event::{Envelope, Event};
 use serde_json::Value;
 
-pub type ParseFn = fn(&Envelope, &CaptureCfg) -> Vec<Event>;
-
-/// Adding a new tool = one adapter module exposing
-/// `parse(&Envelope, &CaptureCfg) -> Vec<Event>` + one row here
-/// + an install function in `install.rs`. See docs/adding-a-tool.md.
-pub const ADAPTERS: &[(&str, ParseFn)] = &[
-    ("claude-code", claude_code::parse),
-    ("opencode", opencode::parse),
-    ("codex", codex::parse),
-    ("copilot", copilot::parse),
-];
-
+/// Adding a new tool = one adapter module here exposing
+/// `parse(&Envelope, &CaptureCfg) -> Vec<Event>` + one `impl Harness` in
+/// `harness/` wiring it to its install/detect data. See docs/adding-a-tool.md.
+///
+/// Dispatch lives on [`crate::harness::HARNESSES`] so a tool cannot be
+/// installable but unparseable (or vice versa) — the old separate `ADAPTERS`
+/// table made that a silent, per-tool omission.
 pub fn parse(envelope: Envelope, capture: &CaptureCfg) -> Vec<Event> {
-    for (source, f) in ADAPTERS {
-        if *source == envelope.source {
-            return f(&envelope, capture);
-        }
-    }
-    vec![Event::new(
-        &envelope.source,
-        None,
-        None,
-        EventKind::Raw {
-            payload: envelope.payload,
-        },
-    )]
+    crate::harness::parse(envelope, capture)
 }
 
 const FILE_KEYS: &[&str] = &["file_path", "filePath", "notebook_path", "path"];
@@ -142,9 +125,16 @@ mod tests {
             payload: serde_json::json!({"x": 1}),
         };
         let events = parse(env, &CaptureCfg::default());
-        assert!(matches!(&events[0].kind, EventKind::Raw { .. }));
+        assert!(matches!(
+            &events[0].kind,
+            crate::event::EventKind::Raw { .. }
+        ));
         assert_eq!(events[0].source, "some-future-tool");
-        assert!(ADAPTERS.iter().any(|(s, _)| *s == "claude-code"));
+        assert!(
+            crate::harness::HARNESSES
+                .iter()
+                .any(|h| h.id() == "claude-code")
+        );
     }
 
     #[test]
