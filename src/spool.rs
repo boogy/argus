@@ -73,7 +73,11 @@ pub fn append(envelope: &Envelope) -> Result<()> {
     // written whatever the cap says, so `max_bytes = 0` already means "hold
     // exactly one file" rather than "capture nothing". A clamp that changes no
     // observable behavior is a guarantee nothing can test.
-    let dropped = enforce_cap(&dir, body.len() as u64, crate::config::load().spool.max_bytes);
+    let dropped = enforce_cap(
+        &dir,
+        body.len() as u64,
+        crate::config::load().spool.max_bytes,
+    );
     if dropped > 0 {
         // Re-serialize rather than patch: the count is only knowable after the
         // trim, and this envelope is the only messenger the shim has. Nothing

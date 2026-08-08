@@ -124,7 +124,9 @@ async fn handle(conn: AsyncStream, tx: tokio::sync::mpsc::Sender<Envelope>) {
         // `consume` needs the borrow back, so the decision is made and the
         // bytes copied inside this scope and only the counts escape it.
         let (consumed, complete) = {
-            let Ok(buf) = reader.fill_buf().await else { break };
+            let Ok(buf) = reader.fill_buf().await else {
+                break;
+            };
             if buf.is_empty() {
                 break; // EOF
             }
