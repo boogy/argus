@@ -401,6 +401,45 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
 
 - [ ] **T8** — Transport security. Dependency: T3.
   Files: `src/paths.rs`, `src/ipc.rs`, `src/adapters/codex.rs`, `src/install.rs`, `Cargo.toml`
+  Split by the sizing rule — four independent behavioral changes across two
+  transports, one of which (the Windows DACL) has an unresolved feasibility
+  question the plan asks to settle before writing code.
+  - [x] **T8a** — Bounded IPC frame. Files: `src/ipc.rs`
+    Framing is newline-delimited and the socket answers to every process
+    running as this user, so "one frame" meant "whatever the peer sends until
+    it chooses to send a newline". The cost is not a rejected event: it is the
+    daemon dying to the OOM reaper while holding the only copy of everything
+    not yet exported. `MAX_FRAME_BYTES` is 16 MiB — twice what a legitimate
+    shim can produce, since its stdin is capped at 8 MiB (T7b) and JSON
+    escaping only doubles on text that is almost entirely control bytes.
+    Reassembly moved off `lines()` onto a `fill_buf`/`consume` loop, because
+    `next_line` is exactly the unbounded accumulator being removed. An
+    oversized frame is discarded and the reader resynchronises on the next
+    newline, matching how a malformed frame is already handled: a peer that
+    sent one bad frame has not earned the right to end the conversation for
+    the good frames queued behind it. The overflow flag deliberately outlives
+    the chunk that set it, or the tail of a discarded frame gets parsed as the
+    head of the next one, and nothing is kept from an overflowed frame — half
+    an envelope is not a smaller envelope, and holding it spends exactly the
+    memory the cap exists to save.
+    The bound is invisible in the output — a daemon that buffers 2 GiB and one
+    that refuses emit identical events right until the first is killed — so
+    `PEAK_FRAME_BYTES` records the high-water mark, the same falsifiable-probe
+    pattern as `IDENTITY_PROBES` and `CLIENT_BUILDS`.
+    Mutation-verified, five of five: removing the bound, forgetting the
+    overflow flag between chunks, keeping the overflowed prefix, tearing down
+    the connection on a bad frame, and dropping the trailing unterminated
+    frame each failed the matching test. The last of those was found *by* the
+    mutation — the EOF-without-newline path was inherited from `lines()` and
+    had never been tested, and it is the opencode plugin's path.
+  - [ ] **T8b** — Per-user socket/pipe name; `bind` distinguishes our own
+    daemon from a foreign owner.
+  - [ ] **T8c** — Windows owner-only DACL. Resolve first: `interprocess 2.4.2`
+    exposes no security-descriptor API, so this likely needs raw `windows-sys`
+    `CreateNamedPipeW`. If too invasive, ship T8b's name alone and document
+    the residual squatting risk rather than leaving the global pipe.
+  - [ ] **T8d** — Per-user Codex OTLP port + install-generated bearer token in
+    the Codex `[otel]` headers, checked by the listener.
 
 - [ ] **T9** — Export correctness. Dependency: T3.
   Files: `src/export.rs`, `src/buffer.rs`, `Cargo.toml`
