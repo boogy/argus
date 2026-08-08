@@ -84,9 +84,9 @@ impl Listener {
         // only because `prepare_unix_endpoint` has established it is ours.
         #[cfg(unix)]
         let _ = std::fs::remove_file(paths::socket_name());
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         let inner = create_owner_only()?;
-        #[cfg(not(unix))]
+        #[cfg(not(any(unix, windows)))]
         let inner = ListenerOptions::new().name(name()?).create_tokio()?;
         Ok(Listener { inner })
     }
@@ -212,6 +212,131 @@ fn create_owner_only() -> Result<interprocess::local_socket::tokio::Listener> {
 #[cfg(all(unix, test))]
 pub(crate) static MODE_FALLBACKS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
+
+/// Bind the pipe with a DACL that names this account and nobody else.
+///
+/// A pipe created with no security descriptor gets the default one, which
+/// `CreateNamedPipe` documents as granting full control to LocalSystem, to
+/// administrators and to the creator owner — and *read access to Everyone and
+/// to the anonymous account*. On a shared machine that is every other logged-in
+/// user: they can connect, occupy the listening instance, and hold the pipe
+/// open while hook payloads time out behind them. The unique name from
+/// [`paths::windows_pipe_name`] keeps two installs from colliding by accident,
+/// but a name is not a permission — the pipe namespace is enumerable, so an
+/// attacker never has to guess it.
+#[cfg(windows)]
+fn create_owner_only() -> Result<interprocess::local_socket::tokio::Listener> {
+    use interprocess::os::windows::local_socket::ListenerOptionsExt;
+    Ok(ListenerOptions::new()
+        .name(name()?)
+        .security_descriptor(owner_only_descriptor()?)
+        .create_tokio()?)
+}
+
+#[cfg(windows)]
+fn owner_only_descriptor()
+-> Result<interprocess::os::windows::security_descriptor::SecurityDescriptor> {
+    use interprocess::os::windows::security_descriptor::SecurityDescriptor;
+    let sddl = owner_only_sddl(&current_user_sid()?);
+    let wide = widestring::U16CString::from_str(&sddl)?;
+    SecurityDescriptor::deserialize(&wide)
+        .map_err(|e| anyhow!("cannot build the pipe's security descriptor from {sddl:?}: {e}"))
+}
+
+/// The pipe's DACL, in [security descriptor string format][sdsf].
+///
+/// `D:P` makes the DACL *protected*: no ACE is inherited, so nothing granted
+/// further up can widen it behind our back. The one ACE allows (`A`) generic-all
+/// (`GA`) to a single SID. Deliberately absent: `WD` (Everyone) and `AN`
+/// (anonymous), which the default pipe DACL grants read; and `BA`
+/// (administrators), because an administrator can take ownership regardless and
+/// writing the grant down would only make the ACL lie about who normally reads
+/// the events.
+///
+/// Not `#[cfg(windows)]`, for the same reason as [`paths::windows_pipe_name`]:
+/// a guarantee testable only on the platform CI runs least often is one nobody
+/// notices breaking.
+///
+/// [sdsf]: https://learn.microsoft.com/en-us/windows/win32/secauthz/security-descriptor-string-format
+pub fn owner_only_sddl(sid: &str) -> String {
+    format!("D:P(A;;GA;;;{sid})")
+}
+
+/// Closes the process token however [`current_user_sid`] leaves.
+#[cfg(windows)]
+struct TokenHandle(windows_sys::Win32::Foundation::HANDLE);
+
+#[cfg(windows)]
+impl Drop for TokenHandle {
+    fn drop(&mut self) {
+        // SAFETY: the handle came from a successful `OpenProcessToken` and this
+        // is the only close, `TokenHandle` being neither `Copy` nor `Clone`.
+        unsafe { windows_sys::Win32::Foundation::CloseHandle(self.0) };
+    }
+}
+
+/// This account's SID in string form (`S-1-5-21-…`).
+///
+/// Read from the process token rather than from the user name: the name is
+/// ambiguous across a domain and a local account, and SDDL wants a SID anyway.
+#[cfg(windows)]
+fn current_user_sid() -> Result<String> {
+    use std::ptr;
+    use windows_sys::Win32::Foundation::{HANDLE, LocalFree};
+    use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
+    use windows_sys::Win32::Security::{GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser};
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    let mut raw_token: HANDLE = ptr::null_mut();
+    // SAFETY: `GetCurrentProcess` returns a pseudo-handle needing no close, and
+    // `raw_token` is a valid out-pointer read only after a success return.
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut raw_token) } == 0 {
+        return Err(anyhow!(
+            "cannot open this process's token: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let token = TokenHandle(raw_token);
+
+    // A `TOKEN_USER` is a header followed by a variable-length SID, so the first
+    // call is only there to learn the length; it is expected to fail with
+    // `ERROR_INSUFFICIENT_BUFFER` and its return value is deliberately ignored.
+    let mut len = 0u32;
+    // SAFETY: a null buffer with length 0 is the documented way to ask for the
+    // size, and `len` is a valid out-pointer.
+    unsafe { GetTokenInformation(token.0, TokenUser, ptr::null_mut(), 0, &mut len) };
+    // `u64`, not `u8`: the buffer is cast to a struct holding a pointer, and a
+    // `Vec<u8>`'s 1-byte alignment would make that cast unsound.
+    let mut buf = vec![0u64; (len as usize).div_ceil(8).max(1)];
+    // SAFETY: `buf` is at least `len` bytes and correctly aligned for `TOKEN_USER`.
+    if unsafe { GetTokenInformation(token.0, TokenUser, buf.as_mut_ptr().cast(), len, &mut len) }
+        == 0
+    {
+        return Err(anyhow!(
+            "cannot read this account's SID from the process token: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+
+    // SAFETY: on success the buffer holds a well-formed `TOKEN_USER`, and the
+    // SID it points at lives in the same buffer, so it outlives this borrow.
+    let user = unsafe { &*buf.as_ptr().cast::<TOKEN_USER>() };
+    let mut sid_str: windows_sys::core::PWSTR = ptr::null_mut();
+    // SAFETY: `user.User.Sid` is the SID just read; `sid_str` is a valid
+    // out-pointer for a string the call allocates on the local heap.
+    if unsafe { ConvertSidToStringSidW(user.User.Sid, &mut sid_str) } == 0 {
+        return Err(anyhow!(
+            "cannot render this account's SID as a string: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    // SAFETY: on success the call wrote a NUL-terminated wide string.
+    let sid = unsafe { widestring::U16CStr::from_ptr_str(sid_str) }.to_string_lossy();
+    // SAFETY: `ConvertSidToStringSidW` documents `LocalFree` as the way to
+    // release what it allocated, and nothing borrows it past `to_string_lossy`.
+    unsafe { LocalFree(sid_str.cast()) };
+    Ok(sid)
+}
 
 /// Largest single frame the daemon will assemble from a connection.
 ///
@@ -664,5 +789,133 @@ mod tests {
         unsafe {
             std::env::remove_var("ARGUS_SOCKET");
         }
+    }
+
+    /// The Windows half of the ownership guarantee, asserted everywhere so it
+    /// cannot rot on the platform that is hardest to run. The default pipe DACL
+    /// grants Everyone and the anonymous account read access; a DACL that
+    /// re-granted either, or that dropped `P` and let an inherited ACE back in,
+    /// would still bind and still look healthy.
+    #[test]
+    fn the_pipe_is_granted_to_one_account_and_no_group() {
+        let sddl = owner_only_sddl("S-1-5-21-1-2-3-1001");
+        assert!(
+            sddl.starts_with("D:P"),
+            "an unprotected DACL inherits ACEs from the pipe namespace: {sddl}"
+        );
+        assert_eq!(
+            sddl.matches("(A;").count(),
+            1,
+            "exactly one account may be granted access: {sddl}"
+        );
+        assert!(
+            sddl.contains(";;;S-1-5-21-1-2-3-1001)"),
+            "the one grant must name the account we were given: {sddl}"
+        );
+        // Everyone, anonymous, authenticated users, administrators, world-ish
+        // aliases. Any of these turns the DACL back into the default.
+        for group in ["WD", "AN", "AU", "BA", "BU", "IU"] {
+            assert!(
+                !sddl.contains(&format!(";;;{group})")),
+                "{group} must not be granted access to the pipe: {sddl}"
+            );
+        }
+    }
+
+    /// And the same guarantee on the bound pipe itself, since the string above
+    /// only proves what we *asked* for. Windows CI runs this; nothing else can.
+    ///
+    /// Compares ACE count and SID rather than the whole descriptor: the object
+    /// manager maps `GA` to the pipe's specific rights when it assigns the
+    /// descriptor, so the mask read back is not the mask written.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn nothing_outside_this_account_can_reach_the_bound_pipe() {
+        let dir = tempfile::tempdir().unwrap();
+        let pipe = paths::windows_pipe_name(dir.path());
+        unsafe {
+            std::env::set_var("ARGUS_SOCKET", &pipe);
+        }
+        let listener = Listener::bind().unwrap();
+        let dacl = dacl_of(&pipe);
+        drop(listener);
+        unsafe {
+            std::env::remove_var("ARGUS_SOCKET");
+        }
+
+        let dacl = dacl.expect("the DACL of a pipe we just created must be readable");
+        let us = current_user_sid().unwrap();
+        assert!(
+            dacl.starts_with("D:P"),
+            "the bound pipe's DACL must stay protected: {dacl}"
+        );
+        assert_eq!(
+            dacl.matches("(A;").count(),
+            1,
+            "the bound pipe must grant exactly one account, not the default set: {dacl}"
+        );
+        assert!(
+            dacl.contains(&format!(";;;{us})")),
+            "the one account granted the pipe must be this one ({us}): {dacl}"
+        );
+    }
+
+    /// Read a named pipe's DACL back out of the object manager, as SDDL.
+    #[cfg(windows)]
+    fn dacl_of(pipe: &str) -> Result<String> {
+        use std::ptr;
+        use windows_sys::Win32::Foundation::{ERROR_SUCCESS, LocalFree};
+        use windows_sys::Win32::Security::Authorization::{
+            ConvertSecurityDescriptorToStringSecurityDescriptorW, GetNamedSecurityInfoW,
+            SDDL_REVISION_1, SE_FILE_OBJECT,
+        };
+        use windows_sys::Win32::Security::{DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR};
+
+        let wide = widestring::U16CString::from_str(pipe)?;
+        let mut sd: PSECURITY_DESCRIPTOR = ptr::null_mut();
+        // SAFETY: all five out-pointers are valid; the four we do not want are
+        // null, which the call documents as "do not return this part".
+        let rc = unsafe {
+            GetNamedSecurityInfoW(
+                wide.as_ptr(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                &mut sd,
+            )
+        };
+        if rc != ERROR_SUCCESS {
+            return Err(anyhow!("GetNamedSecurityInfoW({pipe}) failed with {rc}"));
+        }
+        let mut out: windows_sys::core::PWSTR = ptr::null_mut();
+        // SAFETY: `sd` is the descriptor just returned; `out` is a valid
+        // out-pointer for a string the call allocates on the local heap.
+        let ok = unsafe {
+            ConvertSecurityDescriptorToStringSecurityDescriptorW(
+                sd,
+                SDDL_REVISION_1,
+                DACL_SECURITY_INFORMATION,
+                &mut out,
+                ptr::null_mut(),
+            )
+        };
+        // SAFETY: both pointers came from local-heap allocations owned by us,
+        // and neither is used after this point.
+        let text = if ok == 0 {
+            Err(anyhow!(
+                "cannot render the DACL of {pipe}: {}",
+                std::io::Error::last_os_error()
+            ))
+        } else {
+            Ok(unsafe { widestring::U16CStr::from_ptr_str(out) }.to_string_lossy())
+        };
+        unsafe {
+            LocalFree(out.cast());
+            LocalFree(sd.cast());
+        }
+        text
     }
 }

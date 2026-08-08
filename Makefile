@@ -60,6 +60,40 @@ check: ## Fast type-check without producing binaries
 .PHONY: verify
 verify: fmt-check lint test ## Full pre-commit gate: fmt-check + lint + test
 
+# Windows-only code — the named-pipe DACL in src/ipc.rs — is invisible to
+# `make verify` on a Unix host, because `cargo check` never compiles a
+# `#[cfg(windows)]` block. CI does build and run it on windows-latest, so the
+# breakage is caught eventually; this catches it before the push instead.
+# Deliberately not a prerequisite of `verify`: it needs tools (zig, the target's
+# std) that CI and a fresh clone do not have, and a gate that cannot run
+# everywhere stops being a gate.
+#
+# Requires: brew install zig && rustup target add x86_64-pc-windows-gnu
+XWIN_DIR    = target/xwin
+XWIN_TARGET = x86_64-pc-windows-gnu
+
+.PHONY: check-windows
+check-windows: ## Type-check and lint the Windows-only code from a Unix host
+	@command -v zig >/dev/null 2>&1 || { \
+		echo "zig not installed; run: brew install zig"; exit 1; }
+	@mkdir -p $(XWIN_DIR)
+	@# cc-rs passes both `-target` (which zig wants) and `--target=` (which zig
+	@# rejects as an unknown OS), so the wrapper drops the latter.
+	@printf '%s\n' \
+		'#!/bin/sh' \
+		'args=""' \
+		'for a in "$$@"; do' \
+		'  case "$$a" in --target=*) continue;; esac' \
+		'  args="$$args \"$$a\""' \
+		'done' \
+		'eval exec zig cc -target x86_64-windows-gnu $$args' > $(XWIN_DIR)/cc
+	@printf '%s\n' '#!/bin/sh' 'exec zig ar "$$@"' > $(XWIN_DIR)/ar
+	@chmod +x $(XWIN_DIR)/cc $(XWIN_DIR)/ar
+	CC_x86_64_pc_windows_gnu=$(abspath $(XWIN_DIR)/cc) \
+	AR_x86_64_pc_windows_gnu=$(abspath $(XWIN_DIR)/ar) \
+	CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=$(abspath $(XWIN_DIR)/cc) \
+	$(CARGO) clippy --target $(XWIN_TARGET) --all-targets -- -D warnings
+
 ## --- Tool wiring (uses the built binary) --------------------------------
 
 .PHONY: install

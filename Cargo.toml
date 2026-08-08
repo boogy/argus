@@ -26,6 +26,19 @@ uuid = { version = "1.23.4", features = ["v4"] }
 [target.'cfg(unix)'.dependencies]
 libc = "0.2.186"
 
+# This account's SID, so the named pipe's DACL can name it and nothing else.
+# Both crates are already in the tree under `interprocess` on Windows; this only
+# makes the use direct, and `windows-sys` features are additive, so asking for
+# these cannot change what `interprocess` itself compiles.
+[target.'cfg(windows)'.dependencies]
+widestring = "1.2.1"
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_Threading",
+] }
+
 [dev-dependencies]
 tempfile = "3.27.0"
 tiny_http = "0.12.0"

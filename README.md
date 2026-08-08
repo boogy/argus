@@ -181,7 +181,10 @@ extra_patterns = ["ACME-[0-9]{6}"]
   and hook payloads would reach whichever daemon bound first) with a 250ms
   deadline. The daemon refuses to bind an endpoint another account owns rather
   than reporting it as "already running" — a squatted socket that looks like a
-  healthy install is a silent kill switch. On timeout or
+  healthy install is a silent kill switch. The endpoint is also reachable by
+  this account only: mode `0600` in a `0700` directory on Unix, and on Windows
+  a protected DACL granting one SID, replacing the default pipe descriptor's
+  read access for Everyone and for the anonymous account. On timeout or
   daemon-not-running it falls back to writing a JSONL spool file and
   autospawns the daemon. It never blocks the host tool and never fails loudly
   — a broken hook must not break Claude Code, opencode, or Codex.

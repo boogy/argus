@@ -513,13 +513,46 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
     needs a second uid, so `symlink_metadata` vs `metadata` is unfalsifiable
     without root. Not faked with a mock filesystem — the check is one `stat`
     syscall, and a mock of it would only assert that the mock was called.
-  - [ ] **T8d** — Windows: owner-only DACL on the pipe. **The plan's
-    feasibility worry does not hold** — `interprocess 2.4.2` ships
+  - [x] **T8d** — Windows: owner-only DACL on the pipe. Files: `src/ipc.rs`,
+    `Cargo.toml`, `Makefile`, `README.md`
+    **The plan's feasibility worry does not hold** — `interprocess 2.4.2` ships
     `os::windows::local_socket::ListenerOptionsExt::security_descriptor` and
     `SecurityDescriptor::deserialize` (SDDL), so no raw `CreateNamedPipeW`.
-    Getting the current user's SID still needs `windows-sys`. Not runtime-
-    testable here, but `cargo check --target x86_64-pc-windows-gnu` works
-    locally with `CC=zig cc` and `cargo test` runs on `windows-latest` in CI.
+    A pipe created with no descriptor gets the default one, which
+    `CreateNamedPipe` documents as granting *read access to Everyone and to the
+    anonymous account*. T8b gave each install its own pipe *name*, but a name in
+    an enumerable namespace is not a permission: any other logged-in user could
+    connect, occupy the single listening instance, and hold hook payloads out
+    while `status` still reported a healthy daemon. The DACL is `D:P(A;;GA;;;
+    <sid>)` — protected, so nothing is inherited, and one ACE naming the SID
+    read from this process's token. No `BA` entry: an administrator can take
+    ownership regardless, and writing the grant down would only make the ACL lie
+    about who normally reads the events.
+    SID from the token rather than the user name, which is ambiguous between a
+    local and a domain account and is not what SDDL wants anyway. The
+    `GetTokenInformation` buffer is a `Vec<u64>`, not a `Vec<u8>`: it is cast to
+    a struct holding a pointer, and 1-byte alignment would make that unsound.
+    `owner_only_sddl` is deliberately not `#[cfg(windows)]`, same reasoning as
+    `paths::windows_pipe_name` in T8b — the string is where the guarantee lives,
+    and a guarantee testable only on the platform CI runs least often is one
+    nobody notices breaking.
+    Two tests. `the_pipe_is_granted_to_one_account_and_no_group` runs
+    everywhere and is mutation-verified two of two: dropping `P` and re-adding
+    an Everyone ACE each failed it. `nothing_outside_this_account_can_reach_the_
+    bound_pipe` binds and reads the DACL back with `GetNamedSecurityInfoW`,
+    asserting ACE count and SID rather than the whole descriptor, because the
+    object manager maps `GA` to the pipe's specific rights when it assigns the
+    descriptor — so the mask read back is not the mask written.
+    New `make check-windows`: generates a `zig cc` wrapper (filtering the
+    `--target=` that cc-rs adds and zig rejects) and runs clippy for
+    `x86_64-pc-windows-gnu`. Not wired into `verify`, which must stay runnable
+    on a fresh clone without zig. Verified falsifiable — a deliberate type error
+    in the `#[cfg(windows)]` test failed the cross-check, so `--all-targets`
+    does reach that module.
+    Known gap, deliberate: dropping `.security_descriptor(...)` from the bind is
+    caught only by the Windows test, which no local run executes. Nothing short
+    of a Windows host or a push to CI closes that, and faking it with a mock
+    listener would assert only that the mock was called.
   - [ ] **T8e** — Per-user Codex OTLP port + install-generated bearer token in
     the Codex `[otel]` headers, checked by the listener.
 
