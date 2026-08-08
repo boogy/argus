@@ -122,6 +122,18 @@ pub enum EventKind {
         tool: String,
         detail: String,
     },
+    /// Events this daemon destroyed rather than delivered.
+    ///
+    /// Silent loss is the failure mode a monitoring tool cannot afford: a
+    /// buffer that quietly discards its oldest rows under load looks exactly
+    /// like a quiet afternoon, and the periods most likely to overflow it are
+    /// the periods most worth having. `count` is the number of events lost,
+    /// `reason` the mechanism that lost them.
+    Loss {
+        reason: String,
+        count: u64,
+        detail: String,
+    },
 }
 
 impl Event {

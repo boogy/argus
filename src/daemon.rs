@@ -143,6 +143,7 @@ async fn export_loop(buffer: Arc<Buffer>, cfg: Arc<RwLock<config::Config>>) {
         let wait = flush.saturating_mul(backoff).min(flush.saturating_mul(30));
         tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
 
+        record_losses(&buffer);
         let Ok(batch) = buffer.peek_batch(batch_size) else {
             continue;
         };
@@ -164,10 +165,23 @@ async fn export_loop(buffer: Arc<Buffer>, cfg: Arc<RwLock<config::Config>>) {
     }
 }
 
+/// Fold any buffer overflow since the last flush into the queue, ahead of the
+/// batch it is about to describe.
+///
+/// Done here rather than at trim time because the trim happens precisely when
+/// the buffer has no room: writing the marker there would evict another event
+/// to make space for the news that events are being evicted.
+fn record_losses(buffer: &Buffer) {
+    if let Err(e) = buffer.flush_loss_record() {
+        tracing::error!("could not record buffer overflow: {e}");
+    }
+}
+
 /// Best-effort final export on graceful shutdown; never blocks longer than
 /// one export attempt and swallows failures (the batch stays buffered for
 /// the next daemon run either way).
 async fn final_flush(buffer: &Buffer, cfg: &Arc<RwLock<config::Config>>) {
+    record_losses(buffer);
     let export_cfg = with_cfg(cfg, |c| c.export.clone());
     let batch_size = effective_batch_size(&export_cfg);
     let Ok(batch) = buffer.peek_batch(batch_size) else {
@@ -280,6 +294,49 @@ mod tests {
         assert!(
             scrubbed.contains("[REDACTED:custom-0]"),
             "refresh must rebuild the regexes: {scrubbed}"
+        );
+    }
+
+    /// End to end: the overflow has to reach the queue that gets exported,
+    /// not just a counter someone might read.
+    #[test]
+    fn an_overflow_reaches_the_export_queue_as_an_event() {
+        let dir = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("ARGUS_DATA_DIR", dir.path());
+        }
+        let buffer = Buffer::open(3).unwrap();
+        for i in 0..5 {
+            let e = crate::event::Event::new(
+                "claude-code",
+                None,
+                None,
+                crate::event::EventKind::Prompt {
+                    text: format!("p{i}"),
+                },
+            );
+            buffer.push(&e).unwrap();
+        }
+        record_losses(&buffer);
+        let queued = buffer.peek_batch(10).unwrap();
+        let loss = queued
+            .iter()
+            .find_map(|(_, e)| match &e.kind {
+                crate::event::EventKind::Loss { count, .. } => Some(*count),
+                _ => None,
+            })
+            .expect("the drop record must be queued for export");
+        assert_eq!(loss, 2);
+        record_losses(&buffer);
+        assert_eq!(
+            buffer
+                .peek_batch(10)
+                .unwrap()
+                .iter()
+                .filter(|(_, e)| matches!(e.kind, crate::event::EventKind::Loss { .. }))
+                .count(),
+            1,
+            "a quiet flush must not re-report a gap it already reported"
         );
     }
 

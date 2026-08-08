@@ -196,6 +196,14 @@ impl Redactor {
                 tool: _,
                 detail: _,
             } => {}
+            // Argus writes all three of these itself; nothing here came from
+            // the host tool. `detail` is scrubbed anyway, since it is the one
+            // field a future reason could reasonably widen to carry a path.
+            EventKind::Loss {
+                reason: _,
+                count: _,
+                detail,
+            } => self.scrub_in_place(detail),
         }
         e
     }

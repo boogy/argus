@@ -223,6 +223,45 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
 
 - [ ] **T7** — Durability and loss visibility. Dependency: T6.
   Files: `src/buffer.rs`, `src/spool.rs`, `src/config.rs`, `src/event.rs`, `src/hook.rs`
+  Split four ways, one behavioural change each — the row bundles four of them
+  across five files, past the sizing rule. T7a = loss visibility for buffer
+  overflow; T7b = shim stdin truncation (a new `Envelope` field, and the 24
+  literals across 12 files that come with it); T7c = the byte caps, re-read
+  live; T7d = the incremental crash-safe spool drain.
+
+  - [x] **T7a** — Overflow is visible. Files: `src/event.rs`, `src/buffer.rs`,
+    `src/daemon.rs`, `src/export.rs`, `src/redact.rs`
+    A buffer at its cap dropped its oldest rows silently, which for a security
+    monitor is the worst-shaped failure available: a busy hour and a quiet one
+    reach the collector looking identical, and the hours most likely to
+    overflow are the ones most worth having. `EventKind::Loss` now states the
+    gap — mechanism, count, and a human-readable detail — and exports at
+    `WARN`, alongside the failed-integrity check as the other record that must
+    not scroll past in an `INFO` firehose.
+    The count is a counter on `Buffer`, not a row written at trim time: the
+    trim happens exactly when there is no room, so writing the marker there
+    spends the one thing that just ran out, and a burst trimming on every push
+    would fill the cap with markers describing the events they displaced. It is
+    coalesced into one record per flush cycle instead, which costs a marker if
+    the process dies in between — the cheaper of the two failures.
+    The test caught a real feedback loop before the commit: inserting the
+    marker into an already-full buffer evicts one further event, so charging
+    that eviction to the loss count left a residue of one, which the next flush
+    reported with another marker, which evicted another event — a permanent
+    self-sustaining alarm on a completely idle machine. The write path is now
+    split, a counting `push_batch` over a non-counting `append`, and the marker
+    goes through `append`: its own displacement folds into the gap it already
+    describes. Concurrent writers' losses are untouched and roll into the next
+    flush.
+    Mutation-verified, four of four: routing the marker through `push_batch`,
+    reading the counter instead of draining it, dropping the trim count in
+    `push_batch`, and dropping the `WARN` severity arm each failed the matching
+    test. `scrub_event` still matches `EventKind` exhaustively, so the compiler
+    forced a redaction decision on the new variant rather than letting it
+    default to unscrubbed.
+  - [ ] **T7b** — Shim stdin truncation is counted and reported.
+  - [ ] **T7c** — `buffer.max_bytes` / `max_spool_bytes`, re-read from live config.
+  - [ ] **T7d** — Incremental spool drain, delete after the buffer commits.
 
 - [ ] **T8** — Transport security. Dependency: T3.
   Files: `src/paths.rs`, `src/ipc.rs`, `src/adapters/codex.rs`, `src/install.rs`, `Cargo.toml`

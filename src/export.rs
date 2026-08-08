@@ -96,6 +96,16 @@ fn record(e: &Event) -> Value {
             "session"
         }
         EventKind::Raw { .. } => "raw",
+        EventKind::Loss {
+            reason,
+            count,
+            detail,
+        } => {
+            attrs.push(attr("loss.reason", reason));
+            attrs.push(attr("loss.count", &count.to_string()));
+            attrs.push(attr("loss.detail", detail));
+            "loss"
+        }
         EventKind::Integrity {
             status,
             tool,
@@ -125,6 +135,9 @@ fn record(e: &Event) -> Value {
     // of the INFO stream everything else rides in.
     let severity = match &e.kind {
         EventKind::Integrity { status, .. } if status != "ok" => "WARN",
+        // A gap in the stream is the other thing that must not scroll past in
+        // an INFO firehose: it says this record is not the whole story.
+        EventKind::Loss { .. } => "WARN",
         _ => "INFO",
     };
     json!({
@@ -260,6 +273,35 @@ mod tests {
         assert_eq!(get("tool.name").as_deref(), Some("bash"));
         assert_eq!(get("permission.action").as_deref(), Some("requested"));
         assert_eq!(get("agent.type").as_deref(), Some("Explore"));
+    }
+
+    /// A gap must not ride the INFO firehose alongside the events it says are
+    /// missing.
+    #[test]
+    fn a_loss_exports_as_a_warning_with_its_count() {
+        let e = Event::new(
+            "argus",
+            None,
+            None,
+            EventKind::Loss {
+                reason: "buffer_full".into(),
+                count: 41,
+                detail: "local buffer at capacity".into(),
+            },
+        );
+        let body = to_otlp_body(std::slice::from_ref(&e));
+        let rec = &body["resourceLogs"][0]["scopeLogs"][0]["logRecords"][0];
+        assert_eq!(rec["severityText"], "WARN");
+        let attrs = rec["attributes"].as_array().unwrap();
+        let get = |k: &str| {
+            attrs
+                .iter()
+                .find(|a| a["key"] == k)
+                .map(|a| a["value"]["stringValue"].as_str().unwrap().to_string())
+        };
+        assert_eq!(get("event.type").as_deref(), Some("loss"));
+        assert_eq!(get("loss.count").as_deref(), Some("41"));
+        assert_eq!(get("loss.reason").as_deref(), Some("buffer_full"));
     }
 
     #[tokio::test]
