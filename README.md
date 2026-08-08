@@ -107,6 +107,7 @@ unset keys keep their default.
 | `redaction.extra_patterns`   | `[]`               | Additional regexes scrubbed the same way as built-ins (invalid patterns are skipped with a warning, not fatal).                                                                                                  |
 | `buffer.max_events`          | `100000`           | SQLite buffer cap; oldest events are dropped once full (offline-first, not unbounded).                                                                                                                           |
 | `buffer.max_bytes`           | `268435456`        | Second cap, on stored event text (256 MiB). A row cap is not a disk bound — 100k pasted file contents is a very different size from 100k prompts. Whichever binds first wins; both are re-read on a config reload. |
+| `spool.max_bytes`            | `67108864`         | Ceiling on the hand-off spool (64 MiB). It grows exactly while the daemon is down and nothing is draining it; over the cap the oldest undelivered files are deleted and the count rides out on the next envelope as an `event.type=loss`, `loss.reason=spool_full` record. Read fresh on every hook, so a change applies immediately. |
 | `codex.otlp_listen`          | `"127.0.0.1:4327"` | Local address the daemon listens on for Codex's `[otel]` OTLP/JSON export.                                                                                                                                       |
 | `integrity.enabled`          | `true`             | Periodically re-verify the daemon's own hook/plugin wiring is intact. A tampered/removed hook emits an `event.type=integrity`, `integrity.status=broken` record at `WARN`. On by default (security control).      |
 | `integrity.interval_secs`    | `3600`             | Wiring self-check interval (floor `30`). Broken findings re-emit each cycle until re-install, so the alert stays live.                                                                                            |
@@ -247,9 +248,14 @@ extra_patterns = ["ACME-[0-9]{6}"]
   `event.type=loss` record at `WARN` rather than left as a silent absence.
 - **Spool directory** (`<data-dir>/spool/*.jsonl`): written by the hook shim
   when it can't reach the daemon within its deadline (daemon not yet started,
-  or briefly wedged). The daemon drains this directory every 5s once running;
-  files with corrupt/unparseable content are dropped (logged as a warning)
-  rather than blocking the drain loop.
+  or briefly wedged). The daemon drains this directory every 5s once running,
+  256 files per pass and oldest first, deleting each file only after its events
+  are committed to the buffer — so a crash mid-drain costs a duplicate rather
+  than an event. Files with corrupt/unparseable content are dropped (logged as
+  a warning) rather than blocking the drain loop. `spool.max_bytes` bounds the
+  directory: past the cap the oldest undelivered files are deleted, and the
+  count is exported as an `event.type=loss`, `loss.reason=spool_full` record at
+  `WARN`.
 - **Hook not firing**: confirm `argus install` actually wrote entries —
   check `~/.claude/settings.json` (`hooks.*`), `~/.config/opencode/plugin/argus.ts`,
   `~/.codex/config.toml` (`notify`, `[otel]`), `~/.codex/hooks.json`, or

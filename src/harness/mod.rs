@@ -911,14 +911,34 @@ fn write_json(path: &Path, doc: &Value) -> Result<()> {
 /// can forget to (telemetry-gaps #8).
 pub fn parse(envelope: Envelope, capture: &CaptureCfg) -> Vec<Event> {
     let received_at = envelope.received_at;
-    let (truncated, source) = (envelope.truncated, envelope.source.clone());
+    let (truncated, dropped) = (envelope.truncated, envelope.dropped);
+    let source = envelope.source.clone();
     let mut events = dispatch(envelope, capture);
+    // Ahead of the events they qualify, not after them: a reader who sees a
+    // tool call with no result should learn that the payload was cut, or that
+    // the minutes before it are missing, before drawing the obvious wrong
+    // conclusion from the absence. Both are attributed to the host tool rather
+    // than to argus, since which agent produced an 8 MiB payload — or filled
+    // the spool while the daemon was down — is the actionable half.
+    if dropped > 0 {
+        events.insert(
+            0,
+            Event::new(
+                &source,
+                None,
+                None,
+                crate::event::EventKind::Loss {
+                    reason: "spool_full".into(),
+                    count: dropped,
+                    detail: "the hand-off spool hit spool.max_bytes while the daemon was \
+                             unreachable; these are the oldest undelivered events, deleted \
+                             to make room for this one"
+                        .into(),
+                },
+            ),
+        );
+    }
     if truncated {
-        // Ahead of the events it qualifies, not after them: a reader who sees
-        // a tool call with no result should learn that the payload was cut
-        // before drawing the obvious wrong conclusion from the absence. The
-        // event is attributed to the host tool rather than to argus, since
-        // which agent produced an 8 MiB payload is the actionable half.
         events.insert(
             0,
             Event::new(
@@ -929,7 +949,8 @@ pub fn parse(envelope: Envelope, capture: &CaptureCfg) -> Vec<Event> {
                     reason: "stdin_truncated".into(),
                     count: 1,
                     detail: format!(
-                        "hook payload exceeded the {} MiB stdin cap; the tail was discarded                          before parsing, so the event that follows is incomplete",
+                        "hook payload exceeded the {} MiB stdin cap; the tail was discarded \
+                         before parsing, so the event that follows is incomplete",
                         crate::hook::MAX_STDIN_BYTES / (1024 * 1024)
                     ),
                 },
@@ -972,6 +993,7 @@ mod tests {
             source: "claude-code".into(),
             received_at: chrono::Utc::now(),
             truncated: true,
+            dropped: 0,
             event: None,
             payload: serde_json::json!({
                 "hook_event_name": "UserPromptSubmit",
@@ -1007,6 +1029,68 @@ mod tests {
                 .any(|e| matches!(e.kind, crate::event::EventKind::Loss { .. })),
             "an intact payload must not claim a gap"
         );
+    }
+
+    /// The shim deletes the files; only the daemon can say so. The count is
+    /// carried on the envelope precisely because it is the one thing crossing
+    /// between them, and it is worth nothing until it becomes an event.
+    #[test]
+    fn a_spool_trim_becomes_a_gap_the_collector_can_see() {
+        let mut env = Envelope {
+            source: "claude-code".into(),
+            received_at: chrono::Utc::now(),
+            truncated: false,
+            dropped: 7,
+            event: None,
+            payload: serde_json::json!({
+                "hook_event_name": "UserPromptSubmit",
+                "session_id": "s1",
+                "prompt": "hi",
+            }),
+        };
+        let events = parse(env.clone(), &CaptureCfg::default());
+        let crate::event::EventKind::Loss { reason, count, .. } = &events[0].kind else {
+            panic!("seven events were deleted and nothing downstream was told");
+        };
+        assert_eq!(reason, "spool_full");
+        assert_eq!(*count, 7);
+        assert_eq!(events[0].source, "claude-code");
+        assert!(events.len() > 1, "the envelope's own event still counts");
+
+        env.dropped = 0;
+        assert!(
+            !parse(env, &CaptureCfg::default())
+                .iter()
+                .any(|e| matches!(e.kind, crate::event::EventKind::Loss { .. })),
+            "a spool with room must not claim a gap"
+        );
+    }
+
+    /// Two independent gaps on one envelope are two independent findings; the
+    /// truncation qualifies the event that follows it, so it leads.
+    #[test]
+    fn a_cut_payload_that_also_trimmed_the_spool_reports_both() {
+        let env = Envelope {
+            source: "claude-code".into(),
+            received_at: chrono::Utc::now(),
+            truncated: true,
+            dropped: 3,
+            event: None,
+            payload: serde_json::json!({
+                "hook_event_name": "UserPromptSubmit",
+                "session_id": "s1",
+                "prompt": "hi",
+            }),
+        };
+        let events = parse(env, &CaptureCfg::default());
+        let reasons: Vec<&str> = events
+            .iter()
+            .filter_map(|e| match &e.kind {
+                crate::event::EventKind::Loss { reason, .. } => Some(reason.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(reasons, ["stdin_truncated", "spool_full"]);
     }
 
     #[test]

@@ -127,6 +127,7 @@ mod tests {
             source: "claude-code".into(),
             received_at: chrono::Utc::now(),
             truncated: false,
+            dropped: 0,
             event: None,
             payload: serde_json::json!({"hook_event_name": "UserPromptSubmit"}),
         };
@@ -164,6 +165,7 @@ mod tests {
             source: "claude-code".into(),
             received_at: chrono::Utc::now(),
             truncated: false,
+            dropped: 0,
             event: None,
             payload: serde_json::json!({"hook_event_name": "UserPromptSubmit"}),
         };

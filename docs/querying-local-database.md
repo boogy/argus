@@ -25,6 +25,12 @@ The database is an **export buffer, not an archive**:
   `buffer.max_events` (default 100 000) or `buffer.max_bytes` (default
   256 MiB), whichever binds first; the oldest rows are then dropped, and the
   gap is recorded as a `loss` event rather than vanishing.
+- Events lost *before* they reached the database are recorded the same way, so
+  `SELECT ... WHERE type = 'loss'` is the one query that tells you whether the
+  rest of the table is the whole story. `reason` says which mechanism:
+  `buffer_full` (this cap), `spool_full` (the shim deleted undelivered events
+  while the daemon was down), `stdin_truncated` (a hook payload over the 8 MiB
+  cap, so the event *after* the marker is incomplete rather than missing).
 - For local-only analysis, leave `export.otlp_endpoint` unset.
 
 The DB runs in WAL mode. Reading while the daemon is running is safe, but:

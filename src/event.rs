@@ -17,11 +17,21 @@ pub struct Envelope {
     /// second IPC round trip to say that the first one was incomplete.
     #[serde(default, skip_serializing_if = "is_false")]
     pub truncated: bool,
+    /// How many older spooled envelopes were deleted to make room for this
+    /// one. Rides along for the same reason `truncated` does: the shim that
+    /// notices the deletion has no way to report it, and this envelope is
+    /// already on its way to somebody who does.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub dropped: u64,
     pub payload: serde_json::Value,
 }
 
 fn is_false(b: &bool) -> bool {
     !*b
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 /// Cross-tool context attached to every event. Adapters populate whatever
@@ -251,6 +261,7 @@ mod tests {
             source: "opencode".into(),
             received_at: chrono::Utc::now(),
             truncated: false,
+            dropped: 0,
             event: None,
             payload: serde_json::json!({"event": "tool.execute.before"}),
         };

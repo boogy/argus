@@ -2,6 +2,62 @@ use crate::event::Envelope;
 use crate::paths;
 use anyhow::Result;
 
+/// Delete the oldest spool files until the directory has room for `incoming`
+/// more bytes, and say how many were deleted.
+///
+/// Oldest-first for the same reason the buffer trims oldest-first: during the
+/// incident this exists to record, the last minute matters more than the first.
+/// The scan is one `read_dir` plus a `stat` per file, on every spooled write —
+/// affordable precisely because the cap is what keeps the file count small.
+/// Uncapped, the directory grows without bound and *every* later pass over it,
+/// including the daemon's own replay, degrades with it.
+///
+/// An envelope larger than the whole cap is still written, after everything
+/// else has been cleared out for it: refusing it would trade a bounded overrun
+/// for a guaranteed hole, the same call the buffer's newest-row exemption makes.
+fn enforce_cap(dir: &std::path::Path, incoming: u64, max_bytes: u64) -> u64 {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut files: Vec<_> = entries
+        .flatten()
+        .filter(|e| e.path().extension().is_some_and(|x| x == "jsonl"))
+        .filter_map(|e| {
+            let m = e.metadata().ok()?;
+            Some((m.modified().ok()?, m.len(), e.path()))
+        })
+        .collect();
+    let mut total: u64 = files.iter().map(|f| f.1).sum();
+    if total + incoming <= max_bytes {
+        return 0;
+    }
+    files.sort_by_key(|f| f.0);
+    let mut dropped = 0;
+    for (_, len, path) in files {
+        if total + incoming <= max_bytes {
+            break;
+        }
+        match std::fs::remove_file(&path) {
+            Ok(()) => {
+                total -= len;
+                dropped += 1;
+            }
+            // Someone else's write is not this write's problem to solve, but
+            // it does mean the cap is not being enforced — say so out loud
+            // rather than spin.
+            Err(e) => tracing::warn!("could not trim spool file {path:?}: {e}"),
+        }
+    }
+    dropped
+}
+
+/// Write an envelope to the spool, first making room for it under
+/// `spool.max_bytes`.
+///
+/// The cap comes from the config on every call rather than from anything
+/// cached: the shim is a fresh process per hook, so it reads the operator's
+/// current answer by construction — including one they changed *because* the
+/// spool was filling their disk.
 pub fn append(envelope: &Envelope) -> Result<()> {
     let dir = paths::spool_dir();
     std::fs::create_dir_all(&dir)?;
@@ -12,8 +68,22 @@ pub fn append(envelope: &Envelope) -> Result<()> {
         // each file owner-only.
         let _ = std::fs::set_permissions(&dir, std::os::unix::fs::PermissionsExt::from_mode(0o700));
     }
+    let mut body = serde_json::to_vec(envelope)?;
+    // No `.max(1)` clamp here, unlike the buffer's: the newest envelope is
+    // written whatever the cap says, so `max_bytes = 0` already means "hold
+    // exactly one file" rather than "capture nothing". A clamp that changes no
+    // observable behavior is a guarantee nothing can test.
+    let dropped = enforce_cap(&dir, body.len() as u64, crate::config::load().spool.max_bytes);
+    if dropped > 0 {
+        // Re-serialize rather than patch: the count is only knowable after the
+        // trim, and this envelope is the only messenger the shim has. Nothing
+        // else will ever mention those files again.
+        let mut envelope = envelope.clone();
+        envelope.dropped += dropped;
+        body = serde_json::to_vec(&envelope)?;
+    }
     let file = dir.join(format!("{}.jsonl", uuid::Uuid::new_v4()));
-    std::fs::write(&file, serde_json::to_vec(envelope)?)?;
+    std::fs::write(&file, body)?;
     #[cfg(unix)]
     {
         std::fs::set_permissions(&file, std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
@@ -130,6 +200,7 @@ mod tests {
             source: "codex".into(),
             received_at: chrono::Utc::now(),
             truncated: false,
+            dropped: 0,
             event: None,
             payload: serde_json::json!({"k": "v"}),
         };
@@ -152,6 +223,7 @@ mod tests {
             source: "codex".into(),
             received_at: chrono::Utc::now(),
             truncated: true,
+            dropped: 0,
             event: None,
             payload: serde_json::json!({"k": "v"}),
         };
@@ -172,6 +244,7 @@ mod tests {
                 source: "codex".into(),
                 received_at: chrono::Utc::now(),
                 truncated: false,
+                dropped: 0,
                 event: None,
                 payload: serde_json::json!({ "n": i }),
             };
@@ -190,6 +263,124 @@ mod tests {
         );
     }
 
+    fn env(n: u32) -> Envelope {
+        Envelope {
+            source: "codex".into(),
+            received_at: chrono::Utc::now(),
+            truncated: false,
+            dropped: 0,
+            event: None,
+            // Big enough that a handful of these clears a small cap.
+            payload: serde_json::json!({ "n": n, "pad": "x".repeat(400) }),
+        }
+    }
+
+    fn cap(dir: &std::path::Path, max_bytes: u64) {
+        std::fs::write(
+            dir.join("config.toml"),
+            format!("[spool]\nmax_bytes = {max_bytes}\n"),
+        )
+        .unwrap();
+    }
+
+    fn spool_bytes() -> u64 {
+        std::fs::read_dir(crate::paths::spool_dir())
+            .unwrap()
+            .flatten()
+            .map(|e| e.metadata().unwrap().len())
+            .sum()
+    }
+
+    /// The spool fills exactly while nothing is draining it — a daemon that
+    /// died and agents that kept working. Uncapped, the component that must
+    /// never harm the host tool eventually fills its disk.
+    #[test]
+    fn a_spool_over_its_cap_stops_growing() {
+        let dir = setup();
+        cap(dir.path(), 4096);
+        for i in 0..64 {
+            append(&env(i)).unwrap();
+        }
+        assert!(
+            spool_bytes() <= 4096,
+            "spool grew to {} bytes past a 4096-byte cap",
+            spool_bytes()
+        );
+        // And what survived is the *end* of the timeline, not the start: during
+        // the incident this exists to record, the last minute is the one worth
+        // keeping.
+        let kept: Vec<u64> = take(usize::MAX)
+            .iter()
+            .map(|(_, e)| e.payload["n"].as_u64().unwrap())
+            .collect();
+        assert!(
+            kept.contains(&63),
+            "the newest envelope was trimmed away: {kept:?}"
+        );
+        assert!(!kept.contains(&0), "the oldest envelope survived: {kept:?}");
+    }
+
+    /// A deletion nobody hears about is exactly the silent gap the `Loss` kind
+    /// exists to close, and the shim has no exporter to report it with — so it
+    /// rides out on the envelope whose arrival caused it.
+    #[test]
+    fn a_trim_is_charged_to_the_envelope_that_caused_it() {
+        let dir = setup();
+        cap(dir.path(), 4096);
+        for i in 0..64 {
+            append(&env(i)).unwrap();
+        }
+        let total: u64 = take(usize::MAX).iter().map(|(_, e)| e.dropped).sum();
+        assert!(
+            total > 0,
+            "files were deleted and no surviving envelope admits to it"
+        );
+    }
+
+    /// An envelope bigger than the whole cap must still be written. Refusing it
+    /// would trade a bounded overrun for a guaranteed hole — the same call the
+    /// buffer's newest-row exemption makes.
+    #[test]
+    fn an_envelope_larger_than_the_cap_is_still_written() {
+        let dir = setup();
+        cap(dir.path(), 64);
+        append(&env(1)).unwrap();
+        append(&env(2)).unwrap();
+        let kept = take(usize::MAX);
+        assert_eq!(kept.len(), 1, "the only copy of the event was refused");
+        assert_eq!(
+            kept[0].1.payload["n"], 2,
+            "an unwritable cap must still keep the newest, not the first"
+        );
+        // Which is the whole point of not clamping the cap away: `max_bytes`
+        // below one envelope degrades to holding one, never to holding none.
+        assert_eq!(kept[0].1.dropped, 1);
+    }
+
+    /// The operator most likely to change this cap is the one whose disk is
+    /// filling right now; a value read once at startup would reach a shim that
+    /// is a fresh process anyway, so the only way to get this wrong is to cache
+    /// it somewhere.
+    #[test]
+    fn the_cap_is_the_one_in_the_config_file_now() {
+        let dir = setup();
+        cap(dir.path(), 1024);
+        for i in 0..16 {
+            append(&env(i)).unwrap();
+        }
+        assert!(spool_bytes() <= 1024);
+
+        cap(dir.path(), 32 * 1024);
+        for i in 16..48 {
+            append(&env(i)).unwrap();
+        }
+        assert!(
+            spool_bytes() > 1024,
+            "the raised cap never took effect; still holding {} bytes",
+            spool_bytes()
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn spooled_file_is_owner_only_0600() {
@@ -199,6 +390,7 @@ mod tests {
             source: "codex".into(),
             received_at: chrono::Utc::now(),
             truncated: false,
+            dropped: 0,
             event: None,
             payload: serde_json::json!({"secret": "sk-raw"}),
         };

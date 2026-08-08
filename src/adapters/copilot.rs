@@ -170,6 +170,7 @@ mod tests {
             source: "copilot".into(),
             received_at: chrono::Utc::now(),
             truncated: false,
+            dropped: 0,
             event: Some(event.into()),
             payload,
         }
@@ -322,6 +323,7 @@ mod tests {
             source: "copilot".into(),
             received_at: chrono::Utc::now(),
             truncated: false,
+            dropped: 0,
             event: None,
             payload: json!({"hook_event_name": "UserPromptSubmit",
                             "session_id": "cp2", "prompt": "hello"}),

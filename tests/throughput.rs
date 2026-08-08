@@ -88,6 +88,7 @@ fn a_spooled_envelope_keeps_its_capture_time() {
         source: "claude-code".into(),
         received_at: captured_at,
         truncated: false,
+        dropped: 0,
         event: None,
         payload: serde_json::json!({
             "hook_event_name": "UserPromptSubmit",
@@ -124,6 +125,7 @@ fn the_unknown_source_fallback_is_stamped_too() {
             source: "some-tool-we-do-not-know".into(),
             received_at: captured_at,
             truncated: false,
+            dropped: 0,
             event: None,
             payload: serde_json::json!({"anything": true}),
         },

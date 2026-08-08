@@ -71,6 +71,9 @@ pub fn deliver(source: &str, event: Option<&str>, raw: &str, truncated: bool) {
         received_at: chrono::Utc::now(),
         event: event.map(String::from),
         truncated,
+        // Filled in by `spool::append`, which is the only code that can know:
+        // nothing is dropped on the path where the daemon answers.
+        dropped: 0,
         payload,
     };
     // Before anything can parse, redact or reshape it — a fixture is only
@@ -178,6 +181,7 @@ mod tests {
             source: "claude-code".to_string(),
             received_at: chrono::Utc::now(),
             truncated: false,
+            dropped: 0,
             event: None,
             payload: serde_json::json!({"hook_event_name": "UserPromptSubmit"}),
         };

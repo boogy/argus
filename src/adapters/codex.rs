@@ -181,6 +181,7 @@ async fn handle_conn_inner(mut stream: tokio::net::TcpStream, tx: Sender<Envelop
                     source: "codex".into(),
                     received_at: chrono::Utc::now(),
                     truncated: false,
+                    dropped: 0,
                     event: None,
                     payload: record,
                 })
@@ -256,6 +257,7 @@ mod tests {
             source: "codex".into(),
             received_at: chrono::Utc::now(),
             truncated: false,
+            dropped: 0,
             event: None,
             payload,
         }

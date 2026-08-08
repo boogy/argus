@@ -9,6 +9,7 @@ pub struct Config {
     pub capture: CaptureCfg,
     pub redaction: RedactionCfg,
     pub buffer: BufferCfg,
+    pub spool: SpoolCfg,
     pub codex: CodexCfg,
     pub integrity: IntegrityCfg,
 }
@@ -103,6 +104,27 @@ impl Default for BufferCfg {
         Self {
             max_events: 100_000,
             max_bytes: 256 * 1024 * 1024,
+        }
+    }
+}
+
+/// On-disk ceiling for the hand-off spool.
+///
+/// The spool is what the shim writes when the daemon will not answer, so it
+/// grows exactly while nothing is draining it — a daemon that crashes on a
+/// Friday and a fleet of agents that keep working all weekend. Uncapped, the
+/// one component that must never harm the host tool ends up filling its disk.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct SpoolCfg {
+    pub max_bytes: u64,
+}
+impl Default for SpoolCfg {
+    fn default() -> Self {
+        // Smaller than the buffer's: the buffer is the archive, the spool is a
+        // few minutes of hand-off that happens to have become a few days.
+        Self {
+            max_bytes: 64 * 1024 * 1024,
         }
     }
 }

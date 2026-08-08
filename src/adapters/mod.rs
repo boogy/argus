@@ -122,6 +122,7 @@ mod tests {
             source: "some-future-tool".into(),
             received_at: chrono::Utc::now(),
             truncated: false,
+            dropped: 0,
             event: None,
             payload: serde_json::json!({"x": 1}),
         };

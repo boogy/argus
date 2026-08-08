@@ -198,6 +198,7 @@ mod tests {
             source: source.into(),
             received_at: chrono::Utc::now(),
             truncated: false,
+            dropped: 0,
             event: event.map(String::from),
             payload,
         }

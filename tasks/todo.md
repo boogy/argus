@@ -353,11 +353,51 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
     half of the contract is tested by injecting both a failing and a
     succeeding closure, but the real closure lives in `run()`, which still has
     no unit test. Same seam as T7c's `set_limits` line, and T16 splits it out.
-  - [ ] **T7e** — `spool.max_bytes`. Split out of T7c: the spool cap is a
+  - [x] **T7e** — `spool.max_bytes`. Split out of T7c: the spool cap is a
     different mechanism in a different process (the shim writes it, and the
     daemon may be down — which is exactly when the spool grows), and reporting
     the drops needs a channel the shim can afford on the host tool's critical
     path.
+    Files: `src/config.rs`, `src/spool.rs`, `src/event.rs`, `src/hook.rs`,
+    `src/harness/mod.rs`, `README.md`, `docs/querying-local-database.md`
+    `spool.max_bytes` (64 MiB — smaller than the buffer's, because the buffer
+    is the archive and the spool is a few minutes of hand-off that happened to
+    become a few days) is enforced in `spool::append` before the write, oldest
+    first, with the incoming envelope always written afterwards. An envelope
+    larger than the whole cap therefore clears the directory and lands anyway:
+    refusing it would trade a bounded overrun for a guaranteed hole, the same
+    call the buffer's newest-row exemption makes.
+    That exemption is also why there is no `.max(1)` clamp on the cap, unlike
+    the buffer's. `max_bytes = 0` already degrades to "hold exactly one file",
+    never to "capture nothing", so the clamp changed no observable behavior —
+    mutation-checked by putting it back and watching nothing fail. Shipped as a
+    comment instead of as unfalsifiable defensiveness, same call as T4's dead
+    `create_dir_all`.
+    Reporting reuses T7b's channel rather than inventing one: `Envelope` gains
+    `dropped: u64`, `append` re-serializes the envelope with the count once it
+    knows it, and `harness::parse` turns a non-zero count into a `spool_full`
+    `Loss` ahead of the event, exactly as `truncated` becomes `stdin_truncated`.
+    The shim is a short-lived process on the host tool's critical path with no
+    buffer and no exporter; the one thing it does have is an envelope already
+    on its way to something that does. No feedback loop of the T7a kind: a
+    marker is only ever attached to a real incoming write, so an idle machine
+    trims nothing and reports nothing.
+    Live config comes free here — the shim is a fresh process per hook, so
+    `config::load()` on every call *is* the current answer, including one the
+    operator changed because their disk was filling. The only way to get it
+    wrong would be to cache it, and a test raising the cap between two batches
+    holds that line.
+    Cost: one `read_dir` plus a `stat` per file per spooled write. Affordable
+    because the cap is what keeps the file count small — uncapped, the
+    directory grows without bound and every later pass over it, including the
+    daemon's own replay, degrades with it.
+    Mutation-verified, seven of seven: never enforcing the cap, trimming newest
+    first, never attaching the count, dropping the count on the wire
+    (`skip_serializing`), suppressing the `Loss` in `parse`, freezing the cap
+    at the compiled default, and refusing the oversized envelope each failed
+    the matching test.
+    Also fixed in passing: T7b's `stdin_truncated` detail string had a run of
+    ~25 spaces in it from an unescaped multi-line `format!`.
 
 - [ ] **T8** — Transport security. Dependency: T3.
   Files: `src/paths.rs`, `src/ipc.rs`, `src/adapters/codex.rs`, `src/install.rs`, `Cargo.toml`

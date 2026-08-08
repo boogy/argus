@@ -212,6 +212,7 @@ mod tests {
             source: "claude-code".into(),
             received_at: chrono::Utc::now(),
             truncated: false,
+            dropped: 0,
             event: None,
             payload,
         }

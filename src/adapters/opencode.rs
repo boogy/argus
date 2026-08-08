@@ -153,6 +153,7 @@ mod tests {
             source: "opencode".into(),
             received_at: chrono::Utc::now(),
             truncated: false,
+            dropped: 0,
             event: None,
             payload,
         }
