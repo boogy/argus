@@ -244,7 +244,11 @@ extra_patterns = ["ACME-[0-9]{6}"]
     block is held to the endpoint this install actually listens on, not merely
     to looking like ours: a `config.toml` still naming a previous install's
     port is wired to a receiver nothing answers on, and reporting that as
-    intact would be worse than reporting nothing.
+    intact would be worse than reporting nothing. The same applies to the
+    bearer token in that block: a Codex presenting a token this install does
+    not know is refused on every turn, which looks exactly like a Codex nobody
+    is using. The error says the token is wrong, never what it is — `check`
+    output is collected and indexed by whatever is polling it.
     **Upgrading to 0.3.0 can flip hosts to broken that previously reported
     intact** — that is the fix, not a regression. Wiring baked against a binary
     that has since moved (a `brew upgrade` that bumps the Cellar prefix, an

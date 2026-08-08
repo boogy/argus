@@ -632,8 +632,27 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
     still reports intact. `must_point_at` is a single value and its error names
     it, which a bearer token must not be; closing it properly needs the field to
     carry a label beside each needle, and that is its own change.
-  - [ ] **T8g** — `check` catches a Codex wired with a token this receiver will
-    not accept, without printing the token.
+  - [x] **T8g** — `check` catches a Codex wired with a token this receiver will
+    not accept, without printing the token. Files: `src/harness/mod.rs`,
+    `src/harness/codex.rs`, `README.md`
+    `must_point_at: Option<String>` became `must_carry: Vec<Required>`, where
+    `Required { what, needle, present }` separates the thing demanded from the
+    words the error uses. That separation is the point, not tidiness: `check` is
+    built for MDM compliance scripts and monitoring agents, so its output is
+    written somewhere it will be collected, indexed and read by more people than
+    the account that owns the secret. An error that quoted the needle to explain
+    the mismatch would publish the token to exactly that audience.
+    `present: false` inverts the test, which is what the no-token-on-disk case
+    needs: the current token is unknowable, but *any* `Bearer ` header is still
+    wrong — the next daemon start mints a replacement and refuses whatever that
+    config presents. That is the restored-profile shape: the Codex config came
+    back, the `0700` data directory did not.
+    Four mutations, all bit: a harness declaring no token requirement failed
+    `install_hands_codex_the_token_the_receiver_will_ask_for`; a `verify` whose
+    predicate never matches failed both that and the stale-endpoint test;
+    ignoring `present` failed the new test's inverted case; and printing
+    `r.needle` in place of `r.what` failed it too — the "never prints the token"
+    assertion has teeth rather than being documentation.
 
 - [ ] **T9** — Export correctness. Dependency: T3.
   Files: `src/export.rs`, `src/buffer.rs`, `Cargo.toml`

@@ -1,6 +1,6 @@
 use super::{
-    Artifact, ConfigDir, Detection, Harness, HookEvent, HookShape, Probes, Scope, TomlEditOp,
-    install_path,
+    Artifact, ConfigDir, Detection, Harness, HookEvent, HookShape, Probes, Required, Scope,
+    TomlEditOp, install_path,
 };
 use crate::config::CaptureCfg;
 use crate::detect::BinaryProbe;
@@ -88,7 +88,8 @@ impl Harness for Codex {
         // install — the rest of the wiring is worth having, and the receiver
         // refuses everything in that state anyway, so the gap cannot be a way
         // in, only a capture outage that `check` reports.
-        if let Some(token) = crate::adapters::codex::existing_token() {
+        let token = crate::adapters::codex::existing_token();
+        if let Some(token) = &token {
             let mut headers = toml_edit::InlineTable::new();
             headers.insert("authorization", format!("Bearer {token}").into());
             otlp_http.insert("headers", toml_edit::Value::InlineTable(headers));
@@ -105,6 +106,29 @@ impl Harness for Codex {
             endpoint.clone(),
             LEGACY_ENDPOINT.to_string(),
         ];
+
+        let mut must_carry = vec![Required {
+            what: format!("the endpoint {endpoint}"),
+            needle: endpoint,
+            present: true,
+        }];
+        // With no token on disk the current one is unknowable, but a header is
+        // still wrong: the next daemon start mints a replacement and refuses
+        // whatever this config presents. That is the restored-profile case —
+        // the Codex config came back, the `0700` data directory did not.
+        must_carry.push(match &token {
+            Some(t) => Required {
+                what: "the receiver token from this install".into(),
+                needle: format!("Bearer {t}"),
+                present: true,
+            },
+            None => Required {
+                what: "a receiver token this install does not know".into(),
+                needle: "Bearer ".into(),
+                present: false,
+            },
+        });
+
         vec![
             Artifact::TomlEdit {
                 path: d.config_home.join("config.toml"),
@@ -114,7 +138,7 @@ impl Harness for Codex {
                         value: toml_edit::value(notify),
                         only_if_absent: true,
                         ours_markers: markers.clone(),
-                        must_point_at: None,
+                        must_carry: vec![],
                         argv_tail: Some(NOTIFY_TAIL),
                     },
                     TomlEditOp {
@@ -122,7 +146,7 @@ impl Harness for Codex {
                         value: toml_edit::Item::Table(otel),
                         only_if_absent: true,
                         ours_markers: markers,
-                        must_point_at: Some(endpoint),
+                        must_carry,
                         argv_tail: None,
                     },
                 ],

@@ -114,19 +114,38 @@ pub struct TomlEditOp {
     pub only_if_absent: bool,
     /// Substrings identifying an existing value as ours, for uninstall.
     pub ours_markers: Vec<String>,
-    /// Set when being *ours* is not enough and the value must name one exact
-    /// thing (Codex's OTLP endpoint). `ours_markers` deliberately includes
-    /// endpoints older argus versions wrote, so uninstall still recognises what
-    /// it left behind — but a config pointing at an endpoint nothing listens on
-    /// any more captures nothing, and matching a legacy marker would report
-    /// that as wired. `check` uses this instead when it is set.
-    pub must_point_at: Option<String>,
+    /// Set when being *ours* is not enough and the value has to match this
+    /// install exactly (Codex's OTLP endpoint and receiver token).
+    /// `ours_markers` deliberately includes what older argus versions wrote, so
+    /// uninstall still recognises what it left behind — but a config pointing
+    /// at an endpoint nothing listens on, or presenting a token the receiver
+    /// refuses, captures nothing, and matching a legacy marker would report
+    /// that as wired. `check` uses these instead when the list is non-empty.
+    pub must_carry: Vec<Required>,
     /// Set when the value is an argv array whose first element is the argus
     /// binary (Codex's `notify`). `check` then confirms the trailing arguments
     /// still match *and* that element 0 still names a runnable program — the
     /// substring markers alone would pass on a value pointing at a binary that
     /// no longer exists.
     pub argv_tail: Option<&'static [&'static str]>,
+}
+
+/// One thing `check` demands of an existing value.
+///
+/// `what` rather than the needle is what the error prints. One of these needles
+/// is a bearer token, and a `check` designed for MDM compliance scripts and
+/// monitoring agents writes its output somewhere it will be collected, indexed,
+/// and read by more people than the account that owns the secret.
+pub struct Required {
+    /// The requirement in words, e.g. "the endpoint http://127.0.0.1:41234".
+    pub what: String,
+    /// Substring searched for in the rendered value.
+    pub needle: String,
+    /// `false` inverts it: the needle must *not* appear. Used where a stale
+    /// credential is the failure and the current one is not known — a data
+    /// directory restored without its token file leaves Codex presenting
+    /// something the receiver will mint a replacement for and then refuse.
+    pub present: bool,
 }
 
 /// Something argus writes on install and reverses on uninstall.
@@ -867,20 +886,26 @@ fn verify(artifact: &Artifact) -> std::result::Result<(), String> {
                     }
                     None => {
                         let s = item.to_string();
-                        match &e.must_point_at {
-                            Some(exact) if !s.contains(exact.as_str()) => {
-                                return Err(format!(
-                                    "{} does not point at {exact} — nothing is listening on the \
-                                     endpoint it names, so this tool is wired to a receiver that \
-                                     no longer exists. Re-run `argus install`.",
-                                    e.key
-                                ));
-                            }
-                            Some(_) => {}
-                            None if !e.ours_markers.iter().any(|m| s.contains(m.as_str())) => {
+                        if e.must_carry.is_empty() {
+                            if !e.ours_markers.iter().any(|m| s.contains(m.as_str())) {
                                 return Err(format!("{} no longer points at argus", e.key));
                             }
-                            None => {}
+                        } else if let Some(r) = e
+                            .must_carry
+                            .iter()
+                            .find(|r| s.contains(r.needle.as_str()) != r.present)
+                        {
+                            let verb = if r.present {
+                                "does not carry"
+                            } else {
+                                "still carries"
+                            };
+                            return Err(format!(
+                                "{} {verb} {} — this tool is wired to a receiver that will not \
+                                 accept it, so nothing it exports is being recorded. Re-run \
+                                 `argus install`.",
+                                e.key, r.what
+                            ));
                         }
                     }
                 }
@@ -1360,7 +1385,7 @@ mod tests {
                     value: toml_edit::Item::None,
                     only_if_absent: true,
                     ours_markers: vec!["argus".into()],
-                    must_point_at: None,
+                    must_carry: vec![],
                     argv_tail: Some(TAIL),
                 },
                 TomlEditOp {
@@ -1368,7 +1393,7 @@ mod tests {
                     value: toml_edit::Item::None,
                     only_if_absent: true,
                     ours_markers: vec!["127.0.0.1".into()],
-                    must_point_at: None,
+                    must_carry: vec![],
                     argv_tail: None,
                 },
             ],
@@ -1423,7 +1448,11 @@ mod tests {
                 only_if_absent: true,
                 // Deliberately still a marker, as it is in the real harness.
                 ours_markers: vec!["http://127.0.0.1:4327".into()],
-                must_point_at: Some("http://127.0.0.1:41234".into()),
+                must_carry: vec![Required {
+                    what: "the endpoint http://127.0.0.1:41234".into(),
+                    needle: "http://127.0.0.1:41234".into(),
+                    present: true,
+                }],
                 argv_tail: None,
             }],
         };
@@ -1441,12 +1470,80 @@ mod tests {
         assert_eq!(verify(&artifact), Ok(()), "current endpoint must verify");
     }
 
+    /// The receiver refuses a token it did not mint, so a Codex still carrying
+    /// an older install's is exporting into `401`s — the same silent capture
+    /// stop as a stale endpoint, and one a restored home directory produces
+    /// without anybody doing anything wrong.
+    ///
+    /// The error must not print the token. `check` exists to be run by MDM
+    /// compliance scripts and monitoring agents, whose output is collected,
+    /// indexed and readable by far more people than the account that owns it.
+    #[test]
+    fn verify_rejects_a_codex_carrying_a_token_the_receiver_will_not_accept() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let ours = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let artifact = |required| Artifact::TomlEdit {
+            path: path.clone(),
+            edits: vec![TomlEditOp {
+                key: "otel",
+                value: toml_edit::Item::None,
+                only_if_absent: true,
+                ours_markers: vec!["http://127.0.0.1:41234".into()],
+                must_carry: required,
+                argv_tail: None,
+            }],
+        };
+        let config = |token: &str| {
+            format!(
+                "[otel]\nexporter = {{ otlp-http = {{ endpoint = \
+                 'http://127.0.0.1:41234', headers = {{ authorization = 'Bearer {token}' }} }} }}\n"
+            )
+        };
+        let current = vec![Required {
+            what: "the receiver token from this install".into(),
+            needle: format!("Bearer {ours}"),
+            present: true,
+        }];
+
+        std::fs::write(&path, config("f".repeat(64).as_str())).unwrap();
+        let err = verify(&artifact(current)).unwrap_err();
+        assert!(
+            err.contains("does not carry") && err.contains("argus install"),
+            "the error must say what is wrong and how to fix it: {err}"
+        );
+        assert!(
+            !err.contains(ours) && !err.contains(&"f".repeat(64)),
+            "check output is collected and indexed; it must not print a bearer \
+             token, ours or theirs: {err}"
+        );
+
+        let current = vec![Required {
+            what: "the receiver token from this install".into(),
+            needle: format!("Bearer {ours}"),
+            present: true,
+        }];
+        std::fs::write(&path, config(ours)).unwrap();
+        assert_eq!(verify(&artifact(current)), Ok(()));
+
+        // No token on disk: the current one is unknowable, but the next daemon
+        // start will mint a replacement, so any credential here is already dead.
+        let none_known = vec![Required {
+            what: "a receiver token this install does not know".into(),
+            needle: "Bearer ".into(),
+            present: false,
+        }];
+        let err = verify(&artifact(none_known)).unwrap_err();
+        assert!(err.contains("still carries"), "{err}");
+        assert!(!err.contains(ours), "{err}");
+    }
+
     /// The stale-endpoint check above only proves the *mechanism* works; it
     /// says nothing about any harness switching it on. An edit that points a
     /// tool at this install's receiver and settles for `ours_markers` verifies
     /// happily against an endpoint from an older argus that nothing listens on
-    /// any more — the exact failure `must_point_at` exists to catch, and one
-    /// that is silent, because `check` reports the wiring as intact.
+    /// any more — the exact failure `must_carry` exists to catch, and one that
+    /// is silent, because `check` reports the wiring as intact.
     #[test]
     fn an_edit_naming_our_receiver_demands_that_exact_receiver() {
         let home = tempfile::tempdir().unwrap();
@@ -1471,9 +1568,10 @@ mod tests {
                         continue;
                     }
                     checked += 1;
-                    assert_eq!(
-                        e.must_point_at.as_deref(),
-                        Some(endpoint.as_str()),
+                    assert!(
+                        e.must_carry
+                            .iter()
+                            .any(|r| r.present && r.needle == endpoint),
                         "{}: {} writes our endpoint but `check` would accept any \
                          marker match, so a config left pointing at a receiver \
                          from an older install passes as healthy",
@@ -1510,20 +1608,31 @@ mod tests {
             config_home: home.path().join("codex"),
             binary: None,
         };
-        let written = harness_by_id("codex")
-            .unwrap()
-            .artifacts(&d, Scope::User)
+        let artifacts = harness_by_id("codex").unwrap().artifacts(&d, Scope::User);
+        let edits = artifacts
             .iter()
             .filter_map(|a| match a {
                 Artifact::TomlEdit { edits, .. } => Some(edits),
                 _ => None,
             })
             .flatten()
-            .map(|e| e.value.to_string())
-            .collect::<String>();
+            .collect::<Vec<_>>();
         assert!(
-            written.contains(&format!("Bearer {token}")),
+            edits
+                .iter()
+                .any(|e| e.value.to_string().contains(&format!("Bearer {token}"))),
             "install writes no credential Codex can present to our own receiver"
+        );
+        // And `check` has to ask for it back. Writing the header without
+        // demanding it is the T8e lesson repeated one field along: a restored
+        // home directory leaves Codex presenting a token the receiver refuses,
+        // and a `check` that only looks at the endpoint calls that intact.
+        assert!(
+            edits.iter().any(|e| e
+                .must_carry
+                .iter()
+                .any(|r| r.present && r.needle == format!("Bearer {token}"))),
+            "install writes the token but `check` never verifies it is still there"
         );
         unsafe {
             std::env::remove_var("ARGUS_DATA_DIR");
