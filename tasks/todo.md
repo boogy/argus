@@ -287,8 +287,50 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
     (`skip_serializing`) passed everything, because the shim and the daemon are
     different processes and nothing asserted the flag survived between them.
     `a_truncation_survives_the_spool` closes that, and fails under the mutation.
-  - [ ] **T7c** — `buffer.max_bytes` / `max_spool_bytes`, re-read from live config.
+  - [x] **T7c** — `buffer.max_bytes`, re-read live. Files: `src/config.rs`,
+    `src/buffer.rs`, `src/daemon.rs`, `src/main.rs`, `README.md`,
+    `docs/querying-local-database.md`
+    `max_events` was never a disk bound: 100k rows sized against ordinary
+    prompts is a very different quantity of disk from 100k rows of pasted file
+    contents, and the machine runs out of space during precisely the incident
+    the buffer exists to record. `buffer.max_bytes` (256 MiB) caps the stored
+    text; whichever cap binds first wins, and rows the byte cap destroys are
+    counted as loss exactly like rows the row cap destroys.
+    The trim is one statement — a newest-first running `SUM(LENGTH(body))`
+    window, delete everything past the cap — with the newest row exempt. An
+    event larger than the whole cap would otherwise delete itself and leave an
+    empty buffer, which is the one outcome worse than storing it; same
+    reasoning as the existing `max_events.max(1)` clamp, and `set_limits`
+    clamps both caps for the same reason: a `max_bytes = 0` typo must not
+    switch the audit trail off.
+    The byte total is kept in memory so the cap costs an addition per write
+    rather than a `SUM` scan, and is deliberately allowed to drift **upward**
+    only — `ack` and the row trim delete bytes without decrementing it, and a
+    transaction that fails to commit leaves its addition behind. An
+    overestimate triggers a trim early and the trim recounts exactly, so the
+    drift costs a scan and can never lose an event; drifting the other way
+    would silently blow past the cap.
+    Both caps now live in `AtomicU64` and are re-applied from the cached
+    `Pipeline` on every envelope. A `Buffer` handed its limits at startup keeps
+    enforcing them for the life of the daemon, so an operator raising a cap
+    *because* the buffer is overflowing would have to restart the process that
+    is losing their events. `c.buffer` had to join the pipeline fingerprint for
+    the same reason `capture` did in T6b — cached without it, a reload would
+    never take effect.
+    Mutation-verified, six of six: seeding the byte count at zero on reopen,
+    dropping the newest-row exemption, making `set_limits` a no-op, dropping
+    `c.buffer` from the fingerprint, skipping the byte trim, and taking a zero
+    cap literally each failed the matching test.
+    Untested seam: the `buffer.set_limits(&pipeline.buffer)` call inside
+    `run()`'s per-envelope closure. `set_limits` and the fingerprint are each
+    tested, but the line joining them sits in `run()`, which has no unit test
+    at all. T16 splits that closure out; it becomes testable there.
   - [ ] **T7d** — Incremental spool drain, delete after the buffer commits.
+  - [ ] **T7e** — `spool.max_bytes`. Split out of T7c: the spool cap is a
+    different mechanism in a different process (the shim writes it, and the
+    daemon may be down — which is exactly when the spool grows), and reporting
+    the drops needs a channel the shim can afford on the host tool's critical
+    path.
 
 - [ ] **T8** — Transport security. Dependency: T3.
   Files: `src/paths.rs`, `src/ipc.rs`, `src/adapters/codex.rs`, `src/install.rs`, `Cargo.toml`

@@ -6,8 +6,8 @@ cookbook for investigating sessions, tools, files, and network activity locally.
 
 ## Location
 
-| Platform | Path                                                  |
-| -------- | ----------------------------------------------------- |
+| Platform | Path                                            |
+| -------- | ----------------------------------------------- |
 | macOS    | `~/Library/Application Support/argus/events.db` |
 | Linux    | `~/.local/share/argus/events.db`                |
 | Windows  | `%APPDATA%\argus\events.db`                     |
@@ -22,7 +22,9 @@ The database is an **export buffer, not an archive**:
 - If `export.otlp_endpoint` is set, rows are **deleted** after each successful
   export batch (`ack`). The table is usually near-empty on a healthy machine.
 - If no endpoint is configured (the default), events accumulate up to
-  `buffer.max_events` (default 100 000); the oldest rows are then dropped.
+  `buffer.max_events` (default 100 000) or `buffer.max_bytes` (default
+  256 MiB), whichever binds first; the oldest rows are then dropped, and the
+  gap is recorded as a `loss` event rather than vanishing.
 - For local-only analysis, leave `export.otlp_endpoint` unset.
 
 The DB runs in WAL mode. Reading while the daemon is running is safe, but:

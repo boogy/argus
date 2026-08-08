@@ -71,8 +71,7 @@ pub async fn run() -> Result<()> {
         tx.clone(),
     ));
 
-    let max_events = with_cfg(&shared_cfg, |c| c.buffer.max_events);
-    let buffer = Arc::new(Buffer::open(max_events)?);
+    let buffer = Arc::new(Buffer::open(&with_cfg(&shared_cfg, |c| c.buffer.clone()))?);
 
     let export_handle = tokio::spawn(export_loop(buffer.clone(), shared_cfg.clone()));
     tokio::spawn(crate::integrity::integrity_loop(
@@ -89,6 +88,11 @@ pub async fn run() -> Result<()> {
     // received during normal operation.
     let mut process = |envelope: Envelope| {
         pipeline.refresh(&shared_cfg);
+        // Two relaxed stores; the caps a reload changed take effect on the very
+        // next write rather than at the next daemon restart. An operator who
+        // raises a cap because the buffer is overflowing is not in a position
+        // to be told to restart the thing that is losing their events.
+        buffer.set_limits(&pipeline.buffer);
         let events: Vec<_> = adapters::parse(envelope, &pipeline.capture)
             .into_iter()
             .map(|e| pipeline.redactor.scrub_event(e))
@@ -208,16 +212,23 @@ async fn final_flush(buffer: &Buffer, cfg: &Arc<RwLock<config::Config>>) {
 struct Pipeline {
     redactor: Redactor,
     capture: config::CaptureCfg,
+    buffer: config::BufferCfg,
     fingerprint: String,
 }
 
 impl Pipeline {
     fn build(cfg: &Arc<RwLock<config::Config>>) -> Self {
-        let (redactor, capture) =
-            with_cfg(cfg, |c| (Redactor::new(&c.redaction), c.capture.clone()));
+        let (redactor, capture, buffer) = with_cfg(cfg, |c| {
+            (
+                Redactor::new(&c.redaction),
+                c.capture.clone(),
+                c.buffer.clone(),
+            )
+        });
         Pipeline {
             redactor,
             capture,
+            buffer,
             fingerprint: config_fingerprint(cfg),
         }
     }
@@ -243,8 +254,8 @@ fn with_cfg<T>(cfg: &Arc<RwLock<config::Config>>, f: impl FnOnce(&config::Config
 fn config_fingerprint(cfg: &Arc<RwLock<config::Config>>) -> String {
     with_cfg(cfg, |c| {
         format!(
-            "{}:{:?}:{:?}",
-            c.redaction.enabled, c.redaction.extra_patterns, c.capture
+            "{}:{:?}:{:?}:{:?}",
+            c.redaction.enabled, c.redaction.extra_patterns, c.capture, c.buffer
         )
     })
 }
@@ -295,6 +306,20 @@ mod tests {
             scrubbed.contains("[REDACTED:custom-0]"),
             "refresh must rebuild the regexes: {scrubbed}"
         );
+
+        let after_redaction = pipeline.fingerprint.clone();
+        cfg.write().unwrap().buffer.max_bytes = 4096;
+        assert_ne!(
+            config_fingerprint(&cfg),
+            after_redaction,
+            "a buffer cap change must invalidate the cached pipeline"
+        );
+        pipeline.refresh(&cfg);
+        assert_eq!(
+            pipeline.buffer.max_bytes, 4096,
+            "refresh must pick the new caps up, or the daemon enforces the old \
+             one until someone restarts it"
+        );
     }
 
     /// End to end: the overflow has to reach the queue that gets exported,
@@ -305,7 +330,11 @@ mod tests {
         unsafe {
             std::env::set_var("ARGUS_DATA_DIR", dir.path());
         }
-        let buffer = Buffer::open(3).unwrap();
+        let buffer = Buffer::open(&config::BufferCfg {
+            max_events: 3,
+            max_bytes: u64::MAX,
+        })
+        .unwrap();
         for i in 0..5 {
             let e = crate::event::Event::new(
                 "claude-code",

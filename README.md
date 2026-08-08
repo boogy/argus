@@ -106,6 +106,7 @@ unset keys keep their default.
 | `redaction.enabled`          | `true`             | Run the built-in secret scrubber before anything is buffered or exported.                                                                                                                                        |
 | `redaction.extra_patterns`   | `[]`               | Additional regexes scrubbed the same way as built-ins (invalid patterns are skipped with a warning, not fatal).                                                                                                  |
 | `buffer.max_events`          | `100000`           | SQLite buffer cap; oldest events are dropped once full (offline-first, not unbounded).                                                                                                                           |
+| `buffer.max_bytes`           | `268435456`        | Second cap, on stored event text (256 MiB). A row cap is not a disk bound — 100k pasted file contents is a very different size from 100k prompts. Whichever binds first wins; both are re-read on a config reload. |
 | `codex.otlp_listen`          | `"127.0.0.1:4327"` | Local address the daemon listens on for Codex's `[otel]` OTLP/JSON export.                                                                                                                                       |
 | `integrity.enabled`          | `true`             | Periodically re-verify the daemon's own hook/plugin wiring is intact. A tampered/removed hook emits an `event.type=integrity`, `integrity.status=broken` record at `WARN`. On by default (security control).      |
 | `integrity.interval_secs`    | `3600`             | Wiring self-check interval (floor `30`). Broken findings re-emit each cycle until re-install, so the alert stays live.                                                                                            |
@@ -241,8 +242,9 @@ extra_patterns = ["ACME-[0-9]{6}"]
   buffer (`<data-dir>/events.db`) instead of being dropped; `buffered events`
   in `status` grows. Once the collector is reachable again, the export loop's
   next attempt drains and exports the backlog — nothing needs to be restarted
-  manually. If `buffer.max_events` is reached, oldest events are dropped to
-  keep disk usage bounded.
+  manually. If `buffer.max_events` or `buffer.max_bytes` is reached, oldest
+  events are dropped to keep disk usage bounded, and the gap is exported as an
+  `event.type=loss` record at `WARN` rather than left as a silent absence.
 - **Spool directory** (`<data-dir>/spool/*.jsonl`): written by the hook shim
   when it can't reach the daemon within its deadline (daemon not yet started,
   or briefly wedged). The daemon drains this directory every 5s once running;

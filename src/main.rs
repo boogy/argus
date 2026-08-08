@@ -122,7 +122,7 @@ fn print_status() -> Result<()> {
         cfg.redaction.enabled,
     );
 
-    match argus::buffer::Buffer::open(cfg.buffer.max_events).and_then(|b| b.len()) {
+    match argus::buffer::Buffer::open(&cfg.buffer).and_then(|b| b.len()) {
         Ok(n) => println!("buffered events: {n}"),
         Err(e) => println!("buffered events: unavailable ({e})"),
     }

@@ -89,11 +89,20 @@ impl Default for RedactionCfg {
 #[serde(default)]
 pub struct BufferCfg {
     pub max_events: u64,
+    /// Ceiling on the stored event text, in bytes.
+    ///
+    /// `max_events` alone is not a disk bound. A 100k-event cap sized against
+    /// ordinary prompts becomes tens of gigabytes the first time a session
+    /// starts pasting whole files into tool results, and the machine runs out
+    /// of disk during precisely the incident the buffer exists to record.
+    /// Whichever of the two caps binds first wins.
+    pub max_bytes: u64,
 }
 impl Default for BufferCfg {
     fn default() -> Self {
         Self {
             max_events: 100_000,
+            max_bytes: 256 * 1024 * 1024,
         }
     }
 }
