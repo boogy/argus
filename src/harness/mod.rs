@@ -32,6 +32,8 @@ use crate::integrity::Finding;
 use anyhow::Result;
 use serde_json::{Value, json};
 use std::borrow::Cow;
+use std::collections::BTreeSet;
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 /// Field stamped on every hook entry argus writes into a *shared* JSON file.
@@ -111,6 +113,12 @@ pub struct TomlEditOp {
     pub only_if_absent: bool,
     /// Substrings identifying an existing value as ours, for uninstall.
     pub ours_markers: Vec<String>,
+    /// Set when the value is an argv array whose first element is the argus
+    /// binary (Codex's `notify`). `check` then confirms the trailing arguments
+    /// still match *and* that element 0 still names a runnable program — the
+    /// substring markers alone would pass on a value pointing at a binary that
+    /// no longer exists.
+    pub argv_tail: Option<&'static [&'static str]>,
 }
 
 /// Something argus writes on install and reverses on uninstall.
@@ -127,6 +135,20 @@ pub enum Artifact {
     OwnedFile {
         path: PathBuf,
         contents: Cow<'static, str>,
+        /// Literal substrings whose absence means capture through this file is
+        /// blind — for a hooks file, the exact stored command per event.
+        /// `check` requires every one to still be on disk. Existence alone
+        /// proves nothing: a zero-byte or hand-edited file passes an
+        /// `exists()` test while capturing nothing.
+        ///
+        /// These are matched against the raw file text, so they must be
+        /// written the way the file stores them (JSON-escaped inside a JSON
+        /// file), which is why they cannot double as `commands`.
+        markers: Vec<String>,
+        /// Hook commands, unescaped, whose program must still resolve to an
+        /// executable. Empty for a file that reaches the daemon without
+        /// invoking the binary (the opencode plugin speaks the socket).
+        commands: Vec<String>,
     },
     /// Key-level edits into a shared TOML file via toml_edit, never clobbering.
     TomlEdit {
@@ -183,7 +205,7 @@ pub struct Detection {
 /// A harness-specific setting that silently disables capture (e.g. Codex's
 /// `[features] hooks = false`). Check-only: reported, never written.
 ///
-/// T3/T11/T12 populate these; no harness reports one yet.
+/// T11/T12 populate these; no harness reports one yet.
 pub struct KillSwitch {
     pub name: &'static str,
     pub detail: String,
@@ -213,16 +235,49 @@ pub enum CmdStyle {
     PowerShell,
 }
 
-/// Absolute path to the running binary, used as the hook command.
+/// Environment override for the binary path baked into hook commands. The
+/// opencode plugin shim reads the same variable to find the binary.
+pub const BIN_ENV: &str = "ARGUS_BIN";
+
+/// Path to argus as baked into every hook command — deliberately *not* raw
+/// `current_exe()`.
 ///
-/// T3 replaces this with a *stable* install path: a command baked from
-/// `current_exe()` silently stops working the moment the binary moves
-/// (brew upgrade, npm reinstall, `cargo install` to a new prefix).
-pub fn self_exe() -> String {
-    std::env::current_exe()
-        .ok()
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "argus".into())
+/// On Linux and macOS `current_exe()` resolves symlinks, so a Homebrew install
+/// reports `…/Cellar/argus/0.2.0/bin/argus`. That path stops existing the next
+/// time the formula is upgraded, and every hook baked from it silently stops
+/// firing — capture goes blind with no error anywhere. The stable entry point
+/// is the alias on `PATH` (`/opt/homebrew/bin/argus`, `~/.npm-global/bin/argus`,
+/// `~/.cargo/bin/argus`), which keeps pointing at whatever version is current,
+/// so it wins whenever it resolves to this very binary.
+pub fn install_path() -> String {
+    if let Ok(v) = std::env::var(BIN_ENV)
+        && !v.is_empty()
+    {
+        return v;
+    }
+    let Ok(exe) = std::env::current_exe() else {
+        return "argus".into();
+    };
+    std::env::var_os("PATH")
+        .and_then(|p| stable_alias(&exe, &p))
+        .unwrap_or(exe)
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// An entry on `PATH` that names this same binary under a stable alias.
+///
+/// "Same binary" is decided by canonicalisation, not by name, so an unrelated
+/// `argus` earlier on `PATH` is never adopted — a dev build in `target/debug`
+/// keeps pointing at itself rather than silently retargeting the packaged
+/// install.
+fn stable_alias(exe: &Path, path_var: &OsStr) -> Option<PathBuf> {
+    let target = exe.canonicalize().ok()?;
+    let name = exe.file_name()?;
+    std::env::split_paths(path_var)
+        .filter(|d| !d.as_os_str().is_empty())
+        .map(|d| d.join(name))
+        .find(|cand| cand != exe && cand.canonicalize().is_ok_and(|c| c == target))
 }
 
 /// Quote a program path for `style`, so a path containing spaces survives.
@@ -256,7 +311,7 @@ pub fn quote_program(exe: &str, style: CmdStyle) -> String {
 
 /// The full hook command for `source`, quoted for `style`.
 pub fn hook_command(source: &str, event: Option<&str>, style: CmdStyle) -> String {
-    hook_command_for(&self_exe(), source, event, style)
+    hook_command_for(&install_path(), source, event, style)
 }
 
 /// Testable core of [`hook_command`] with the exe path injected.
@@ -266,6 +321,116 @@ pub fn hook_command_for(exe: &str, source: &str, event: Option<&str>, style: Cmd
         cmd.push_str(&format!(" --event {e}"));
     }
     cmd
+}
+
+// ---------------------------------------------------------------------------
+// Command verification
+// ---------------------------------------------------------------------------
+
+/// Recover the program path from a stored hook command — the inverse of
+/// [`quote_program`], plus the bare unquoted form older installs wrote.
+///
+/// `check` has to read the command *as recorded on disk*, not re-derive it:
+/// the whole point is to catch a command baked at an install path that no
+/// longer holds a binary.
+pub fn program_of(cmd: &str) -> Option<String> {
+    // A leading `&` is PowerShell's call operator, and also tells us backticks
+    // in the quoted path are escapes rather than literal characters.
+    let (s, powershell) = match cmd.trim_start().strip_prefix('&') {
+        Some(rest) => (rest.trim_start(), true),
+        None => (cmd.trim_start(), false),
+    };
+
+    if let Some(mut rest) = s.strip_prefix('\'') {
+        // POSIX single quotes are literal end to end; `'\''` is the only
+        // escape, encoding one quote by closing, escaping, and reopening.
+        let mut out = String::new();
+        loop {
+            let i = rest.find('\'')?;
+            out.push_str(&rest[..i]);
+            rest = &rest[i + 1..];
+            match rest.strip_prefix(r"\''") {
+                Some(r) => {
+                    out.push('\'');
+                    rest = r;
+                }
+                None => return Some(out),
+            }
+        }
+    }
+
+    if let Some(mut rest) = s.strip_prefix('"') {
+        let mut out = String::new();
+        loop {
+            let stop: &[char] = if powershell { &['"', '`'] } else { &['"'] };
+            let i = rest.find(stop)?;
+            out.push_str(&rest[..i]);
+            let c = rest[i..].chars().next()?;
+            rest = &rest[i + c.len_utf8()..];
+            if c == '"' {
+                return Some(out);
+            }
+            // Backtick escape: the next character stands for itself.
+            let mut it = rest.chars();
+            out.push(it.next()?);
+            rest = it.as_str();
+        }
+    }
+
+    s.split_whitespace().next().map(str::to_string)
+}
+
+/// Is this a file that can actually be executed?
+fn runnable(p: &Path) -> bool {
+    let Ok(md) = std::fs::metadata(p) else {
+        return false;
+    };
+    if !md.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        md.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+/// Resolve a recorded program to a runnable file, searching `PATH` for a bare
+/// name the way the shell that runs the hook would.
+fn resolve_program(p: &str) -> Option<PathBuf> {
+    let path = Path::new(p);
+    if path.components().count() > 1 {
+        return runnable(path).then(|| path.to_path_buf());
+    }
+    let candidates = |dir: PathBuf| -> Vec<PathBuf> {
+        let mut v = vec![dir.join(p)];
+        if cfg!(windows) {
+            v.push(dir.join(format!("{p}.exe")));
+        }
+        v
+    };
+    std::env::split_paths(&std::env::var_os("PATH")?)
+        .filter(|d| !d.as_os_str().is_empty())
+        .flat_map(candidates)
+        .find(|c| runnable(c))
+}
+
+/// `Ok(())` when the command's program still exists and is executable.
+fn check_command(cmd: &str) -> std::result::Result<(), String> {
+    let Some(prog) = program_of(cmd) else {
+        return Err(format!("unparsable hook command: {cmd}"));
+    };
+    if resolve_program(&prog).is_some() {
+        Ok(())
+    } else {
+        Err(format!(
+            "hook points at a missing or non-executable binary: {prog}"
+        ))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -363,7 +528,7 @@ fn apply(artifact: &Artifact, display: &str, dry_run: bool) -> Result<()> {
             write_json(path, &doc)?;
             println!("wired {display} hooks in {}", path.display());
         }
-        Artifact::OwnedFile { path, contents } => {
+        Artifact::OwnedFile { path, contents, .. } => {
             if dry_run {
                 println!("[dry-run] would write {}", path.display());
                 return Ok(());
@@ -538,10 +703,11 @@ fn wired_detail(h: &dyn Harness, d: &Detection) -> String {
 
 /// `Ok(())` when intact, `Err(detail)` describing the breakage otherwise.
 ///
-/// T3 hardens this: resolve the hook command's program path and fail when the
-/// binary is missing or non-executable, fail on a zero-byte owned file, and
-/// verify the Codex `config.toml` edits (today a `TomlEdit` is not checked at
-/// all, so a partial install there is silently permanent).
+/// Presence is not proof. A hook entry naming a binary that no longer exists,
+/// a zero-byte plugin file, and a `notify` array left pointing at an old
+/// install prefix all pass an existence test while capturing nothing — so
+/// each artifact is checked down to something that has to be true for events
+/// to actually arrive.
 fn verify(artifact: &Artifact) -> std::result::Result<(), String> {
     match artifact {
         Artifact::JsonHooks {
@@ -557,30 +723,103 @@ fn verify(artifact: &Artifact) -> std::result::Result<(), String> {
             let hooks = &doc["hooks"];
             // Every expected event must still carry an argus entry, so
             // stripping one event's wiring is caught, not just wiping the file.
-            let missing: Vec<&str> = events
-                .iter()
-                .filter(|ev| {
-                    !hooks[ev.name]
-                        .as_array()
-                        .is_some_and(|a| a.iter().any(|h| is_ours(h, source)))
-                })
-                .map(|ev| ev.name)
-                .collect();
-            if missing.is_empty() {
-                Ok(())
-            } else {
-                Err(format!("missing hooks: {}", missing.join(",")))
+            let mut missing: Vec<&str> = Vec::new();
+            let mut commands: BTreeSet<&str> = BTreeSet::new();
+            for ev in *events {
+                let ours: Vec<&Value> = hooks[ev.name]
+                    .as_array()
+                    .map(|a| a.iter().filter(|h| is_ours(h, source)).collect())
+                    .unwrap_or_default();
+                if ours.is_empty() {
+                    missing.push(ev.name);
+                    continue;
+                }
+                for entry in ours {
+                    for h in entry["hooks"].as_array().into_iter().flatten() {
+                        if let Some(c) = h.get("command").and_then(Value::as_str) {
+                            commands.insert(c);
+                        }
+                    }
+                }
             }
-        }
-        Artifact::OwnedFile { path, .. } => {
-            if path.exists() {
-                Ok(())
-            } else {
-                Err(format!("{} missing", path.display()))
+            if !missing.is_empty() {
+                return Err(format!("missing hooks: {}", missing.join(",")));
             }
+            // Deduplicated: every event shares one command, so a moved binary
+            // reports once rather than twenty times.
+            for c in commands {
+                check_command(c)?;
+            }
+            Ok(())
         }
-        // T3: verify the Codex config.toml edits are still present.
-        Artifact::TomlEdit { .. } => Ok(()),
+        Artifact::OwnedFile {
+            path,
+            markers,
+            commands,
+            ..
+        } => {
+            if !path.exists() {
+                return Err(format!("{} missing", path.display()));
+            }
+            let Ok(text) = std::fs::read_to_string(path) else {
+                return Err(format!("{} unreadable", path.display()));
+            };
+            if text.trim().is_empty() {
+                return Err(format!("{} is empty", path.display()));
+            }
+            for m in markers {
+                if !text.contains(m.as_str()) {
+                    return Err(format!("{} no longer contains {m:?}", path.display()));
+                }
+            }
+            for c in commands {
+                check_command(c)?;
+            }
+            Ok(())
+        }
+        Artifact::TomlEdit { path, edits } => {
+            if !path.exists() {
+                return Err(format!("{} missing", path.display()));
+            }
+            let Ok(text) = std::fs::read_to_string(path) else {
+                return Err(format!("{} unreadable", path.display()));
+            };
+            let Ok(doc) = text.parse::<toml_edit::DocumentMut>() else {
+                return Err(format!("{} is not valid TOML", path.display()));
+            };
+            for e in edits {
+                let Some(item) = doc.get(e.key) else {
+                    return Err(format!("{} missing from {}", e.key, path.display()));
+                };
+                match e.argv_tail {
+                    // An argv array is checked element-wise: the trailing
+                    // arguments must be exactly ours, and element 0 must still
+                    // name a binary that can run.
+                    Some(tail) => {
+                        let Some(arr) = item.as_array() else {
+                            return Err(format!("{} is no longer an argv array", e.key));
+                        };
+                        let got: Vec<&str> = arr.iter().filter_map(|v| v.as_str()).collect();
+                        if got.len() != tail.len() + 1 || got[1..] != *tail {
+                            return Err(format!("{} no longer invokes argus", e.key));
+                        }
+                        if resolve_program(got[0]).is_none() {
+                            return Err(format!(
+                                "{} points at a missing or non-executable binary: {}",
+                                e.key, got[0]
+                            ));
+                        }
+                    }
+                    None => {
+                        let s = item.to_string();
+                        if !e.ours_markers.iter().any(|m| s.contains(m.as_str())) {
+                            return Err(format!("{} no longer points at argus", e.key));
+                        }
+                    }
+                }
+            }
+            Ok(())
+        }
     }
 }
 
@@ -724,5 +963,255 @@ mod tests {
         // merely lives under a path containing "argus".
         let users_own = json!({ "hooks": [{ "command": "/home/u/src/argus/scripts/mine.sh" }] });
         assert!(!is_ours(&users_own, "claude-code"));
+    }
+
+    // -----------------------------------------------------------------
+    // T3 — `check` proves capture can actually happen
+    // -----------------------------------------------------------------
+
+    fn fake_binary(dir: &Path, name: &str) -> PathBuf {
+        let p = dir.join(name);
+        std::fs::write(&p, "#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        p
+    }
+
+    /// `check` reads the command as recorded on disk, so it must be able to
+    /// recover the program from every form we ever wrote.
+    #[test]
+    fn program_of_inverts_quoting() {
+        for exe in [
+            "/usr/local/bin/argus",
+            "/opt/my apps/argus",
+            "/opt/it's/argus",
+            r"C:\Program Files\argus\argus.exe",
+        ] {
+            for style in [CmdStyle::Shell, CmdStyle::PowerShell] {
+                let cmd = hook_command_for(exe, "codex", Some("Stop"), style);
+                assert_eq!(
+                    program_of(&cmd).as_deref(),
+                    Some(exe),
+                    "{style:?} did not round-trip: {cmd}"
+                );
+            }
+        }
+        assert_eq!(
+            program_of("/usr/bin/argus hook --source codex").as_deref(),
+            Some("/usr/bin/argus"),
+            "the unquoted form older installs wrote"
+        );
+    }
+
+    /// The upgrade failure this exists to prevent: `current_exe()` reports the
+    /// symlink *target* (`…/Cellar/argus/0.2.0/bin/argus`), a path the next
+    /// `brew upgrade` deletes. The alias on PATH keeps working.
+    #[cfg(unix)]
+    #[test]
+    fn stable_alias_prefers_the_path_entry_over_the_resolved_real_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let cellar = dir.path().join("Cellar/argus/0.2.0/bin");
+        std::fs::create_dir_all(&cellar).unwrap();
+        let real = fake_binary(&cellar, "argus");
+        let bin = dir.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let link = bin.join("argus");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let path_var = std::env::join_paths([&bin]).unwrap();
+        assert_eq!(stable_alias(&real, &path_var), Some(link));
+
+        // An unrelated binary of the same name must never be adopted — that
+        // would silently retarget a dev build at the packaged install.
+        let other = dir.path().join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        fake_binary(&other, "argus");
+        let path_var = std::env::join_paths([&other]).unwrap();
+        assert_eq!(stable_alias(&real, &path_var), None);
+    }
+
+    /// A hook entry can be perfectly formed and still capture nothing.
+    #[test]
+    fn verify_flags_a_hook_whose_binary_cannot_run() {
+        const EVENTS: &[HookEvent] = &[HookEvent::new("Stop", false)];
+        let dir = tempfile::tempdir().unwrap();
+        let exe = fake_binary(dir.path(), "argus");
+        let settings = dir.path().join("settings.json");
+        let cmd = hook_command_for(&exe.to_string_lossy(), "claude-code", None, CmdStyle::Shell);
+        std::fs::write(
+            &settings,
+            json!({
+                "hooks": { "Stop": [{
+                    "hooks": [{ "type": "command", "command": cmd }],
+                    MARKER_KEY: true,
+                }]}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let artifact = Artifact::JsonHooks {
+            path: settings,
+            events: EVENTS,
+            shape: HookShape::CommandArray,
+            source: "claude-code",
+        };
+        assert_eq!(verify(&artifact), Ok(()), "healthy wiring must verify");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o644)).unwrap();
+            let err = verify(&artifact).unwrap_err();
+            assert!(err.contains("missing or non-executable"), "{err}");
+            std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+            assert_eq!(verify(&artifact), Ok(()));
+        }
+
+        std::fs::remove_file(&exe).unwrap();
+        let err = verify(&artifact).unwrap_err();
+        assert!(err.contains("missing or non-executable"), "{err}");
+    }
+
+    #[test]
+    fn verify_flags_an_owned_file_that_is_empty_or_edited() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("argus.json");
+        let artifact = Artifact::OwnedFile {
+            path: path.clone(),
+            contents: Cow::Borrowed(""),
+            markers: vec!["--event preToolUse".into()],
+            commands: Vec::new(),
+        };
+
+        std::fs::write(&path, "argus hook --source copilot --event preToolUse\n").unwrap();
+        assert_eq!(verify(&artifact), Ok(()));
+
+        // The bug: `path.exists()` passes on all three of these.
+        std::fs::write(&path, "").unwrap();
+        assert!(verify(&artifact).unwrap_err().contains("is empty"));
+        std::fs::write(&path, "   \n\n").unwrap();
+        assert!(verify(&artifact).unwrap_err().contains("is empty"));
+        std::fs::write(&path, "{}\n").unwrap();
+        assert!(
+            verify(&artifact)
+                .unwrap_err()
+                .contains("no longer contains")
+        );
+
+        std::fs::remove_file(&path).unwrap();
+        assert!(verify(&artifact).unwrap_err().contains("missing"));
+    }
+
+    #[test]
+    fn verify_flags_codex_toml_edits_that_stopped_pointing_at_argus() {
+        const TAIL: &[&str] = &["hook", "--source", "codex"];
+        let dir = tempfile::tempdir().unwrap();
+        let exe = fake_binary(dir.path(), "argus");
+        let path = dir.path().join("config.toml");
+        let artifact = Artifact::TomlEdit {
+            path: path.clone(),
+            edits: vec![
+                TomlEditOp {
+                    key: "notify",
+                    // `value` is install-only; verification reads what is on disk.
+                    value: toml_edit::Item::None,
+                    only_if_absent: true,
+                    ours_markers: vec!["argus".into()],
+                    argv_tail: Some(TAIL),
+                },
+                TomlEditOp {
+                    key: "otel",
+                    value: toml_edit::Item::None,
+                    only_if_absent: true,
+                    ours_markers: vec!["127.0.0.1".into()],
+                    argv_tail: None,
+                },
+            ],
+        };
+        // TOML literal strings, so a Windows path's backslashes stay literal.
+        let healthy = format!(
+            "notify = ['{}', 'hook', '--source', 'codex']\n\
+             [otel]\nexporter = {{ otlp-http = {{ endpoint = 'http://127.0.0.1:4327' }} }}\n",
+            exe.display()
+        );
+        std::fs::write(&path, &healthy).unwrap();
+        assert_eq!(verify(&artifact), Ok(()), "healthy config must verify");
+
+        // Previously a TomlEdit was never checked, so every one of these
+        // passed and a half-installed Codex looked healthy forever.
+        let mut doc: toml_edit::DocumentMut = healthy.parse().unwrap();
+        doc.remove("otel");
+        std::fs::write(&path, doc.to_string()).unwrap();
+        assert!(verify(&artifact).unwrap_err().contains("otel missing from"));
+
+        std::fs::write(
+            &path,
+            healthy.replace("'hook', '--source', 'codex'", "'--version'"),
+        )
+        .unwrap();
+        assert!(
+            verify(&artifact)
+                .unwrap_err()
+                .contains("notify no longer invokes argus")
+        );
+
+        std::fs::write(&path, &healthy).unwrap();
+        std::fs::remove_file(&exe).unwrap();
+        let err = verify(&artifact).unwrap_err();
+        assert!(err.contains("notify points at a missing"), "{err}");
+    }
+
+    /// An `OwnedFile` verifies by looking for its markers, so a marker that is
+    /// not actually in what `install` writes would make `check` fail
+    /// immediately after a successful install.
+    #[test]
+    fn owned_file_markers_are_present_in_what_install_writes() {
+        let home = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("ARGUS_DATA_DIR", home.path().join("data"));
+        }
+        for h in HARNESSES {
+            let d = Detection {
+                id: h.id(),
+                signals: vec![Signal::ConfigDir],
+                config_home: home.path().join(h.id()),
+            };
+            for a in h.artifacts(&d, Scope::User) {
+                let Artifact::OwnedFile {
+                    path,
+                    contents,
+                    markers,
+                    commands,
+                } = a
+                else {
+                    continue;
+                };
+                assert!(
+                    !markers.is_empty(),
+                    "{}: an owned file with no markers verifies against any garbage",
+                    path.display()
+                );
+                for m in &markers {
+                    assert!(
+                        contents.contains(m.as_str()),
+                        "{}: marker {m:?} is not in the contents install writes",
+                        path.display()
+                    );
+                }
+                for c in &commands {
+                    assert!(
+                        program_of(c).is_some(),
+                        "{}: no program recoverable from {c:?}",
+                        path.display()
+                    );
+                }
+            }
+        }
+        unsafe {
+            std::env::remove_var("ARGUS_DATA_DIR");
+        }
     }
 }

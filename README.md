@@ -191,7 +191,18 @@ extra_patterns = ["ACME-[0-9]{6}"]
   agent on the endpoint's poll cycle — the pull-based counterpart to the
   daemon's `integrity` events. Checks two things (both by default; scope with
   `--hooks` / `--config`):
-  - **hooks** — each detected tool still carries the `argus` wiring.
+  - **hooks** — each detected tool still carries the `argus` wiring, *and* that
+    wiring can still fire: the binary each hook command names is resolved and
+    must be executable, files argus owns must be non-empty and still contain
+    the commands they were installed with, and Codex's `config.toml` `notify`
+    argv and `[otel]` block are verified alongside `hooks.json`.
+    **Upgrading to 0.3.0 can flip hosts to broken that previously reported
+    intact** — that is the fix, not a regression. Wiring baked against a binary
+    that has since moved (a `brew upgrade` that bumps the Cellar prefix, an
+    `npm` reinstall, `cargo install` to a new root) has not been capturing
+    anything; `check` simply says so now. `argus install` re-points it, and
+    installs now bake the stable `PATH` alias rather than the resolved real
+    path, so the next upgrade doesn't repeat it.
   - **config** — a remote policy (`[remote].url`) is loaded and effective, and
     the effective config matches it. Fails if the host isn't policy-managed, the
     policy never loaded (no/invalid cache → running on local/defaults), or a

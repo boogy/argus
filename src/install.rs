@@ -47,10 +47,31 @@ mod tests {
         unsafe {
             std::env::set_var("ARGUS_DATA_DIR", dir.path().join("data"));
         }
+        // Hook commands are baked from ARGUS_BIN when set; clear it so a test
+        // that points it at a temp file can't leak into the next one.
+        unsafe {
+            std::env::remove_var(crate::harness::BIN_ENV);
+        }
         std::fs::create_dir_all(dir.path().join(".claude")).unwrap();
         std::fs::create_dir_all(dir.path().join(".config/opencode")).unwrap();
         std::fs::create_dir_all(dir.path().join(".codex")).unwrap();
         dir
+    }
+
+    /// A stand-in for the installed argus binary, so a test can move or delete
+    /// it without touching the real one.
+    fn fake_bin(dir: &std::path::Path) -> std::path::PathBuf {
+        let p = dir.join(if cfg!(windows) { "argus.exe" } else { "argus" });
+        std::fs::write(&p, "#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        unsafe {
+            std::env::set_var(crate::harness::BIN_ENV, &p);
+        }
+        p
     }
 
     #[test]
@@ -356,6 +377,95 @@ mod tests {
         assert!(text.contains("model = \"o3\""));
         assert!(text.contains("otel"));
         assert!(text.contains("127.0.0.1:4327"));
+    }
+
+    /// The check that used to be missing entirely. Every config file below is
+    /// byte-for-byte intact after the binary disappears — an upgrade that
+    /// relocates it (brew, npm, `cargo install --root`) leaves exactly this
+    /// state, and `check` reported everything healthy while nothing was being
+    /// captured.
+    #[test]
+    fn check_passes_when_healthy_and_fails_once_the_binary_is_gone() {
+        let home = fake_home();
+        std::fs::create_dir_all(home.path().join(".copilot")).unwrap();
+        let bin = fake_bin(home.path());
+        run(false).unwrap();
+
+        let findings = crate::integrity::check(home.path());
+        assert_eq!(
+            findings.len(),
+            4,
+            "all four harnesses checked: {findings:?}"
+        );
+        assert!(
+            findings.iter().all(|f| f.ok),
+            "a fresh install must verify: {findings:?}"
+        );
+
+        std::fs::remove_file(&bin).unwrap();
+        let after = crate::integrity::check(home.path());
+        for tool in ["claude-code", "codex", "copilot"] {
+            let f = after.iter().find(|f| f.tool == tool).unwrap();
+            assert!(!f.ok, "{tool} must report broken: {f:?}");
+            assert!(
+                f.detail.contains("missing or non-executable"),
+                "{tool}: {f:?}"
+            );
+        }
+        // opencode is the deliberate exception: its plugin talks to the daemon
+        // socket and resolves the fallback binary itself at runtime, so no
+        // path is baked into the artifact for `check` to resolve.
+        let oc = after.iter().find(|f| f.tool == "opencode").unwrap();
+        assert!(oc.ok, "opencode has no baked-in binary path: {oc:?}");
+    }
+
+    #[test]
+    fn check_detects_an_emptied_plugin_file() {
+        let home = fake_home();
+        fake_bin(home.path());
+        run(false).unwrap();
+        let plugin = home.path().join(".config/opencode/plugin/argus.ts");
+        // Truncation, not deletion: `path.exists()` still says yes.
+        std::fs::write(&plugin, "").unwrap();
+        let f = crate::integrity::check(home.path())
+            .into_iter()
+            .find(|f| f.tool == "opencode")
+            .unwrap();
+        assert!(!f.ok && f.detail.contains("is empty"), "{f:?}");
+    }
+
+    #[test]
+    fn check_detects_a_gutted_plugin_file_that_is_still_non_empty() {
+        let home = fake_home();
+        fake_bin(home.path());
+        run(false).unwrap();
+        let plugin = home.path().join(".config/opencode/plugin/argus.ts");
+        std::fs::write(&plugin, "export const Plugin = () => ({});\n").unwrap();
+        let f = crate::integrity::check(home.path())
+            .into_iter()
+            .find(|f| f.tool == "opencode")
+            .unwrap();
+        assert!(!f.ok && f.detail.contains("no longer contains"), "{f:?}");
+    }
+
+    /// Codex is wired in two files; only `hooks.json` was ever verified, so a
+    /// `config.toml` stripped of `[otel]` — no OTLP export at all — looked
+    /// perfectly healthy.
+    #[test]
+    fn check_detects_a_stripped_codex_config_toml() {
+        let home = fake_home();
+        fake_bin(home.path());
+        run(false).unwrap();
+        let cfg = home.path().join(".codex/config.toml");
+        let mut doc: toml_edit::DocumentMut =
+            std::fs::read_to_string(&cfg).unwrap().parse().unwrap();
+        doc.remove("otel");
+        std::fs::write(&cfg, doc.to_string()).unwrap();
+        let f = crate::integrity::check(home.path())
+            .into_iter()
+            .find(|f| f.tool == "codex")
+            .unwrap();
+        assert!(!f.ok && f.detail.contains("otel missing from"), "{f:?}");
     }
 
     #[test]

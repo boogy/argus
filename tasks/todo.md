@@ -29,9 +29,12 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
   Files: `.github/workflows/ci.yml`, `tasks/todo.md`, `tasks/lessons.md`
   Note: T1 landed with `make verify` failing on the *pre-existing* baseline
   (57 fmt diffs + 7 clippy errors — the repo had never been verified on the
-  current toolchain; see `tasks/lessons.md`). Repaired in `cfd499e`, a
-  separate non-`T`-prefixed commit, which is the first commit on `develop`
-  where `make verify` passes end to end.
+  current toolchain; see `tasks/lessons.md`). Mostly repaired in `cfd499e`, a
+  separate non-`T`-prefixed commit. `cfd499e` does **not** verify on its own:
+  `src/install.rs` and `src/integrity.rs` were reformatted by the same
+  `cargo fmt` run but T2 had already rewritten them, so their fmt fix is
+  inside `934a097`. `934a097` is the first commit on `develop` where
+  `make verify` passes end to end.
 
 - [x] **T2** — `trait Harness` + `Artifact` refactor. Dependency: T1.
   Files: new `src/harness/*`, `src/install.rs`, `src/integrity.rs`, `src/adapters/mod.rs`, `src/redact.rs`, `src/lib.rs`, `docs/adding-a-tool.md`
@@ -39,10 +42,26 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
   hook keys on uninstall (incl. sweeping ones left by older installs),
   ownership by `"argus"`-anywhere substring, and unquoted hook commands.
   `Scope::Managed`, `Signal::{Binary,NpmGlobal,Brew}` and `KillSwitch` are
-  declared but not yet populated (T3/T4/T15), marked in-source.
+  declared but not yet populated (T4/T11/T12/T15), marked in-source.
 
-- [ ] **T3** — Make `check` prove capture actually works. Dependency: T2.
-  Files: `src/integrity.rs`, `src/install.rs`, `src/harness/{codex,mod}.rs`
+- [x] **T3** — Make `check` prove capture actually works. Dependency: T2.
+  Files: `src/integrity.rs`, `src/install.rs`, `src/harness/{codex,copilot,opencode,mod}.rs`, `README.md`, `docs/adding-a-tool.md`
+  Note: `check` no longer accepts presence as proof — it resolves the program
+  in every hook command (deduped, so a moved binary reports once), rejects
+  empty/marker-less owned files, and verifies Codex `config.toml` (`notify`
+  argv element-wise via `TomlEditOp.argv_tail`, plus `[otel]`) which was
+  previously never checked at all. Install now bakes the stable `PATH` alias
+  (`install_path`) rather than `current_exe()`, whose symlink resolution names
+  a Cellar path the next brew upgrade deletes. `Artifact::OwnedFile` gained
+  `markers` (raw-text, JSON-escaped substrings) and `commands` (unescaped,
+  program must resolve) — they cannot be one field. opencode is a deliberate
+  exception: its plugin speaks the socket, so it has no command to resolve and
+  stays ok when the binary is gone. Release note added to `README.md`: this
+  flips previously-intact hosts to broken, which is the fix, not a regression.
+  Mutation-verified: each of the five new guarantees was neutralized in turn
+  and the matching tests failed. Untested seam: the `stable_alias` call inside
+  `install_path` (`current_exe()` isn't controllable in-process); the function
+  itself is tested directly.
 
 - [ ] **T4** — Cross-platform detection. Dependency: T3.
   Files: new `src/detect.rs`, `src/harness/mod.rs`, `src/install.rs`, `src/main.rs`

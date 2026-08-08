@@ -217,16 +217,32 @@ mod tests {
 
     /// A home with Claude Code detected and fully wired (explicit marker, so
     /// the check doesn't depend on the test binary's path).
+    ///
+    /// The command names a real executable inside the temp dir: `check` now
+    /// resolves it, so a placeholder path would be reported broken — correctly.
     fn wired_claude_home() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         let claude = dir.path().join(".claude");
         std::fs::create_dir_all(&claude).unwrap();
+        let exe = dir.path().join("argus");
+        std::fs::write(&exe, "#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let cmd = crate::harness::hook_command_for(
+            &exe.to_string_lossy(),
+            "claude-code",
+            None,
+            crate::harness::CmdStyle::Shell,
+        );
         let mut hooks = serde_json::Map::new();
         for ev in crate::harness::claude_code::EVENTS {
             hooks.insert(
                 ev.name.into(),
                 serde_json::json!([{
-                    "hooks": [{ "command": "/opt/argus hook" }],
+                    "hooks": [{ "command": cmd }],
                     "_argus": true,
                 }]),
             );

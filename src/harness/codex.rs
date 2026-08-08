@@ -1,6 +1,6 @@
 use super::{
     Artifact, ConfigDir, Detection, Harness, HookEvent, HookShape, Probes, Scope, TomlEditOp,
-    self_exe,
+    install_path,
 };
 use crate::config::CaptureCfg;
 use crate::event::{Envelope, Event};
@@ -31,6 +31,11 @@ const CONFIG_DIRS: &[ConfigDir] = &[ConfigDir {
 /// recognised on uninstall so hosts wired by an older argus clean up.
 const LEGACY_ENDPOINT: &str = "http://127.0.0.1:4327";
 
+/// Everything after the program path in the `notify` argv array. `check`
+/// compares these element-wise, so a `notify` repointed at another program
+/// is caught rather than passing a loose substring test.
+const NOTIFY_TAIL: &[&str] = &["hook", "--source", "codex"];
+
 pub struct Codex;
 
 impl Harness for Codex {
@@ -55,10 +60,10 @@ impl Harness for Codex {
         // `notify` is an argv array executed without a shell, so the program
         // path is a distinct element and must NOT be shell-quoted.
         let mut notify = toml_edit::Array::new();
-        notify.push(self_exe());
-        notify.push("hook");
-        notify.push("--source");
-        notify.push("codex");
+        notify.push(install_path());
+        for arg in NOTIFY_TAIL {
+            notify.push(*arg);
+        }
 
         let mut otel = toml_edit::Table::new();
         otel["environment"] = toml_edit::value("prod");
@@ -82,12 +87,14 @@ impl Harness for Codex {
                         value: toml_edit::value(notify),
                         only_if_absent: true,
                         ours_markers: markers.clone(),
+                        argv_tail: Some(NOTIFY_TAIL),
                     },
                     TomlEditOp {
                         key: "otel",
                         value: toml_edit::Item::Table(otel),
                         only_if_absent: true,
                         ours_markers: markers,
+                        argv_tail: None,
                     },
                 ],
             },

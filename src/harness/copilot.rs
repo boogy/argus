@@ -29,6 +29,17 @@ const CONFIG_DIRS: &[ConfigDir] = &[ConfigDir {
     rel: ".copilot",
 }];
 
+/// `s` as it appears *inside* a JSON string literal — the body of
+/// `serde_json`'s own output, minus the surrounding quotes. Needed because the
+/// artifact's markers are matched against the raw file text, where a Windows
+/// path's backslashes are doubled.
+fn json_escaped(s: &str) -> String {
+    let q = serde_json::to_string(s).unwrap_or_default();
+    q.get(1..q.len().saturating_sub(1))
+        .unwrap_or("")
+        .to_string()
+}
+
 pub struct Copilot;
 
 impl Harness for Copilot {
@@ -51,18 +62,32 @@ impl Harness for Copilot {
     /// plugin shim, and no marker is needed inside it.
     fn artifacts(&self, d: &Detection, _scope: Scope) -> Vec<Artifact> {
         let mut hooks = serde_json::Map::new();
+        // One marker per event, each the exact command that must still be on
+        // disk. Checking the whole set is what makes "one event quietly
+        // deleted" and "the binary moved" both visible; checking that the file
+        // merely exists makes neither.
+        let mut markers = Vec::with_capacity(EVENTS.len());
+        let mut commands = Vec::new();
         for event in EVENTS {
             // Distinct per shell: PowerShell needs the `&` call operator, and
             // each quotes the program path its own way.
+            let bash = hook_command("copilot", Some(event), CmdStyle::Shell);
             hooks.insert(
                 (*event).into(),
                 json!([{
                     "type": "command",
-                    "bash": hook_command("copilot", Some(event), CmdStyle::Shell),
+                    "bash": bash,
                     "powershell": hook_command("copilot", Some(event), CmdStyle::PowerShell),
                     "timeoutSec": 10,
                 }]),
             );
+            // The file is JSON, so the command is stored escaped; compare
+            // against the same escaping rather than the raw string.
+            markers.push(json_escaped(&bash));
+            // Every event shares one program, so resolving it once is enough.
+            if commands.is_empty() {
+                commands.push(bash);
+            }
         }
         let doc = json!({ "version": 1, "hooks": hooks });
         vec![Artifact::OwnedFile {
@@ -70,6 +95,8 @@ impl Harness for Copilot {
             contents: Cow::Owned(
                 serde_json::to_string_pretty(&doc).unwrap_or_else(|_| "{}".into()),
             ),
+            markers,
+            commands,
         }]
     }
 
