@@ -53,18 +53,6 @@ pub async fn run() -> Result<()> {
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Envelope>(1024);
     tokio::spawn(listener.accept_loop(tx.clone()));
 
-    // Spool drain: pick up events written while the daemon was down (or the
-    // hook shim couldn't reach it within its deadline).
-    let spool_tx = tx.clone();
-    tokio::spawn(async move {
-        loop {
-            for env in spool::drain().unwrap_or_default() {
-                let _ = spool_tx.send(env).await;
-            }
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-        }
-    });
-
     // Codex OTLP receiver (Task 13 wires real events into tx; stub for now).
     tokio::spawn(crate::adapters::codex::otlp_listener(
         shared_cfg.clone(),
@@ -86,7 +74,14 @@ pub async fn run() -> Result<()> {
     // Shared by both select arms so a drained-on-shutdown envelope goes
     // through the exact same parse -> redact -> buffer pipeline as one
     // received during normal operation.
-    let mut process = |envelope: Envelope| {
+    // Spool replay: envelopes written while the daemon was down, or while the
+    // shim could not reach it inside its deadline. It runs on this loop rather
+    // than on a task of its own because a spool file may only be deleted once
+    // its events are in the buffer, and the buffer is here. First tick fires
+    // immediately, so a backlog starts draining at startup.
+    let mut spool_tick = tokio::time::interval(std::time::Duration::from_secs(5));
+
+    let mut process = |envelope: Envelope| -> bool {
         pipeline.refresh(&shared_cfg);
         // Two relaxed stores; the caps a reload changed take effect on the very
         // next write rather than at the next daemon restart. An operator who
@@ -98,8 +93,14 @@ pub async fn run() -> Result<()> {
             .map(|e| pipeline.redactor.scrub_event(e))
             .collect();
         // One payload commonly becomes several events; write them together.
-        if let Err(e) = buffer.push_batch(&events) {
-            tracing::error!("buffer push failed: {e}");
+        // The bool is what makes delete-after-commit possible: only a caller
+        // that knows the transaction committed may destroy its source.
+        match buffer.push_batch(&events) {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::error!("buffer push failed: {e}");
+                false
+            }
         }
     };
 
@@ -122,6 +123,9 @@ pub async fn run() -> Result<()> {
             maybe_envelope = rx.recv() => {
                 let Some(envelope) = maybe_envelope else { break };
                 process(envelope);
+            }
+            _ = spool_tick.tick() => {
+                replay_spool(&mut process);
             }
         }
     }
@@ -167,6 +171,26 @@ async fn export_loop(buffer: Arc<Buffer>, cfg: Arc<RwLock<config::Config>>) {
             }
         }
     }
+}
+
+/// Replay one bounded batch of spooled envelopes, deleting each file only once
+/// its events are committed to the buffer.
+///
+/// The ordering is the whole point. The spool exists so that a daemon outage
+/// costs nothing, and the old code deleted the file *before* handing the
+/// envelope on — so a crash anywhere between the unlink and the SQLite commit
+/// destroyed the one copy that existed. Committing first can duplicate an
+/// event if the process dies in the window; the pipeline is at-least-once
+/// already, and a duplicate is the failure that leaves evidence.
+fn replay_spool(process: &mut impl FnMut(Envelope) -> bool) -> usize {
+    let mut replayed = 0;
+    for (path, envelope) in spool::take(spool::DRAIN_BATCH) {
+        if process(envelope) {
+            spool::discard(&path);
+            replayed += 1;
+        }
+    }
+    replayed
 }
 
 /// Fold any buffer overflow since the last flush into the queue, ahead of the
@@ -320,6 +344,53 @@ mod tests {
             "refresh must pick the new caps up, or the daemon enforces the old \
              one until someone restarts it"
         );
+    }
+
+    /// The spool is the thing that makes a daemon outage free, and deleting a
+    /// file before its contents are committed made it the one place where a
+    /// crash cost an event outright.
+    #[test]
+    fn a_spool_file_outlives_the_replay_that_reads_it() {
+        let dir = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("ARGUS_DATA_DIR", dir.path());
+        }
+        let env = |n: u32| Envelope {
+            source: "claude-code".into(),
+            received_at: chrono::Utc::now(),
+            truncated: false,
+            event: None,
+            payload: serde_json::json!({
+                "hook_event_name": "UserPromptSubmit",
+                "prompt": format!("p{n}"),
+            }),
+        };
+        for i in 0..3 {
+            spool::append(&env(i)).unwrap();
+        }
+
+        // A replay that cannot commit must leave every file exactly where it
+        // found it — this is the kill-mid-drain case, minus the kill.
+        assert_eq!(replay_spool(&mut |_| false), 0);
+        assert_eq!(
+            spool::take(usize::MAX).len(),
+            3,
+            "a failed commit destroyed the only copy of the events"
+        );
+
+        // And a replay that does commit may only delete once it has.
+        let mut seen = 0;
+        let replayed = replay_spool(&mut |_| {
+            assert_eq!(
+                spool::take(usize::MAX).len(),
+                3 - seen,
+                "the file was deleted before its envelope was committed"
+            );
+            seen += 1;
+            true
+        });
+        assert_eq!(replayed, 3);
+        assert!(spool::take(usize::MAX).is_empty());
     }
 
     /// End to end: the overflow has to reach the queue that gets exported,

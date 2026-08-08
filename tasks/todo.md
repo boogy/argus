@@ -325,7 +325,34 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
     `run()`'s per-envelope closure. `set_limits` and the fingerprint are each
     tested, but the line joining them sits in `run()`, which has no unit test
     at all. T16 splits that closure out; it becomes testable there.
-  - [ ] **T7d** — Incremental spool drain, delete after the buffer commits.
+  - [x] **T7d** — Incremental spool drain, delete after the buffer commits.
+    Files: `src/spool.rs`, `src/daemon.rs`
+    The spool exists so that a daemon outage costs nothing, and it was the one
+    place in the pipeline where a crash cost an event outright: `drain()`
+    unlinked each file and *then* handed the envelope back, so a kill anywhere
+    between the unlink and the SQLite commit destroyed the only copy. Split into
+    `take` (read, leave in place) and `discard` (delete), with the daemon
+    calling `discard` only after `push_batch` has committed. Delete-after-commit
+    can duplicate an event if the process dies in the window; the pipeline is
+    at-least-once already, and a duplicate is the failure that leaves evidence.
+    The replay also moved off its own spawned task and onto the daemon's event
+    loop, on a 5s tick, because that is where the buffer handle lives and where
+    a commit result can decide whether the file dies. Which makes the pass
+    synchronous with live traffic, so it is bounded: `DRAIN_BATCH = 256` files,
+    oldest first. Unbounded, a daemon returning after a day would stall every
+    live envelope behind tens of thousands of files; newest-first would keep
+    re-reading the same tail while the oldest starve behind the bound. Names
+    are UUIDs and carry no order, so the sort is by mtime.
+    `drain()` survives as take-and-delete for callers that cannot lose what
+    they are handed (tests, `status`). A corrupt file is still deleted inside
+    `take` — no amount of retrying will commit it.
+    Mutation-verified, three of three: discarding before the commit, ignoring
+    the batch bound, and reversing the sort each failed the matching test.
+    Untested seam: the `Err(_) => false` arm of `run()`'s per-envelope closure
+    — the arm that makes a failed `push_batch` keep the file. `replay_spool`'s
+    half of the contract is tested by injecting both a failing and a
+    succeeding closure, but the real closure lives in `run()`, which still has
+    no unit test. Same seam as T7c's `set_limits` line, and T16 splits it out.
   - [ ] **T7e** — `spool.max_bytes`. Split out of T7c: the spool cap is a
     different mechanism in a different process (the shim writes it, and the
     daemon may be down — which is exactly when the spool grows), and reporting
