@@ -1,6 +1,6 @@
 use super::{
-    Artifact, ConfigDir, Detection, Harness, HookEvent, HookShape, Probes, Required, Scope,
-    TomlEditOp, install_path,
+    Artifact, ConfigDir, Detection, Harness, HookEvent, HookShape, KillSwitch, Probes, Required,
+    Scope, TomlEditOp, install_path,
 };
 use crate::config::CaptureCfg;
 use crate::detect::BinaryProbe;
@@ -163,6 +163,72 @@ impl Harness for Codex {
                 source: "codex",
             },
         ]
+    }
+
+    /// Settings that leave every hook entry in place and still stop it from
+    /// running. Without these, `check` reads a perfectly wired `hooks.json`
+    /// and reports "wired" about a tool that is capturing nothing — which is
+    /// worse than reporting nothing at all, because someone believes it.
+    ///
+    /// Verified against <https://learn.chatgpt.com/docs/hooks> (Codex is not
+    /// installed on the machine this was written on).
+    fn kill_switches(&self, d: &Detection) -> Vec<KillSwitch> {
+        let mut out = Vec::new();
+        for file in ["config.toml", "requirements.toml"] {
+            let path = d.config_home.join(file);
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let doc = match text.parse::<toml::Table>() {
+                Ok(t) => t,
+                Err(e) => {
+                    // Codex cannot read its own config either, so whatever
+                    // this file was meant to say — including our `notify` and
+                    // `[otel]` wiring — is not in force.
+                    out.push(KillSwitch {
+                        name: "unreadable config",
+                        detail: format!("{} is not valid TOML: {e}", path.display()),
+                    });
+                    continue;
+                }
+            };
+            // `hooks` is canonical; `codex_hooks` is the deprecated alias and
+            // still works, so checking only the new name would miss a host
+            // that was disabled before the rename.
+            for key in ["hooks", "codex_hooks"] {
+                if doc
+                    .get("features")
+                    .and_then(|f| f.get(key))
+                    .and_then(toml::Value::as_bool)
+                    == Some(false)
+                {
+                    out.push(KillSwitch {
+                        name: "hooks disabled",
+                        detail: format!(
+                            "[features] {key} = false in {} — no hook runs, wired or not",
+                            path.display()
+                        ),
+                    });
+                }
+            }
+            // argus installs a *user* hook. This setting keeps only
+            // administrator-managed hooks, so ours is discovered, listed, and
+            // never executed.
+            if doc
+                .get("allow_managed_hooks_only")
+                .and_then(toml::Value::as_bool)
+                == Some(true)
+            {
+                out.push(KillSwitch {
+                    name: "user hooks ignored",
+                    detail: format!(
+                        "allow_managed_hooks_only = true in {} — only administrator-managed hooks run",
+                        path.display()
+                    ),
+                });
+            }
+        }
+        out
     }
 
     fn parse(&self, env: &Envelope, cfg: &CaptureCfg) -> Vec<Event> {

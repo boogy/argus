@@ -491,6 +491,104 @@ mod tests {
         assert!(!f.ok && f.detail.contains("otel missing from"), "{f:?}");
     }
 
+    /// Edit the wired Codex config and return the codex finding. Every case
+    /// here starts from a healthy install, so a finding that flips can only
+    /// have flipped because of the edit. Edits go through `toml_edit` rather
+    /// than appended text: a bare key appended after the `[otel]` table would
+    /// land *inside* that table, and the test would pass for the wrong reason.
+    fn codex_finding_after(
+        home: &std::path::Path,
+        file: &str,
+        edit: impl FnOnce(&mut toml_edit::DocumentMut),
+    ) -> crate::integrity::Finding {
+        let cfg = home.join(".codex").join(file);
+        // `requirements.toml` is administrator-supplied, so a healthy install
+        // leaves it absent; starting from an empty document is that state.
+        let mut doc: toml_edit::DocumentMut = std::fs::read_to_string(&cfg)
+            .unwrap_or_default()
+            .parse()
+            .unwrap();
+        edit(&mut doc);
+        std::fs::write(&cfg, doc.to_string()).unwrap();
+        crate::integrity::check(home)
+            .into_iter()
+            .find(|f| f.tool == "codex")
+            .unwrap()
+    }
+
+    /// A hook entry that is present, correct, and never executed. Without
+    /// this, `check` reads the wiring and reports "wired" about a tool
+    /// capturing nothing — worse than reporting nothing, because someone
+    /// believes it.
+    #[test]
+    fn check_detects_codex_kill_switches() {
+        let home = fake_home();
+        fake_bin(home.path());
+        run(false).unwrap();
+        // The baseline has to be healthy or the cases below prove nothing.
+        let f = crate::integrity::check(home.path())
+            .into_iter()
+            .find(|f| f.tool == "codex")
+            .unwrap();
+        assert!(f.ok, "{f:?}");
+
+        type Edit = fn(&mut toml_edit::DocumentMut);
+        let cases: [(&str, &str, Edit); 4] = [
+            ("config.toml", "[features] hooks = false", |d| {
+                d["features"]["hooks"] = toml_edit::value(false)
+            }),
+            // The deprecated alias still works, so a host disabled before the
+            // rename must not read as healthy.
+            ("config.toml", "[features] codex_hooks = false", |d| {
+                d["features"]["codex_hooks"] = toml_edit::value(false)
+            }),
+            ("config.toml", "allow_managed_hooks_only = true", |d| {
+                d["allow_managed_hooks_only"] = toml_edit::value(true)
+            }),
+            // The file the docs actually name for this setting. It is not an
+            // artifact argus writes, so nothing but the kill-switch read ever
+            // opens it — check the file the user's administrator uses, not
+            // only the one that happens to be convenient.
+            (
+                "requirements.toml",
+                "allow_managed_hooks_only = true",
+                |d| d["allow_managed_hooks_only"] = toml_edit::value(true),
+            ),
+        ];
+        for (file, needle, edit) in cases {
+            let home2 = fake_home();
+            fake_bin(home2.path());
+            run(false).unwrap();
+            let f = codex_finding_after(home2.path(), file, edit);
+            assert!(
+                !f.ok && f.detail.contains(needle),
+                "{file}/{needle} -> {f:?}"
+            );
+        }
+    }
+
+    /// Codex cannot read this file either, so whatever it was meant to say —
+    /// including a `allow_managed_hooks_only` that would blind us — is not
+    /// knowable, and "wired" is not an answer anyone should act on.
+    ///
+    /// Deliberately `requirements.toml` and not `config.toml`: artifact
+    /// verification already parses `config.toml` and reports the same words,
+    /// so a broken one there would pass this test with the kill switch
+    /// deleted. This file is read by nothing else.
+    #[test]
+    fn check_detects_a_codex_requirements_toml_that_no_longer_parses() {
+        let home = fake_home();
+        fake_bin(home.path());
+        run(false).unwrap();
+        let cfg = home.path().join(".codex/requirements.toml");
+        std::fs::write(&cfg, "this is not = = toml\n").unwrap();
+        let f = crate::integrity::check(home.path())
+            .into_iter()
+            .find(|f| f.tool == "codex")
+            .unwrap();
+        assert!(!f.ok && f.detail.contains("not valid TOML"), "{f:?}");
+    }
+
     /// A dry run's whole contract is that it is safe to run anywhere. Now that
     /// install *creates* config directories for a tool detected by its binary
     /// alone, "writes nothing" has to be asserted against the tree, not

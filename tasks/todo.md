@@ -879,9 +879,9 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
 
 - [ ] **T11** — Codex parity. Dependency: T4, T5.
   Files: `src/adapters/codex.rs`, `src/harness/codex.rs`, `src/integrity.rs`
-  Split under the sizing rule — three independent behavioral changes: T11a
-  `SessionEnd`, T11b kill-switch detection in `check`, T11c project-level
-  `<repo>/.codex/hooks.json`. Codex is **not installed on this machine**, so
+  Split under the sizing rule — four independent behavioral changes: T11a
+  `SessionEnd`, T11b kill-switch detection in `check`, T11c hook-trust hash
+  drift, T11d project-level `<repo>/.codex/hooks.json`. Codex is **not installed on this machine**, so
   every payload assertion stays doc-derived, as the plan requires.
   - [x] **T11a** — Subscribe to Codex `SessionEnd`, timeout 3. Files:
     `src/harness/codex.rs`, `src/harness/mod.rs`, `src/install.rs`,
@@ -898,6 +898,29 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
     to every `hook_event_name` harness. `install.rs` never asserted a timeout
     reached the file at all before this, so a per-event timeout would have
     been a comment.
+  - [x] **T11b** — Detect Codex kill switches in `check`. Files:
+    `src/harness/codex.rs`, `src/install.rs`
+    `KillSwitch` and `Harness::kill_switches` were T2 scaffolding no harness
+    populated, so `check` could read a byte-perfect `hooks.json` and report
+    "wired" about a tool capturing nothing — worse than reporting nothing,
+    because someone believes it. Three settings do that: `[features] hooks =
+    false`, its deprecated-but-live alias `codex_hooks`, and
+    `allow_managed_hooks_only = true`, which keeps only administrator-managed
+    hooks and so lists ours and never runs it. Both `config.toml` and
+    `requirements.toml` are read — the docs name the latter for the managed
+    setting, and it is a file argus never writes.
+    Six mutations, all bite — but only after two were fixed for biting
+    nothing. The `allow_managed_hooks_only` case first passed for the wrong
+    reason: a bare key appended to the end of a TOML file lands *inside* the
+    preceding `[otel]` table, not at top level, so the edit the test thought
+    it made was never made. Test edits now go through `toml_edit`. The
+    unparseable-config case also passed with the arm deleted, because artifact
+    verification already parses `config.toml` and reports the same words; it
+    now targets `requirements.toml`, which nothing else opens.
+    The plan's "untrusted/changed hook hashes" is not implementable as
+    written — Codex's trust-store filename is undocumented, so there is no
+    file to read. Moved to T11c as hash drift recorded at install time, which
+    is the same signal from the side we control.
 
 - [ ] **T12** — Copilot parity. Dependency: T4, T5.
   Files: `src/adapters/copilot.rs`, `src/harness/copilot.rs`
