@@ -42,6 +42,14 @@ pub struct ExportCfg {
     /// results carrying file contents are three orders of magnitude larger than
     /// 256 prompts, and collectors reject on bytes, not on rows.
     pub max_batch_bytes: u64,
+    /// Compress the request body with gzip.
+    ///
+    /// Off by default, and deliberately: OTLP/HTTP receivers *should* accept a
+    /// gzipped body but are not required to, and one that does not answers a
+    /// `4xx` — which, since T9a, is a refusal that drops the batch rather than
+    /// retrying it. Turning this on against the wrong collector trades
+    /// bandwidth for audit data, so it is the operator's call, not a default.
+    pub gzip: bool,
     pub flush_interval_secs: u64,
 }
 impl Default for ExportCfg {
@@ -53,6 +61,7 @@ impl Default for ExportCfg {
             // Under the 4 MiB default request limit of the OTel Collector's
             // HTTP receiver, with room for the OTLP envelope around the bodies.
             max_batch_bytes: 3 * 1024 * 1024,
+            gzip: false,
             flush_interval_secs: 10,
         }
     }

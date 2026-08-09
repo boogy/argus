@@ -90,6 +90,7 @@ dependencies = [
  "chrono",
  "clap",
  "dirs",
+ "flate2",
  "interprocess",
  "libc",
  "regex",

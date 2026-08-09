@@ -152,6 +152,7 @@ pub struct Exporter {
     client: reqwest::Client,
     endpoint: Option<String>,
     headers: std::collections::BTreeMap<String, String>,
+    gzip: bool,
 }
 
 /// Counts how many HTTP clients this process has actually built. The
@@ -188,6 +189,7 @@ impl Exporter {
             client: shared_client(),
             endpoint: cfg.otlp_endpoint.clone(),
             headers: cfg.headers.clone(),
+            gzip: cfg.gzip,
         }
     }
 
@@ -197,10 +199,23 @@ impl Exporter {
             .as_ref()
             .context("no otlp_endpoint configured")
             .map_err(Rejection::Transient)?;
-        let mut req = self
+        // Serialized once, so the compressed and uncompressed paths send the
+        // same bytes and only the framing differs.
+        let body = serde_json::to_vec(&to_otlp_body(events))
+            .context("serializing the export batch")
+            .map_err(Rejection::Transient)?;
+        // `.json()` used to set this; sending the body ourselves means saying it.
+        let req = self
             .client
             .post(format!("{}/v1/logs", endpoint.trim_end_matches('/')))
-            .json(&to_otlp_body(events));
+            .header(reqwest::header::CONTENT_TYPE, "application/json");
+        let mut req = if self.gzip {
+            let squeezed = gzip(&body).map_err(|e| Rejection::Transient(e.into()))?;
+            req.header(reqwest::header::CONTENT_ENCODING, "gzip")
+                .body(squeezed)
+        } else {
+            req.body(body)
+        };
         for (k, v) in &self.headers {
             req = req.header(k, v);
         }
@@ -263,6 +278,15 @@ impl std::fmt::Display for Rejection {
 /// busy collector answering 429 is the case backoff exists for; treating those
 /// as permanent would throw away exactly the batches sent when a fleet is
 /// noisiest.
+/// The request body under the `gzip` content coding — the gzip container, not
+/// bare deflate, which is what OTLP/HTTP receivers decode under that name.
+fn gzip(body: &[u8]) -> std::io::Result<Vec<u8>> {
+    use std::io::Write;
+    let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    enc.write_all(body)?;
+    enc.finish()
+}
+
 fn is_permanent(status: u16) -> bool {
     (400..500).contains(&status) && status != 408 && status != 429
 }
@@ -507,6 +531,146 @@ mod tests {
             Err(Rejection::Transient(_)) => {}
             other => panic!("a connect failure must be retried, got {other:?}"),
         }
+    }
+
+    /// A collector that answers 200 and hands back what it was actually sent.
+    #[allow(clippy::type_complexity)]
+    fn recording_collector() -> (
+        String,
+        std::sync::mpsc::Receiver<(Vec<(String, String)>, Vec<u8>)>,
+    ) {
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let addr = server.server_addr().to_string();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for mut req in server.incoming_requests() {
+                let mut body = Vec::new();
+                let _ = req.as_reader().read_to_end(&mut body);
+                let headers = req
+                    .headers()
+                    .iter()
+                    .map(|h| {
+                        (
+                            h.field.as_str().as_str().to_ascii_lowercase(),
+                            h.value.as_str().to_string(),
+                        )
+                    })
+                    .collect();
+                let _ = tx.send((headers, body));
+                let _ = req.respond(tiny_http::Response::empty(200));
+            }
+        });
+        (addr, rx)
+    }
+
+    fn header(headers: &[(String, String)], name: &str) -> Option<String> {
+        headers
+            .iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.clone())
+    }
+
+    /// Compression is framing, not content: the collector must recover exactly
+    /// the bytes an uncompressed export would have sent.
+    #[tokio::test]
+    async fn gzip_changes_the_framing_and_nothing_else() {
+        use std::io::Read;
+        let (addr, rx) = recording_collector();
+        let events: Vec<Event> = (0..20)
+            .map(|i| {
+                Event::new(
+                    "codex",
+                    None,
+                    None,
+                    EventKind::Prompt {
+                        text: format!("prompt {i}"),
+                    },
+                )
+            })
+            .collect();
+        let endpoint = format!("http://{addr}");
+
+        let plain = ExportCfg {
+            otlp_endpoint: Some(endpoint.clone()),
+            ..Default::default()
+        };
+        Exporter::new(&plain).export(&events).await.unwrap();
+        let (plain_headers, plain_body) = rx.recv().unwrap();
+        assert_eq!(
+            header(&plain_headers, "content-encoding"),
+            None,
+            "a collector that cannot decode gzip must be the default case"
+        );
+        // Sending the body by hand means saying what it is; `.json()` no longer
+        // does it on either leg.
+        assert_eq!(
+            header(&plain_headers, "content-type").as_deref(),
+            Some("application/json")
+        );
+
+        let squeezed = ExportCfg {
+            otlp_endpoint: Some(endpoint),
+            gzip: true,
+            ..Default::default()
+        };
+        Exporter::new(&squeezed).export(&events).await.unwrap();
+        let (headers, body) = rx.recv().unwrap();
+        assert_eq!(
+            header(&headers, "content-encoding").as_deref(),
+            Some("gzip"),
+            "a body the receiver is not told is compressed is a 400"
+        );
+        assert_eq!(
+            header(&headers, "content-type").as_deref(),
+            Some("application/json"),
+            "the encoding changed, the media type did not"
+        );
+        assert_eq!(&body[..2], &[0x1f, 0x8b], "not a gzip container");
+        let mut decoded = Vec::new();
+        flate2::read::GzDecoder::new(&body[..])
+            .read_to_end(&mut decoded)
+            .unwrap();
+        assert_eq!(
+            decoded, plain_body,
+            "the payload must survive the round trip"
+        );
+        assert!(
+            body.len() < plain_body.len(),
+            "{} compressed bytes vs {} plain: nothing was saved",
+            body.len(),
+            plain_body.len()
+        );
+    }
+
+    /// The bearer token is what gets the batch past the collector's front door;
+    /// compressing the body must not drop it.
+    #[tokio::test]
+    async fn the_configured_headers_still_ride_on_a_compressed_body() {
+        let (addr, rx) = recording_collector();
+        let cfg = ExportCfg {
+            otlp_endpoint: Some(format!("http://{addr}")),
+            headers: std::collections::BTreeMap::from([(
+                "authorization".to_string(),
+                "Bearer t".to_string(),
+            )]),
+            gzip: true,
+            ..Default::default()
+        };
+        let e = Event::new("codex", None, None, EventKind::Prompt { text: "p".into() });
+        Exporter::new(&cfg)
+            .export(std::slice::from_ref(&e))
+            .await
+            .unwrap();
+        let (headers, body) = rx.recv().unwrap();
+        assert_eq!(
+            header(&headers, "authorization").as_deref(),
+            Some("Bearer t")
+        );
+        assert_eq!(
+            header(&headers, "content-encoding").as_deref(),
+            Some("gzip")
+        );
+        assert_eq!(&body[..2], &[0x1f, 0x8b]);
     }
 
     #[test]

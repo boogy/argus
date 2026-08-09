@@ -729,7 +729,24 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
     row cap gap predates this change and was inherited by the refactor. Both are
     now covered by an `export_once` against a real buffer and collector, which
     asserts on what was acked rather than on what was configured.
-  - [ ] **T9c** — Optional request gzip (new `flate2` dep).
+  - [x] **T9c** — Optional request gzip. Files: `Cargo.toml`, `src/config.rs`,
+    `src/export.rs`, `README.md`
+    `reqwest`'s `gzip` feature was already on and decompresses *responses*
+    only; nothing in it touches what we send. `flate2` is the new dep, wrapping
+    the serialized batch in a gzip container under `Content-Encoding: gzip`.
+    Off by default, and that is the whole design decision: an OTLP/HTTP receiver
+    *should* accept a gzipped body but is not required to, and one that cannot
+    answers `4xx` — which since T9a is a refusal that drops the batch instead of
+    retrying it. Defaulting this on would trade audit data for bandwidth against
+    a collector nobody asked, so it is the operator's call.
+    The body is now serialized once by hand rather than via `.json()`, so both
+    legs send identical bytes and only the framing differs — and both legs must
+    now set `Content-Type` themselves, which `.json()` used to do.
+    Four mutations, all bit: ignoring the config flag, announcing `gzip` over an
+    uncompressed body, compressing without announcing it, and dropping the
+    `Content-Type` that `.json()` used to supply. The last one initially bit only
+    on the compressed leg — the uncompressed leg's media type was unguarded, so
+    the test now asserts it on both.
 
 - [ ] **T10** — Claude Code field-mismatch fixes. Dependency: T4, T5.
   Files: `src/adapters/claude_code.rs`, `src/adapters/mod.rs`, `src/harness/claude_code.rs`
