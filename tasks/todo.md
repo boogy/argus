@@ -937,6 +937,26 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
     replacing whichever entry came first, because it appended the foreign hook
     *after* ours — with ours at index 0, "the entry that is ours" and "the
     first entry" are the same edit. The foreign hook now goes in ahead of ours.
+  - [x] **T11d** — `check` reports hook entries that are not the ones argus
+    writes. Files: `src/harness/mod.rs`, `src/integrity.rs`, `README.md`
+    The plan's "untrusted/changed hook hashes" without reading Codex's trust
+    store, whose filename is undocumented. Codex records trust against a
+    hook's *current hash* and skips changed hooks until re-reviewed, so the
+    observable half is whether the entry is still the one argus wrote — and
+    T11c is what makes that comparison legitimate, since install now refreshes
+    its own entries rather than leaving a stale one forever.
+    Applies to every `JsonHooks` harness, not just Codex: a command retargeted
+    at another adapter (`--source claude-code` → `--source codex`) resolves,
+    fires, and files events under the wrong tool; `timeout: 0` is wired and
+    never completes; a second hook body appended *inside* our marked entry
+    runs under our marker. None is missing, none fails command resolution, so
+    all three read as wired before this.
+    Five mutations, all bite. The fifth is the finding: `wired_claude_home`
+    built its settings.json by iterating `EVENTS`, the same constant `check`
+    reads, and wrote an entry install never writes (no `type`, no `timeout`,
+    no `matcher`). It now installs for real — restoring the hand-built version
+    fails the healthy-install tests, which is the correct signal that the
+    fixture was fiction. Same shape as T10e.
 
 - [ ] **T12** — Copilot parity. Dependency: T4, T5.
   Files: `src/adapters/copilot.rs`, `src/harness/copilot.rs`

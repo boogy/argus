@@ -258,9 +258,17 @@ extra_patterns = ["ACME-[0-9]{6}"]
     block is held to the endpoint this install actually listens on, not merely
     to looking like ours: a `config.toml` still naming a previous install's
     port is wired to a receiver nothing answers on, and reporting that as
-    intact would be worse than reporting nothing. The same applies to the
-    bearer token in that block: a Codex presenting a token this install does
-    not know is refused on every turn, which looks exactly like a Codex nobody
+    intact would be worse than reporting nothing. Each hook entry must also be
+    byte-for-byte the entry this argus writes, not merely present and
+    ours-marked: a command retargeted at another adapter still resolves and
+    still fires, and files the wrong events under the wrong tool — rows that
+    look real. `timeout: 0` and a second hook body appended inside our own
+    entry pass every earlier test too. Codex additionally records trust against
+    a hook's *current hash*, so an altered entry there is skipped until
+    re-trusted via `/hooks` — reported as `hooks altered`, remedied by
+    `argus install`, which refreshes its own entries in place. The same applies
+    to the bearer token in the `[otel]` block: a Codex presenting a token this
+    install does not know is refused on every turn, which looks exactly like a Codex nobody
     is using. The error says the token is wrong, never what it is — `check`
     output is collected and indexed by whatever is polling it.
     **Upgrading to 0.3.0 can flip hosts to broken that previously reported

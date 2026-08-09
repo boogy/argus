@@ -811,7 +811,7 @@ fn verify(artifact: &Artifact) -> std::result::Result<(), String> {
             path,
             events,
             source,
-            ..
+            shape,
         } => {
             let Ok(text) = std::fs::read_to_string(path) else {
                 return Err(format!("{} unreadable", path.display()));
@@ -821,7 +821,9 @@ fn verify(artifact: &Artifact) -> std::result::Result<(), String> {
             // Every expected event must still carry an argus entry, so
             // stripping one event's wiring is caught, not just wiping the file.
             let mut missing: Vec<&str> = Vec::new();
+            let mut altered: Vec<&str> = Vec::new();
             let mut commands: BTreeSet<&str> = BTreeSet::new();
+            let cmd = hook_command(source, None, CmdStyle::Shell);
             for ev in *events {
                 let ours: Vec<&Value> = hooks[ev.name]
                     .as_array()
@@ -830,6 +832,17 @@ fn verify(artifact: &Artifact) -> std::result::Result<(), String> {
                 if ours.is_empty() {
                     missing.push(ev.name);
                     continue;
+                }
+                // Present is not the same as intact. Everything about the
+                // entry past its existence decides whether the event is
+                // captured the way this argus means it to be — the arguments
+                // after the program name choose which adapter parses it, and
+                // `timeout: 0` is a hook that is wired and never completes.
+                // Neither shows up as a missing entry or an unresolvable
+                // program, so without this both read as "wired".
+                let want = hook_entry(*shape, &cmd, ev);
+                if ours.len() != 1 || *ours[0] != want {
+                    altered.push(ev.name);
                 }
                 for entry in ours {
                     for h in entry["hooks"].as_array().into_iter().flatten() {
@@ -846,6 +859,17 @@ fn verify(artifact: &Artifact) -> std::result::Result<(), String> {
             // reports once rather than twenty times.
             for c in commands {
                 check_command(c)?;
+            }
+            // Reported after the command check, which is the more actionable
+            // of the two when both fire: a program that cannot run says which
+            // path is wrong, where this only says the entry is not ours.
+            if !altered.is_empty() {
+                return Err(format!(
+                    "hooks altered: {} — not what this argus writes; re-run `argus install` \
+                     (Codex records trust against a hook's current hash, so a changed hook \
+                     is skipped until re-trusted via `/hooks`)",
+                    altered.join(",")
+                ));
             }
             Ok(())
         }
@@ -1327,15 +1351,19 @@ mod tests {
         const EVENTS: &[HookEvent] = &[HookEvent::new("Stop", false)];
         let dir = tempfile::tempdir().unwrap();
         let exe = fake_binary(dir.path(), "argus");
+        // `verify` now compares the entry against the one install would write,
+        // so the command has to come from the same place install gets it —
+        // a hand-typed equivalent would read as altered and mask the failure
+        // this test is about.
+        unsafe {
+            std::env::set_var(BIN_ENV, &exe);
+        }
         let settings = dir.path().join("settings.json");
-        let cmd = hook_command_for(&exe.to_string_lossy(), "claude-code", None, CmdStyle::Shell);
+        let cmd = hook_command("claude-code", None, CmdStyle::Shell);
         std::fs::write(
             &settings,
             json!({
-                "hooks": { "Stop": [{
-                    "hooks": [{ "type": "command", "command": cmd }],
-                    MARKER_KEY: true,
-                }]}
+                "hooks": { "Stop": [hook_entry(HookShape::CommandArray, &cmd, &EVENTS[0])] }
             })
             .to_string(),
         )

