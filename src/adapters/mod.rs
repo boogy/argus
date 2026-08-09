@@ -39,6 +39,12 @@ pub fn extract_files_for_tool(tool: &str, input: &Value) -> Vec<String> {
             out.extend(extract_patch_files(s));
         }
     }
+    // Sort before dedup: `dedup` only drops *adjacent* duplicates, and the two
+    // sources here interleave — an `apply_patch` naming `a.rs` in `file_path`
+    // and again in a patch header that also touches `b.rs` yields
+    // `[a.rs, b.rs, a.rs]`, which a bare `dedup` leaves alone. A file counted
+    // twice inflates every "how often was this touched" query.
+    out.sort();
     out.dedup();
     out
 }
@@ -163,6 +169,21 @@ mod tests {
         assert_eq!(
             extract_files_for_tool("apply_patch", &patch_input),
             vec!["lib/z.py".to_string()]
+        );
+    }
+
+    /// The same path reached through both sources — a path key and a patch
+    /// header — must be counted once. It arrives non-adjacent whenever the
+    /// patch touches anything else first, which is the ordinary case.
+    #[test]
+    fn a_file_named_twice_is_listed_once() {
+        let input = serde_json::json!({
+            "file_path": "src/a.rs",
+            "patch": "*** Update File: src/b.rs\n@@\n*** Update File: src/a.rs\n@@",
+        });
+        assert_eq!(
+            extract_files_for_tool("apply_patch", &input),
+            vec!["src/a.rs".to_string(), "src/b.rs".to_string()]
         );
     }
 

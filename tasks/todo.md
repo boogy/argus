@@ -867,6 +867,16 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
     the same mechanism-vs-wiring gap as T8e/T9b/T10b. `tests/fixtures.rs` now
     asserts every claude-code fixture's `hook_event_name` appears in `EVENTS`.
 
+  - [x] **T10f** — `extract_files_for_tool` deduped without sorting. Files:
+    `src/adapters/mod.rs`
+    `Vec::dedup` only drops *adjacent* duplicates, and the two sources here
+    interleave: an `apply_patch` naming `a.rs` in `file_path` and again in a
+    patch header that also touches `b.rs` yields `[a.rs, b.rs, a.rs]`, which a
+    bare `dedup` leaves alone. Its two siblings, `extract_net_for_tool` and
+    `extract_fqdns`, both sorted already — this one was the odd one out. A file
+    counted twice inflates every "how often was this touched" query, which is
+    the query the `files` array exists to answer. One mutation, bites.
+
 - [ ] **T11** — Codex parity. Dependency: T4, T5.
   Files: `src/adapters/codex.rs`, `src/harness/codex.rs`, `src/integrity.rs`
 
