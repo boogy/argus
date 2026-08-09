@@ -29,6 +29,25 @@ fn meta_of(p: &Value) -> Meta {
     }
 }
 
+/// `Stop`, `SubagentStop` and `StopFailure` all carry the turn's last assistant
+/// message under the same name and behind the same capture flag. Kept in one
+/// place so a third caller cannot quietly forget the flag.
+fn push_last_message(
+    events: &mut Vec<Event>,
+    p: &Value,
+    capture: &CaptureCfg,
+    mk: &impl Fn(EventKind) -> Event,
+) {
+    if capture.assistant_messages
+        && let Some(text) = p.get("last_assistant_message").and_then(Value::as_str)
+        && !text.is_empty()
+    {
+        events.push(mk(EventKind::AssistantMessage {
+            text: cap_text(text, capture.max_field_bytes),
+        }));
+    }
+}
+
 /// Shared parser for Claude-shaped hook payloads (`hook_event_name` +
 /// snake_case fields). Codex's hooks system emits the same shape, so the
 /// codex adapter delegates here with `source = "codex"`.
@@ -155,14 +174,7 @@ pub(crate) fn parse_hook(source: &'static str, p: &Value, capture: &CaptureCfg) 
                 action: hook.into(),
                 detail: Value::Null,
             })];
-            if capture.assistant_messages
-                && let Some(text) = p.get("last_assistant_message").and_then(Value::as_str)
-                && !text.is_empty()
-            {
-                events.push(mk(EventKind::AssistantMessage {
-                    text: cap_text(text, max),
-                }));
-            }
+            push_last_message(&mut events, p, capture, &mk);
             events
         }
         "SessionStart" => vec![mk(EventKind::Session {
@@ -187,13 +199,20 @@ pub(crate) fn parse_hook(source: &'static str, p: &Value, capture: &CaptureCfg) 
         // `authentication_failed`, `invalid_request`, …) — and `error_details`
         // is the prose. Reading them the other way round put an enum variant
         // where the message goes and left the context always "unknown".
-        "StopFailure" => vec![mk(EventKind::Error {
-            message: cap_text(
-                p.get("error_details").and_then(Value::as_str).unwrap_or(""),
-                max,
-            ),
-            context: s(p, "error").unwrap_or_else(|| "unknown".into()),
-        })],
+        "StopFailure" => {
+            let mut events = vec![mk(EventKind::Error {
+                message: cap_text(
+                    p.get("error_details").and_then(Value::as_str).unwrap_or(""),
+                    max,
+                ),
+                context: s(p, "error").unwrap_or_else(|| "unknown".into()),
+            })];
+            // A turn that ended in an error still says what the model had got
+            // to before it did — and that half-finished message is the part
+            // that says what the turn was *trying* to do.
+            push_last_message(&mut events, p, capture, &mk);
+            events
+        }
         "ConfigChange" => vec![mk(EventKind::FileChange {
             path: s(p, "file_path").unwrap_or_default(),
             action: format!(
@@ -489,6 +508,15 @@ mod tests {
                 .iter()
                 .any(|e| matches!(&e.kind, EventKind::AssistantMessage { .. }))
         );
+
+        // A turn that ended with no assistant text must not produce an empty
+        // message event: a blank row reads as "the model said nothing", which
+        // is a claim, where no row at all is the absence of one.
+        let events = adapters::parse(
+            env(json!({"hook_event_name": "Stop", "last_assistant_message": ""})),
+            &CaptureCfg::default(),
+        );
+        assert_eq!(events.len(), 1, "{:?}", events);
     }
 
     #[test]
@@ -746,6 +774,32 @@ mod tests {
             Some("toolu_01AbCdEfGhIjKlMnOpQrStUv")
         );
         assert_eq!(pre[0].meta.tool_use_id, post[0].meta.tool_use_id);
+    }
+
+    /// A turn that ended in an error still says what the model had got to; that
+    /// half-finished message is what says what the turn was trying to do.
+    #[test]
+    fn a_failed_turn_still_reports_its_last_assistant_message() {
+        let events = from_fixture("StopFailure");
+        assert!(matches!(&events[0].kind, EventKind::Error { .. }));
+        assert!(
+            matches!(&events[1].kind,
+                EventKind::AssistantMessage { text } if text == "Retrying the request."),
+            "{:?}",
+            events.iter().map(|e| &e.kind).collect::<Vec<_>>()
+        );
+
+        // And it is the same flag that gates it on the success path — a third
+        // caller that forgot would leak content the operator switched off.
+        let off = CaptureCfg {
+            assistant_messages: false,
+            ..CaptureCfg::default()
+        };
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/claude-code/StopFailure.json");
+        let envelope: Envelope =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(adapters::parse(envelope, &off).len(), 1);
     }
 
     /// A duration exists only once the call has run, and an interruption is a

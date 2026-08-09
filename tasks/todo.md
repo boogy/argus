@@ -823,6 +823,18 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
     stopped-by-a-human flag cannot carry a secret.
     Five mutations, all bit — including one asserting the *absence* of the two
     attributes on a `pre` leg, which is the half a "does it export?" test misses.
+  - [x] **T10d** — `StopFailure` surfaces `last_assistant_message`. Files:
+    `src/adapters/claude_code.rs`
+    The payload has carried it all along and only `Stop`/`SubagentStop` read it,
+    so a turn that ended in an error lost the half-finished message that says
+    what the turn was *trying* to do — which is the part worth having when the
+    turn failed. All three now go through one `push_last_message`, so a third
+    caller cannot quietly forget the `assistant_messages` capture flag.
+    Three mutations. Two bit immediately. The third — deleting the
+    `!text.is_empty()` guard — did **not**, and that guard predates this change:
+    nothing anywhere asserted that an empty `last_assistant_message` produces no
+    event. It does now, and the mutation bites. A blank message row reads as
+    "the model said nothing", which is a claim; no row is the absence of one.
 
 - [ ] **T11** — Codex parity. Dependency: T4, T5.
   Files: `src/adapters/codex.rs`, `src/harness/codex.rs`, `src/integrity.rs`
