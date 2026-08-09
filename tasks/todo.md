@@ -750,6 +750,44 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
 
 - [ ] **T10** — Claude Code field-mismatch fixes. Dependency: T4, T5.
   Files: `src/adapters/claude_code.rs`, `src/adapters/mod.rs`, `src/harness/claude_code.rs`
+  Split under the sizing rule: T10a wrong field names on the non-tool arms,
+  T10b tool-arm extras, T10c `effort.level` into `Meta`, T10d the three
+  unwired hooks, T10e `extract_files_for_tool`'s sortless `dedup`.
+  - [x] **T10a** — Wrong field names on the non-tool arms. Files:
+    `src/adapters/claude_code.rs`, five new `tests/fixtures/claude-code/*.json`
+    The plan's finding table was derived from the published hook docs. Those
+    docs disagree with the shipping product, so the names came instead from the
+    payload constructors and Zod schemas inside the installed Claude Code binary
+    (2.1.224) — `grep -a -o` over the bundled JS.
+    Against that ground truth three of the plan's six claimed mismatches are not
+    bugs in this version: `PreCompact`/`PostCompact` really do send `trigger`
+    (not `triggered_by`), `CwdChanged` really does send `old_cwd`/`new_cwd` (not
+    `directory`), and `SubagentStart`'s `agent_id`/`agent_type` are already in
+    `Meta`. `models[]` is compiled out of 2.1.224 entirely.
+    Four that are real, all fixed here:
+    - `StopFailure` was read backwards. `error` is the *type* — an enum
+      (`rate_limit`, `authentication_failed`, `invalid_request`, …) — and
+      `error_details` is the prose. We were putting the enum variant where the
+      message goes and leaving `context` permanently `"unknown"`.
+    - `ConfigChange` read `path`; the payload says `file_path`. Not in the
+      plan's table at all — found only because the binary was consulted.
+    - `InstructionsLoaded` read `path`/`reason`; the payload says
+      `file_path`/`memory_type`, and the tier is the finding: a `Managed`
+      instructions file is administrator-controlled, a `Local` one is not, so
+      the tier now rides in the action as `instructions_loaded:<tier>`.
+    - `TaskCreated`/`TaskCompleted` are flat and carry no `status` (the status
+      is the hook name), with `task_subject`/`task_description` and
+      `teammate_name`/`team_name` for who it was handed to — not the nested
+      `task.*` object the plan assumed.
+    The new tests parse committed fixtures rather than inline literals: a
+    fixture is what a real recording overwrites, so a payload that renames a
+    field fails here instead of silently emptying a column in production.
+    Five mutations, all bit: each of the four corrected names reverted one at a
+    time, plus re-nesting the task fields. `ConfigChange`'s path was caught only
+    by the new fixture test — the pre-existing test asserts its `action` and
+    never looked at `path`, which is how the bug survived this long.
+    Deferred on purpose: capping `task_description` waits for T17, the
+    truncation rework.
 
 - [ ] **T11** — Codex parity. Dependency: T4, T5.
   Files: `src/adapters/codex.rs`, `src/harness/codex.rs`, `src/integrity.rs`

@@ -1,0 +1,15 @@
+{
+  "source": "claude-code",
+  "received_at": "2026-01-01T00:00:00Z",
+  "payload": {
+    "session_id": "sess-claude-001",
+    "cwd": "/Users/dev/project",
+    "transcript_path": "/Users/dev/.claude/projects/project/sess-claude-001.jsonl",
+    "permission_mode": "default",
+    "effort": { "level": "high" },
+    "hook_event_name": "StopFailure",
+    "error": "rate_limit",
+    "error_details": "429 from the API after 3 retries",
+    "last_assistant_message": "Retrying the request."
+  }
+}

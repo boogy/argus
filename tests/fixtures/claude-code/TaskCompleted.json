@@ -1,0 +1,17 @@
+{
+  "source": "claude-code",
+  "received_at": "2026-01-01T00:00:00Z",
+  "payload": {
+    "session_id": "sess-claude-001",
+    "cwd": "/Users/dev/project",
+    "transcript_path": "/Users/dev/.claude/projects/project/sess-claude-001.jsonl",
+    "permission_mode": "default",
+    "effort": { "level": "high" },
+    "hook_event_name": "TaskCompleted",
+    "task_id": "task-42",
+    "task_subject": "Add a regression test for the retry path",
+    "task_description": "Cover the 503 case in export_once.",
+    "teammate_name": "reviewer",
+    "team_name": "argus"
+  }
+}

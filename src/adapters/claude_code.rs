@@ -25,6 +25,11 @@ fn meta_of(p: &Value) -> Meta {
 /// Shared parser for Claude-shaped hook payloads (`hook_event_name` +
 /// snake_case fields). Codex's hooks system emits the same shape, so the
 /// codex adapter delegates here with `source = "codex"`.
+///
+/// Field names here are taken from the payload constructors and Zod schemas
+/// inside the installed Claude Code binary (2.1.224), not from the published
+/// hook docs — the two disagree, and a name that disagrees costs an
+/// always-empty field that looks exactly like an event that never fired.
 pub(crate) fn parse_hook(source: &'static str, p: &Value, capture: &CaptureCfg) -> Vec<Event> {
     let session_id = s(p, "session_id");
     let cwd = s(p, "cwd");
@@ -163,23 +168,35 @@ pub(crate) fn parse_hook(source: &'static str, p: &Value, capture: &CaptureCfg) 
             tokens_before: p.get("tokens_before").and_then(Value::as_u64),
             tokens_after: p.get("tokens_after").and_then(Value::as_u64),
         })],
+        // `error` is the *type* — one of an enum (`rate_limit`,
+        // `authentication_failed`, `invalid_request`, …) — and `error_details`
+        // is the prose. Reading them the other way round put an enum variant
+        // where the message goes and left the context always "unknown".
         "StopFailure" => vec![mk(EventKind::Error {
             message: cap_text(
-                p.get("error_message").and_then(Value::as_str).unwrap_or(""),
+                p.get("error_details").and_then(Value::as_str).unwrap_or(""),
                 max,
             ),
-            context: s(p, "error_type").unwrap_or_else(|| "unknown".into()),
+            context: s(p, "error").unwrap_or_else(|| "unknown".into()),
         })],
         "ConfigChange" => vec![mk(EventKind::FileChange {
-            path: s(p, "path").unwrap_or_default(),
+            path: s(p, "file_path").unwrap_or_default(),
             action: format!(
                 "config_changed:{}",
                 p.get("source").and_then(Value::as_str).unwrap_or("unknown")
             ),
         })],
+        // `memory_type` is the tier the file came from (`User`, `Project`,
+        // `Local`, `Managed`). Which tier is the finding: a `Managed`
+        // instructions file is administrator-controlled, a `Local` one is not.
         "InstructionsLoaded" => vec![mk(EventKind::FileChange {
-            path: s(p, "path").unwrap_or_default(),
-            action: "instructions_loaded".into(),
+            path: s(p, "file_path").unwrap_or_default(),
+            action: format!(
+                "instructions_loaded:{}",
+                p.get("memory_type")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown")
+            ),
         })],
         "CwdChanged" => vec![mk(EventKind::Session {
             action: hook.into(),
@@ -188,12 +205,17 @@ pub(crate) fn parse_hook(source: &'static str, p: &Value, capture: &CaptureCfg) 
                 "new_cwd": p.get("new_cwd").cloned().unwrap_or(Value::Null),
             }),
         })],
+        // The payload is flat, not a nested `task` object, and carries no
+        // `status` — the status is the hook name. `teammate_name`/`team_name`
+        // are who the task was handed to.
         "TaskCreated" | "TaskCompleted" => vec![mk(EventKind::Session {
             action: hook.into(),
             detail: json!({
-                "task": p.get("task").cloned().unwrap_or(Value::Null),
                 "task_id": p.get("task_id").cloned().unwrap_or(Value::Null),
-                "status": p.get("status").cloned().unwrap_or(Value::Null),
+                "task_subject": p.get("task_subject").cloned().unwrap_or(Value::Null),
+                "task_description": p.get("task_description").cloned().unwrap_or(Value::Null),
+                "teammate_name": p.get("teammate_name").cloned().unwrap_or(Value::Null),
+                "team_name": p.get("team_name").cloned().unwrap_or(Value::Null),
             }),
         })],
         _ => vec![mk(EventKind::Raw { payload: p.clone() })],
@@ -528,8 +550,8 @@ mod tests {
 
         let events = adapters::parse(
             env(
-                json!({"hook_event_name": "StopFailure", "error_type": "rate_limit",
-                       "error_message": "429"}),
+                json!({"hook_event_name": "StopFailure", "error": "rate_limit",
+                       "error_details": "429"}),
             ),
             &CaptureCfg::default(),
         );
@@ -539,7 +561,7 @@ mod tests {
         let events = adapters::parse(
             env(
                 json!({"hook_event_name": "ConfigChange", "source": "user_settings",
-                       "path": "/h/.claude/settings.json"}),
+                       "file_path": "/h/.claude/settings.json"}),
             ),
             &CaptureCfg::default(),
         );
@@ -548,13 +570,14 @@ mod tests {
 
         let events = adapters::parse(
             env(
-                json!({"hook_event_name": "InstructionsLoaded", "path": "/r/CLAUDE.md",
-                       "reason": "session_start"}),
+                json!({"hook_event_name": "InstructionsLoaded", "file_path": "/r/CLAUDE.md",
+                       "memory_type": "Project"}),
             ),
             &CaptureCfg::default(),
         );
         assert!(matches!(&events[0].kind,
-            EventKind::FileChange { path, action } if path == "/r/CLAUDE.md" && action == "instructions_loaded"));
+            EventKind::FileChange { path, action }
+                if path == "/r/CLAUDE.md" && action == "instructions_loaded:Project"));
 
         let events = adapters::parse(
             env(json!({"hook_event_name": "CwdChanged", "old_cwd": "/a", "new_cwd": "/b"})),
@@ -619,5 +642,80 @@ mod tests {
             &CaptureCfg::default(),
         );
         assert!(matches!(&events[0].kind, EventKind::Raw { .. }));
+    }
+
+    /// Parse the committed fixture rather than an inline literal: a fixture is
+    /// what a real recording overwrites, so a payload that renames a field
+    /// fails here instead of silently emptying a column in production.
+    fn from_fixture(name: &str) -> Vec<crate::event::Event> {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/claude-code")
+            .join(format!("{name}.json"));
+        let text =
+            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        let envelope: Envelope = serde_json::from_str(&text).unwrap();
+        adapters::parse(envelope, &CaptureCfg::default())
+    }
+
+    fn file_change(name: &str) -> (String, String) {
+        let events = from_fixture(name);
+        let EventKind::FileChange { path, action } = &events[0].kind else {
+            panic!("{name} is not a FileChange: {:?}", events[0].kind)
+        };
+        (path.clone(), action.clone())
+    }
+
+    /// The payload calls it `file_path`; reading `path` left every one of these
+    /// with an empty path, which downstream is indistinguishable from a hook
+    /// that never fired.
+    #[test]
+    fn instructions_loaded_carries_its_file_and_tier() {
+        let (path, action) = file_change("InstructionsLoaded");
+        assert_eq!(path, "/Users/dev/project/CLAUDE.md");
+        // The tier is the finding: Managed is administrator-controlled, Local
+        // is not.
+        assert_eq!(action, "instructions_loaded:Project");
+    }
+
+    #[test]
+    fn a_config_change_carries_the_file_that_changed() {
+        let (path, action) = file_change("ConfigChange");
+        assert_eq!(path, "/Users/dev/project/.claude/settings.json");
+        assert_eq!(action, "config_changed:projectSettings");
+    }
+
+    /// `error` is the enum variant and `error_details` the prose. Swapped, the
+    /// context was always "unknown" and the message always empty.
+    #[test]
+    fn a_stop_failure_separates_the_error_type_from_its_prose() {
+        let events = from_fixture("StopFailure");
+        let EventKind::Error { message, context } = &events[0].kind else {
+            panic!("{:?}", events[0].kind)
+        };
+        assert_eq!(context, "rate_limit");
+        assert_eq!(message, "429 from the API after 3 retries");
+    }
+
+    /// The payload is flat and carries no `status`; the hook name is the status.
+    #[test]
+    fn a_task_event_carries_the_flat_task_fields() {
+        for hook in ["TaskCreated", "TaskCompleted"] {
+            let events = from_fixture(hook);
+            let EventKind::Session { action, detail } = &events[0].kind else {
+                panic!("{hook}: {:?}", events[0].kind)
+            };
+            assert_eq!(action, hook);
+            assert_eq!(detail["task_id"], "task-42");
+            assert_eq!(
+                detail["task_subject"],
+                "Add a regression test for the retry path"
+            );
+            assert_eq!(
+                detail["task_description"],
+                "Cover the 503 case in export_once."
+            );
+            assert_eq!(detail["teammate_name"], "reviewer");
+            assert_eq!(detail["team_name"], "argus");
+        }
     }
 }
