@@ -13,6 +13,10 @@ pub const EVENTS: &[&str] = &[
     "sessionStart",
     "sessionEnd",
     "userPromptSubmitted",
+    // What was actually sent, after every hook and policy in the chain had a
+    // turn at it. Without this the record shows only what the user typed, and
+    // an instruction spliced in on their behalf leaves no trace anywhere.
+    "userPromptTransformed",
     "preToolUse",
     "postToolUse",
     "postToolUseFailure",

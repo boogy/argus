@@ -139,6 +139,16 @@ impl Redactor {
             EventKind::Prompt { text } | EventKind::AssistantMessage { text } => {
                 self.scrub_in_place(text)
             }
+            // Both halves are prompt text and both can carry a secret — the
+            // rewritten one especially, since whatever a policy hook splices in
+            // is not something the user chose to type.
+            EventKind::PromptTransformed {
+                original,
+                transformed,
+            } => {
+                self.scrub_in_place(original);
+                self.scrub_in_place(transformed);
+            }
             EventKind::ToolUse {
                 tool: _,
                 phase: _,
@@ -287,6 +297,17 @@ mod tests {
             crate::event::EventKind::Session {
                 action: "SessionEnd".into(),
                 detail: serde_json::json!({"reason": format!("had {secret}")}),
+            },
+            // Listed twice on purpose: an arm that scrubs one half and forgets
+            // the other still passes with a single case, and the rewritten
+            // half is the one a policy hook — not the user — authored.
+            crate::event::EventKind::PromptTransformed {
+                original: format!("deploy with {secret}"),
+                transformed: "deploy".into(),
+            },
+            crate::event::EventKind::PromptTransformed {
+                original: "deploy".into(),
+                transformed: format!("deploy using {secret}"),
             },
             crate::event::EventKind::ToolUse {
                 tool: "Bash".into(),

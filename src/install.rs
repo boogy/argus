@@ -500,6 +500,7 @@ mod tests {
             "sessionStart",
             "sessionEnd",
             "userPromptSubmitted",
+            "userPromptTransformed",
             "preToolUse",
             "postToolUse",
             "postToolUseFailure",

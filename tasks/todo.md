@@ -988,6 +988,37 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
 
 - [ ] **T12** — Copilot parity. Dependency: T4, T5.
   Files: `src/adapters/copilot.rs`, `src/harness/copilot.rs`
+  Split per the plan's sizing rule into four independent behavioral changes:
+  T12a `userPromptTransformed`, T12b `disableAllHooks` detection in `check`,
+  T12c the unmapped payload fields, T12d per-event `timeoutSec`. Copilot CLI is
+  **not installed on this machine**, so every payload assertion is doc-derived
+  from <https://docs.github.com/en/copilot/reference/hooks-reference> and
+  <https://docs.github.com/en/copilot/reference/hooks-configuration>.
+  - [x] **T12a** — Capture the prompt as rewritten en route. Files:
+    `src/event.rs`, `src/redact.rs`, `src/export.rs`,
+    `src/adapters/copilot.rs`, `src/harness/copilot.rs`, `src/install.rs`,
+    `tests/fixtures.rs`, new `tests/fixtures/copilot/userPromptTransformed.json`
+    `userPromptTransformed` reports what was actually sent to the model after
+    every hook, plugin and enterprise policy in the chain had a turn at editing
+    it. An instruction spliced in there is invisible in every other record of
+    the session: the user never typed it, and the transcript shows only the
+    model obeying it.
+    New `EventKind::PromptTransformed { original, transformed }` rather than
+    reusing `Prompt`, because the two answer different questions and an audit
+    trail needs both. Both halves come from the one payload, so the comparison
+    needs no join and does not depend on `userPromptSubmitted` having fired;
+    both are redacted, and `capture.prompts = false` suppresses both — half of
+    a suppressed pair is still the prompt. Export carries a `prompt.rewritten`
+    attribute so a SIEM alerts on the edit without diffing two prompt bodies
+    per turn.
+    Six mutations, all bite, and the redaction one is listed twice on purpose:
+    an arm that scrubs `original` and forgets `transformed` passes with a
+    single case. Dropping the subscription first failed only the install test —
+    the fixtures wiring test read `hook_event_name`, and Copilot names its
+    event in `envelope.event` instead (its native payloads carry no event
+    field, which is why install passes `--event`). That test now consults both,
+    which brings every Copilot and opencode fixture under it for the first
+    time.
 
 - [ ] **T13** — opencode + shared TS transport. Dependency: T4, T5.
   Files: `plugins/opencode/argus.ts` + new shared TS transport, `src/adapters/opencode.rs`, `src/harness/opencode.rs`

@@ -92,6 +92,20 @@ pub enum EventKind {
     Prompt {
         text: String,
     },
+    /// Something between the user and the model rewrote the prompt.
+    ///
+    /// Kept separate from [`EventKind::Prompt`] rather than replacing it,
+    /// because the two answer different questions and an audit trail needs
+    /// both: what the human asked for, and what was actually sent on their
+    /// behalf. A hook, a plugin or an enterprise policy sits in that gap, and
+    /// an instruction inserted there is invisible in every other record of the
+    /// session — the user never typed it and the transcript shows the model
+    /// obeying it. Both halves ride in one event so the comparison needs no
+    /// join and survives the other hook not firing.
+    PromptTransformed {
+        original: String,
+        transformed: String,
+    },
     AssistantMessage {
         text: String,
     },

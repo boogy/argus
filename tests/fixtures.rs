@@ -99,12 +99,19 @@ fn every_fixture_parses_into_a_recognised_event() {
 /// not in that list is dead code that looks, from every query afterwards, like
 /// a hook that simply never fires.
 ///
-/// Only the two `hook_event_name` harnesses are checked here. Codex also
-/// receives `notify` and OTLP payloads, which arrive by other routes and carry
-/// no hook name — those fixtures are skipped rather than failed.
+/// Copilot names the event in `envelope.event` rather than the payload — its
+/// native camelCase payloads carry no event field at all, which is why install
+/// passes `--event <name>` — so both places are consulted. Codex also receives
+/// `notify` and OTLP payloads, which arrive by other routes and name no hook;
+/// harnesses and fixtures with no name are skipped rather than failed.
 #[test]
 fn every_hook_we_parse_is_a_hook_we_subscribe_to() {
     let wired = |source: &str| -> Vec<&'static str> {
+        // Copilot's list is plain strings; the other two carry a per-event
+        // timeout alongside the name.
+        if source == "copilot" {
+            return argus::harness::copilot::EVENTS.to_vec();
+        }
         let events = match source {
             "claude-code" => argus::harness::claude_code::EVENTS,
             "codex" => argus::harness::codex::EVENTS,
@@ -114,7 +121,11 @@ fn every_hook_we_parse_is_a_hook_we_subscribe_to() {
     };
     for path in fixtures() {
         let envelope = load(&path);
-        let Some(hook) = envelope.payload["hook_event_name"].as_str() else {
+        let Some(hook) = envelope
+            .event
+            .as_deref()
+            .or_else(|| envelope.payload["hook_event_name"].as_str())
+        else {
             continue;
         };
         let wired = wired(&envelope.source);

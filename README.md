@@ -49,6 +49,7 @@ argus captures everything each surface offers.
 | Signal                      |        Claude Code         |       opencode        |          Codex          |    Copilot CLI    |
 | --------------------------- | :------------------------: | :-------------------: | :---------------------: | :---------------: |
 | Prompts                     |             Y              |           Y           |            Y            |         Y         |
+| Prompt rewritten en route    |             —              |           —           |            —            | Y (userPromptTransformed) |
 | Assistant messages          |          Y (Stop)          |           Y           |      Y (Stop hook)      |         —         |
 | Tool use (pre/post)         |             Y              |           Y           |            Y            |         Y         |
 | Tool outputs                |             Y              |           Y           |            Y            |         Y         |
@@ -64,6 +65,16 @@ argus captures everything each surface offers.
 | Config/instructions changes |             Y              |           —           |            —            |         —         |
 | Directory scope changes     |        Y (/add-dir)        |           —           |            —            |         —         |
 | Session lifecycle           |             Y              |           Y           |            Y            |         Y         |
+
+Copilot's `userPromptTransformed` is the one row with no equivalent elsewhere,
+and the reason it is wired: it reports what was *actually* sent to the model
+after every hook, plugin and enterprise policy in the chain had a turn at
+editing it. An instruction spliced in there appears nowhere else — the user
+never typed it, and the transcript just shows the model obeying it. Both halves
+ride in one `prompt_transformed` event (`original` and `transformed`, each
+redacted), with a `prompt.rewritten` attribute so a SIEM can alert on the edit
+without diffing two prompt bodies on every turn. `capture.prompts = false`
+suppresses both halves.
 
 Codex is wired three ways at once: its hooks system (`~/.codex/hooks.json`,
 Claude-compatible payloads — note new hooks need one-time trust via `/hooks`
