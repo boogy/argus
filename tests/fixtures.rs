@@ -98,18 +98,29 @@ fn every_fixture_parses_into_a_recognised_event() {
 /// writes exactly the hooks in `EVENTS`, so an adapter arm for a hook that is
 /// not in that list is dead code that looks, from every query afterwards, like
 /// a hook that simply never fires.
+///
+/// Only the two `hook_event_name` harnesses are checked here. Codex also
+/// receives `notify` and OTLP payloads, which arrive by other routes and carry
+/// no hook name — those fixtures are skipped rather than failed.
 #[test]
-fn every_claude_hook_we_parse_is_a_hook_we_subscribe_to() {
-    let wired: Vec<&str> = argus::harness::claude_code::EVENTS
-        .iter()
-        .map(|e| e.name)
-        .collect();
+fn every_hook_we_parse_is_a_hook_we_subscribe_to() {
+    let wired = |source: &str| -> Vec<&'static str> {
+        let events = match source {
+            "claude-code" => argus::harness::claude_code::EVENTS,
+            "codex" => argus::harness::codex::EVENTS,
+            _ => &[],
+        };
+        events.iter().map(|e| e.name).collect()
+    };
     for path in fixtures() {
         let envelope = load(&path);
-        if envelope.source != "claude-code" {
+        let Some(hook) = envelope.payload["hook_event_name"].as_str() else {
+            continue;
+        };
+        let wired = wired(&envelope.source);
+        if wired.is_empty() {
             continue;
         }
-        let hook = envelope.payload["hook_event_name"].as_str().unwrap();
         assert!(
             wired.contains(&hook),
             "{} parses {hook}, which install never subscribes to",

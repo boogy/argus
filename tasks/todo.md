@@ -879,6 +879,25 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
 
 - [ ] **T11** — Codex parity. Dependency: T4, T5.
   Files: `src/adapters/codex.rs`, `src/harness/codex.rs`, `src/integrity.rs`
+  Split under the sizing rule — three independent behavioral changes: T11a
+  `SessionEnd`, T11b kill-switch detection in `check`, T11c project-level
+  `<repo>/.codex/hooks.json`. Codex is **not installed on this machine**, so
+  every payload assertion stays doc-derived, as the plan requires.
+  - [x] **T11a** — Subscribe to Codex `SessionEnd`, timeout 3. Files:
+    `src/harness/codex.rs`, `src/harness/mod.rs`, `src/install.rs`,
+    `tests/fixtures.rs`, new `tests/fixtures/codex/SessionEnd.json`
+    The adapter already understood `SessionEnd` — it goes through the shared
+    Claude-shaped parser — so this was purely a missing subscription: a parser
+    arm nobody could reach. `HookEvent::with_timeout` is new; the default 10 s
+    is slack rather than a requirement (the shim gives up on the daemon after
+    250 ms and spools instead), and on a hook Codex runs while it is exiting
+    that slack is time the user spends watching the CLI refuse to quit.
+    Three mutations, all bite. Dropping the subscription fails two independent
+    tests — the install test, which spells the wired list out rather than
+    reading `EVENTS`, and the fixtures wiring test from T10e, now generalized
+    to every `hook_event_name` harness. `install.rs` never asserted a timeout
+    reached the file at all before this, so a per-event timeout would have
+    been a comment.
 
 - [ ] **T12** — Copilot parity. Dependency: T4, T5.
   Files: `src/adapters/copilot.rs`, `src/harness/copilot.rs`

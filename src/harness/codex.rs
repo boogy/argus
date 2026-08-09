@@ -12,6 +12,11 @@ use crate::event::{Envelope, Event};
 /// the Codex CLI).
 pub const EVENTS: &[HookEvent] = &[
     HookEvent::new("SessionStart", false),
+    // Codex runs this while it is shutting down, so its timeout is time the
+    // user spends watching the CLI refuse to exit. Three seconds is already
+    // more than ten times what the shim needs before it falls back to the
+    // spool, and an event lost at shutdown is the cheapest one to lose.
+    HookEvent::with_timeout("SessionEnd", false, 3),
     HookEvent::new("UserPromptSubmit", false),
     HookEvent::new("PreToolUse", true),
     HookEvent::new("PostToolUse", true),

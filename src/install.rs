@@ -194,25 +194,33 @@ mod tests {
         run(false).unwrap();
         let text = std::fs::read_to_string(home.path().join(".codex/hooks.json")).unwrap();
         let doc: serde_json::Value = serde_json::from_str(&text).unwrap();
-        for event in [
-            "SessionStart",
-            "UserPromptSubmit",
-            "PreToolUse",
-            "PostToolUse",
-            "PermissionRequest",
-            "SubagentStart",
-            "SubagentStop",
-            "Stop",
-            "PreCompact",
-            "PostCompact",
+        // Spelled out rather than read from `EVENTS`, so this states what
+        // should be wired instead of restating whatever is.
+        for (event, timeout) in [
+            ("SessionStart", 10),
+            ("SessionEnd", 3),
+            ("UserPromptSubmit", 10),
+            ("PreToolUse", 10),
+            ("PostToolUse", 10),
+            ("PermissionRequest", 10),
+            ("SubagentStart", 10),
+            ("SubagentStop", 10),
+            ("Stop", 10),
+            ("PreCompact", 10),
+            ("PostCompact", 10),
         ] {
             let arr = doc["hooks"][event].as_array().unwrap();
+            let ours: Vec<_> = arr
+                .iter()
+                .filter(|h| h.to_string().contains("argus"))
+                .collect();
+            assert_eq!(ours.len(), 1, "event {event}");
+            // `SessionEnd` runs while Codex is exiting, so its timeout is
+            // time the user watches the CLI hang. It has to reach the file:
+            // a per-event timeout nobody writes out is a comment.
             assert_eq!(
-                arr.iter()
-                    .filter(|h| h.to_string().contains("argus"))
-                    .count(),
-                1,
-                "event {event}"
+                ours[0]["hooks"][0]["timeout"], timeout,
+                "event {event} timeout"
             );
         }
     }

@@ -96,6 +96,18 @@ impl HookEvent {
             timeout: 10,
         }
     }
+
+    /// For events where the default is too patient. The shim gives up on the
+    /// daemon after 250 ms and spools instead, so no event needs seconds —
+    /// the default is slack, not a requirement, and on a shutdown hook that
+    /// slack is a delay the user watches.
+    pub const fn with_timeout(name: &'static str, matcher: bool, timeout: u64) -> Self {
+        Self {
+            name,
+            matcher,
+            timeout,
+        }
+    }
 }
 
 /// Layout of a hooks JSON file. Claude Code and Codex share one schema
