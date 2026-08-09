@@ -33,6 +33,20 @@ const BUS_FORWARD = new Set([
   "todo.updated",
   "server.connected",
   "installation.updated",
+  // A pty is a command with a pid that never passes through
+  // `tool.execute.*`. Everything argus knows about what a session ran comes
+  // from the tool hooks, so an interactive shell was the one way to run
+  // something and leave no trace here at all. `created` carries the command,
+  // its args and its cwd; `exited` carries the status. `pty.updated` and
+  // `pty.deleted` repeat those two with nothing added.
+  "pty.created",
+  "pty.exited",
+  // A message deleted from a live session. The transcript is the record, and
+  // this is the only notice that part of it stopped existing.
+  "message.removed",
+  // The branch under a running session. `cwd` is captured once at the event;
+  // which branch that path was on is what makes a file edit mean anything.
+  "vcs.branch.updated",
 ]);
 
 export const ArgusPlugin: Plugin = async (input) => {
@@ -102,12 +116,18 @@ export const ArgusPlugin: Plugin = async (input) => {
         return;
       }
       if (!event?.type || !BUS_FORWARD.has(event.type)) return;
+      const props = event.properties as any;
       send("opencode", {
         event: event.type,
         cwd,
+        // `properties.info.id` is the session id only on `session.*`, where
+        // `info` is the Session. Elsewhere `info` is whatever the event is
+        // about — on `pty.created` it is the pty — and the unqualified
+        // fallback would have filed a terminal's id as a session id, giving
+        // every pty a session of its own that nothing else ever joined.
         sessionID:
-          (event.properties as any)?.sessionID ??
-          (event.properties as any)?.info?.id,
+          props?.sessionID ??
+          (event.type.startsWith("session.") ? props?.info?.id : undefined),
         properties: event.properties,
       });
     },

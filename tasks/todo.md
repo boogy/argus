@@ -1275,11 +1275,37 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
     `vcs.branch.updated` — are T13g, because each needs a mapping decision
     rather than a list entry.
 
-  - [ ] **T13g** — forward the audited-in events: `pty.created`/`pty.exited`
-    (a shell with `command`, `args`, `cwd` and `pid` that never appears as a
-    tool call), `message.removed` (transcript edited after the fact),
-    `vcs.branch.updated` (the repo context a rule is scoped to changing
-    under a live session).
+  - [x] **T13g** — forward the events T13f's audit found missing. Files:
+    `plugins/opencode/argus.ts`, `src/adapters/opencode.rs`,
+    `tests/plugin/opencode_payload.mjs`, new
+    `tests/fixtures/opencode/pty.created.json` and
+    `tests/fixtures/opencode/vcs.branch.updated.json`, `README.md`.
+    `pty.created`/`pty.exited` are the reason this task exists. A pty is a
+    command with a pid that never passes through `tool.execute.*` — the one
+    way to run something in opencode and leave nothing in the tool record.
+    They map to a `pre`/`post` `ToolUse` pair joined by the pty's id, not to
+    a `Session` note: as a session note a terminal would be a command
+    execution invisible to every query about command executions, which is
+    the hole forwarding it was meant to close. FQDNs are scanned from the
+    program *and* its args joined — opencode splits them, so a host named in
+    `args` is invisible to a scan of `command` alone. A non-zero `exitCode`
+    becomes `error`; zero does not, and an absent code (`pty.created`) is
+    neither.
+    `message.removed` and `vcs.branch.updated` join the `Session` arm — the
+    first is the only notice that part of the transcript stopped existing,
+    the second says which branch the session's `cwd` was on.
+    The pty exposed a live bug in the plugin's generic forward:
+    `properties.info.id` was used as a session-id fallback unconditionally,
+    and `info` is the Session only on `session.*`. On a pty it is the
+    terminal, so every pty would have been filed under a session of its own
+    that nothing else ever joined. The fallback is now scoped to `session.*`.
+    Eleven mutations, all bite. Adapter: `info` not flattened, args not
+    scanned, exit 0 treated as failure, the pty id dropped, phase pinned to
+    `pre`, the arm made unreachable, and each of the two new `Session` names
+    removed (caught by `every_forwarded_bus_event_has_an_arm`, which was the
+    point of building it in T13f). Plugin: pty dropped from `BUS_FORWARD`,
+    the `info.id` fallback left unqualified, and the fallback removed
+    entirely — the last two proving the scope is pinned from both sides.
 
 - [ ] **T14** — pi.dev harness. Dependency: T4, T5.
   Files: new `src/adapters/pi.rs`, new `plugins/pi/argus.ts`, new `src/harness/pi.rs`

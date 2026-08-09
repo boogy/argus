@@ -66,6 +66,7 @@ argus captures everything each surface offers.
 | Directory scope changes     |        Y (/add-dir)        |           —           |            —            |         —         |
 | Session lifecycle           |             Y              |           Y           |            Y            |         Y         |
 | Model, tokens, cost per turn |             —              |  Y (message.updated)  |            —            |         —         |
+| Interactive shells (pty)    |             —              |  Y (created+exited)   |            —            |         —         |
 
 Copilot's `userPromptTransformed` is the one row with no equivalent elsewhere,
 and the reason it is wired: it reports what was *actually* sent to the model
@@ -292,6 +293,18 @@ extra_patterns = ["ACME-[0-9]{6}"]
   the plugin source and asserts each name reaches a real adapter arm, because
   the failure mode is silent: a forwarded event with no arm is not dropped, it
   arrives as an unqueryable blob that still counts as an event in every report.
+
+  The same audit added what was genuinely missing. A pty is a command with a
+  pid that never passes through `tool.execute.*` — the one way to run something
+  in opencode and leave no trace in the tool record — so `pty.created` and
+  `pty.exited` become a `pre`/`post` `ToolUse` pair joined by the pty's id,
+  with FQDNs scanned from the program *and* its arguments. As a session note
+  they would have been command executions invisible to every query about
+  command executions. `message.removed` is the only notice that part of the
+  transcript stopped existing, and `vcs.branch.updated` says which branch a
+  session's `cwd` was on, which is what makes a file edit mean anything.
+  `lsp.*`, `message.part.*`, `tui.*` and `installation.update-available` stay
+  out: high-frequency, UI-only, or a poll result rather than a state change.
 - **Daemon** (`argus daemon`) does everything else off that critical
   path: per-tool adapter parsing → secret redaction → durable SQLite buffering
   → batched OTLP/JSON export with exponential backoff. It also drains the

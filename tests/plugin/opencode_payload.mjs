@@ -62,6 +62,18 @@ await hooks["tool.execute.after"](
   { title: "ls", output: "a.ts", metadata: {} },
 );
 await hooks.event({ event: { type: "session.error", properties: { sessionID: "s1" } } });
+// `properties.info.id` is the session id on `session.*` and nothing like it
+// elsewhere. On a pty it is the terminal's id, and filing that as a session id
+// gives every terminal a session of its own that nothing else ever joins.
+await hooks.event({
+  event: {
+    type: "pty.created",
+    properties: { info: { id: "pty_1", command: "/bin/zsh", pid: 4242 } },
+  },
+});
+await hooks.event({
+  event: { type: "session.created", properties: { info: { id: "s1" } } },
+});
 // Not in BUS_FORWARD: forwarding every bus event would put the plugin on the
 // token-streaming hot path.
 await hooks.event({ event: { type: "message.part.updated", properties: {} } });
@@ -97,9 +109,9 @@ server.close();
 const problems = [];
 const by = (name) => received.find((e) => e.payload.event === name);
 
-if (received.length !== 5) {
+if (received.length !== 7) {
   problems.push(
-    `expected 5 envelopes, got ${received.length}: ` +
+    `expected 7 envelopes, got ${received.length}: ` +
       JSON.stringify(received.map((e) => e.payload.event)),
   );
 }
@@ -126,9 +138,16 @@ if (u) {
 for (const e of received) {
   if (e.source !== "opencode") problems.push(`${e.payload.event}: source ${e.source}`);
   if (e.payload.cwd !== CWD) problems.push(`${e.payload.event}: cwd ${e.payload.cwd}`);
-  if (e.payload.sessionID !== "s1") {
-    problems.push(`${e.payload.event}: sessionID ${e.payload.sessionID}`);
+  // Every event but the pty knows its session. `session.created` reports it
+  // only as `properties.info.id`, so that fallback has to stay.
+  const want = e.payload.event === "pty.created" ? undefined : "s1";
+  if (e.payload.sessionID !== want) {
+    problems.push(`${e.payload.event}: sessionID ${e.payload.sessionID} (want ${want})`);
   }
+}
+const pty = by("pty.created");
+if (pty && pty.payload.properties?.info?.id !== "pty_1") {
+  problems.push(`pty.created: properties ${JSON.stringify(pty.payload.properties)}`);
 }
 for (const name of ["tool.execute.before", "tool.execute.after"]) {
   const e = by(name);

