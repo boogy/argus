@@ -123,6 +123,8 @@ fn record(e: &Event) -> Value {
         ("agent.type", &e.meta.agent_type),
         ("permission.mode", &e.meta.permission_mode),
         ("llm.model", &e.meta.model),
+        ("tool.call.id", &e.meta.tool_use_id),
+        ("llm.effort", &e.meta.effort),
     ] {
         if let Some(v) = val
             && !attrs.iter().any(|a| a["key"] == *key)
@@ -356,6 +358,8 @@ mod tests {
             },
         );
         e.meta.agent_type = Some("Explore".into());
+        e.meta.tool_use_id = Some("toolu_01".into());
+        e.meta.effort = Some("high".into());
         let body = to_otlp_body(std::slice::from_ref(&e));
         let attrs = body["resourceLogs"][0]["scopeLogs"][0]["logRecords"][0]["attributes"].clone();
         let get = |k: &str| {
@@ -370,6 +374,9 @@ mod tests {
         assert_eq!(get("tool.name").as_deref(), Some("bash"));
         assert_eq!(get("permission.action").as_deref(), Some("requested"));
         assert_eq!(get("agent.type").as_deref(), Some("Explore"));
+        // A `Meta` field nobody exports is a field nobody can query.
+        assert_eq!(get("tool.call.id").as_deref(), Some("toolu_01"));
+        assert_eq!(get("llm.effort").as_deref(), Some("high"));
     }
 
     /// A gap must not ride the INFO firehose alongside the events it says are

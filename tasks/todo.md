@@ -788,6 +788,24 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
     never looked at `path`, which is how the bug survived this long.
     Deferred on purpose: capping `task_description` waits for T17, the
     truncation rework.
+  - [x] **T10b** — `Meta` gains `tool_use_id` and `effort`. Files:
+    `src/event.rs`, `src/adapters/claude_code.rs`, `src/export.rs`,
+    `tests/fixtures/claude-code/{Pre,Post}ToolUse.json`,
+    `docs/querying-local-database.md`
+    Both were in every Claude payload and neither was read. `tool_use_id` is
+    the only thing that pairs a `pre` with its `post` — two `Bash` calls in one
+    turn are otherwise indistinguishable, so a `pre` whose call hung or was
+    killed could not be told from one that completed. `effort` arrives as
+    `{"level": …}`, so the level is lifted out to keep `Meta` a flat string map;
+    it matters because it is a knob the *prompt* can move, and a session that
+    quietly drops to the cheapest setting before doing something sensitive is
+    worth being able to see.
+    The pairing test asserts the two legs share an id rather than that an id is
+    present — an id on only one leg pairs nothing.
+    Five mutations, all bit. Two of them were the mechanism-vs-wiring shape
+    again and target `export.rs`, not the adapter: a `Meta` field nobody exports
+    is a field nobody can query, so dropping either attribute from the OTLP
+    attribute list must fail, and does.
 
 - [ ] **T11** — Codex parity. Dependency: T4, T5.
   Files: `src/adapters/codex.rs`, `src/harness/codex.rs`, `src/integrity.rs`

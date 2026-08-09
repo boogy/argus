@@ -81,6 +81,8 @@ builds use `json_extract(body, '$.path')` — they are equivalent.
 | `$.meta.permission_mode` | e.g. `acceptEdits`                 |
 | `$.meta.model`           | model id in use                    |
 | `$.meta.transcript_path` | path to the tool's transcript file |
+| `$.meta.tool_use_id`     | id of one tool call; the `pre` and `post` rows of the same call share it |
+| `$.meta.effort`          | reasoning effort asked of the model this turn (e.g. `high`) |
 
 ### Per-kind fields (flattened at top level, discriminated by `$.type`)
 

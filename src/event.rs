@@ -50,6 +50,19 @@ pub struct Meta {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transcript_path: Option<String>,
+    /// The host tool's own id for one tool call. The pre-event and the
+    /// post-event of a single call carry the same one, which is the only way
+    /// to pair them: two `Bash` calls in a turn are otherwise indistinguishable,
+    /// so without this a `pre` that never got its `post` — a call that hung, or
+    /// was killed — cannot be told from one that completed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_use_id: Option<String>,
+    /// How hard the model was asked to think on this turn. Not a performance
+    /// note: it is a knob the *prompt* can move, so a session that quietly
+    /// drops to the cheapest setting before doing something sensitive is a
+    /// thing worth being able to see.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
 }
 
 impl Meta {

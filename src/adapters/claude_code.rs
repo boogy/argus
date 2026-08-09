@@ -19,6 +19,13 @@ fn meta_of(p: &Value) -> Meta {
         permission_mode: s(p, "permission_mode"),
         model: s(p, "model"),
         transcript_path: s(p, "transcript_path"),
+        tool_use_id: s(p, "tool_use_id"),
+        // `effort` is an object, `{"level": "high"}` — the level is the part
+        // worth carrying, and lifting it here keeps `Meta` a flat string map.
+        effort: p
+            .pointer("/effort/level")
+            .and_then(Value::as_str)
+            .map(String::from),
     }
 }
 
@@ -717,5 +724,34 @@ mod tests {
             assert_eq!(detail["teammate_name"], "reviewer");
             assert_eq!(detail["team_name"], "argus");
         }
+    }
+
+    /// The point of the id is that both legs of one call carry the *same* one.
+    /// An id present on only one leg pairs nothing, so assert the pairing, not
+    /// the presence.
+    #[test]
+    fn both_legs_of_one_tool_call_carry_the_same_id() {
+        let pre = from_fixture("PreToolUse");
+        let post = from_fixture("PostToolUse");
+        assert_eq!(
+            pre[0].meta.tool_use_id.as_deref(),
+            Some("toolu_01AbCdEfGhIjKlMnOpQrStUv")
+        );
+        assert_eq!(pre[0].meta.tool_use_id, post[0].meta.tool_use_id);
+    }
+
+    /// `effort` arrives as an object; `Meta` holds the level.
+    #[test]
+    fn the_effort_level_is_lifted_out_of_its_object() {
+        assert_eq!(
+            from_fixture("PreToolUse")[0].meta.effort.as_deref(),
+            Some("high")
+        );
+        // An `effort` that is not the expected shape must not become a level.
+        let events = adapters::parse(
+            env(json!({"hook_event_name": "SessionStart", "effort": "high"})),
+            &CaptureCfg::default(),
+        );
+        assert_eq!(events[0].meta.effort, None);
     }
 }
