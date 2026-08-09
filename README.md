@@ -250,6 +250,14 @@ extra_patterns = ["ACME-[0-9]{6}"]
   not resolve in someone else's config directory. The two halves are checked
   as one — `check` looks for a marker from each, and the plugin test runs the
   composed file rather than either fragment.
+
+  opencode discovers plugins under `plugin/` *or* `plugins/` — both spellings
+  are in its own documentation — so argus writes into whichever the config
+  directory already has, preferring the one that already holds an `argus.ts`.
+  A reinstall therefore updates the copy opencode is loading instead of
+  leaving a stale one in the other directory, and a first install joins the
+  user's plugins rather than creating a second, one-file collection beside
+  them. `check` and `uninstall` resolve the same way.
 - **Daemon** (`argus daemon`) does everything else off that critical
   path: per-tool adapter parsing → secret redaction → durable SQLite buffering
   → batched OTLP/JSON export with exponential backoff. It also drains the

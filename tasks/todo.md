@@ -1158,6 +1158,25 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
     FNV constants live in the transport. A fifth, compound, confirms the layers
     are independent: transport-only *with* the new marker removed passes
     `check` and is caught only by the driver.
+  - [x] **T13c** — Accept both `plugin/` and `plugins/`. Files:
+    `src/harness/opencode.rs`, `src/install.rs`, `README.md`.
+    Ground truth, not guesswork: the shipped opencode 1.18.10 binary carries
+    its own docs, and they say auto-discovery covers "any `*.ts` or `*.js`
+    file in `.opencode/plugin/` or `.opencode/plugins/`". argus wrote the
+    singular unconditionally, which put a second one-file directory beside a
+    user's populated `plugins/` — loaded fine, just not where its owner would
+    look for it.
+    `plugin_dir()` resolves in three passes: a directory already holding
+    `argus.ts` wins outright, then any existing directory, then the singular.
+    The first pass is the one that matters on a machine with both spellings —
+    that copy is the one opencode is loading, so updating the other would
+    leave the stale one running. Because `install`, `check` and `uninstall`
+    all go through `artifacts()`, they resolve identically; the probe reads
+    state install itself creates and uninstall removes last.
+    Four mutations, each caught by the test that names the case: always
+    singular (both new tests); drop the existing-`argus.ts` pass (reinstall);
+    drop the existing-directory pass (join-existing); default flipped to
+    plural (the three tests that assume the fresh-install path).
 
 - [ ] **T14** — pi.dev harness. Dependency: T4, T5.
   Files: new `src/adapters/pi.rs`, new `plugins/pi/argus.ts`, new `src/harness/pi.rs`

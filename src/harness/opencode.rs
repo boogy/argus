@@ -38,6 +38,37 @@ fn markers() -> Vec<String> {
     ]
 }
 
+/// opencode auto-discovers any `*.ts` or `*.js` under **either** `plugin/` or
+/// `plugins/` — its own bundled documentation names both spellings, and the
+/// installs in the wild are split between them. Writing the singular
+/// unconditionally is what put a second, near-empty `plugin/` directory next to
+/// a user's populated `plugins/`: harmless to opencode, confusing to the person
+/// who then went looking for the plugin in the directory they already had.
+///
+/// Order matters twice. An existing `argus.ts` wins outright, so a reinstall
+/// updates the file already being loaded instead of leaving a stale copy in the
+/// other spelling for opencode to keep running. Failing that, an existing
+/// directory wins, so argus joins the user's plugins rather than starting a
+/// second collection. Only a config directory with neither gets the singular,
+/// which is the spelling opencode's own docs list first.
+///
+/// This probes the filesystem, so `install`, `check` and `uninstall` agree only
+/// as long as they see the same directory — which they do: the choice is made
+/// from state that install itself creates and uninstall removes last.
+fn plugin_dir(config_home: &std::path::Path) -> std::path::PathBuf {
+    for name in ["plugin", "plugins"] {
+        if config_home.join(name).join("argus.ts").exists() {
+            return config_home.join(name);
+        }
+    }
+    for name in ["plugin", "plugins"] {
+        if config_home.join(name).is_dir() {
+            return config_home.join(name);
+        }
+    }
+    config_home.join("plugin")
+}
+
 /// XDG on Unix, `%APPDATA%` on Windows. Declaration order is install order:
 /// the first entry that matches the platform is where a first-time install
 /// writes, so the env-rooted location has to come first.
@@ -85,7 +116,7 @@ impl Harness for OpenCode {
             return Vec::new();
         }
         vec![Artifact::OwnedFile {
-            path: d.config_home.join("plugin/argus.ts"),
+            path: plugin_dir(&d.config_home).join("argus.ts"),
             contents: Cow::Owned(shim_source()),
             markers: markers(),
             // The plugin reaches the daemon over the socket and resolves the

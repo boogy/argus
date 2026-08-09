@@ -615,6 +615,66 @@ mod tests {
         assert!(oc.ok, "opencode has no baked-in binary path: {oc:?}");
     }
 
+    /// opencode discovers plugins under `plugin/` *or* `plugins/`. Writing the
+    /// singular unconditionally left a second, one-file directory beside a
+    /// user's populated `plugins/` — opencode loaded it fine, but the plugin
+    /// was not where its owner would look for it.
+    #[test]
+    fn install_joins_an_existing_plugins_directory_instead_of_making_a_second_one() {
+        let home = fake_home();
+        fake_bin(home.path());
+        let plural = home.path().join(".config/opencode/plugins");
+        std::fs::create_dir_all(&plural).unwrap();
+        run(false).unwrap();
+
+        assert!(plural.join("argus.ts").exists(), "not written to plugins/");
+        assert!(
+            !home.path().join(".config/opencode/plugin").exists(),
+            "a second plugin directory was created anyway"
+        );
+
+        // The whole chain has to agree on the spelling, not just the writer:
+        // a `check` that looks only under `plugin/` reports a healthy install
+        // as missing, and an `uninstall` that does leaves the plugin running.
+        let f = crate::integrity::check(home.path())
+            .into_iter()
+            .find(|f| f.tool == "opencode")
+            .unwrap();
+        assert!(f.ok, "check missed the plugin in plugins/: {f:?}");
+
+        crate::harness::uninstall(home.path()).unwrap();
+        assert!(
+            !plural.join("argus.ts").exists(),
+            "uninstall left the plugin in plugins/"
+        );
+    }
+
+    /// Both spellings present is the state an earlier argus could produce.
+    /// Whichever one already holds `argus.ts` is the one opencode is loading,
+    /// so that is the copy a reinstall has to update — updating the other
+    /// leaves the stale one running.
+    #[test]
+    fn reinstall_updates_the_copy_opencode_is_already_loading() {
+        let home = fake_home();
+        fake_bin(home.path());
+        let oc = home.path().join(".config/opencode");
+        std::fs::create_dir_all(oc.join("plugin")).unwrap();
+        std::fs::create_dir_all(oc.join("plugins")).unwrap();
+        std::fs::write(oc.join("plugins/argus.ts"), "// stale\n").unwrap();
+        run(false).unwrap();
+
+        assert!(
+            std::fs::read_to_string(oc.join("plugins/argus.ts"))
+                .unwrap()
+                .contains("argus.sock"),
+            "the loaded copy was not refreshed"
+        );
+        assert!(
+            !oc.join("plugin/argus.ts").exists(),
+            "wrote a second copy into the other spelling"
+        );
+    }
+
     #[test]
     fn check_detects_an_emptied_plugin_file() {
         let home = fake_home();
