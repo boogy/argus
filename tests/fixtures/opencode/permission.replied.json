@@ -1,0 +1,14 @@
+{
+  "source": "opencode",
+  "received_at": "2026-01-01T00:00:00Z",
+  "payload": {
+    "sessionID": "ses_opencode_001",
+    "event": "permission.replied",
+    "cwd": "/repo",
+    "properties": {
+      "sessionID": "ses_opencode_001",
+      "permissionID": "per_opencode_001",
+      "response": "reject"
+    }
+  }
+}

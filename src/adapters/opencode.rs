@@ -122,13 +122,21 @@ pub fn parse(env: &Envelope, capture: &CaptureCfg) -> Vec<Event> {
             ev.meta.turn_id = p.get("messageID").and_then(Value::as_str).map(String::from);
             vec![ev]
         }
-        "permission.asked" | "permission.replied" | "permission.updated" => {
-            let action = match event {
-                "permission.asked" => "requested",
-                "permission.replied" => "replied",
-                _ => "updated",
+        // opencode has two permission events, not three. `permission.updated`
+        // *is* the ask — it carries the whole `Permission`: the tool type, the
+        // pattern it matched, and the call it gates. `permission.replied`
+        // carries the answer. There was a third arm here for
+        // `permission.asked`, which opencode has never emitted, and it held
+        // the only mapping to `requested` — so a query for permission requests
+        // on opencode matched nothing, while the events that were the requests
+        // came through labelled `updated`.
+        "permission.replied" | "permission.updated" => {
+            let action = if event == "permission.replied" {
+                "replied"
+            } else {
+                "requested"
             };
-            vec![mk(EventKind::Permission {
+            let mut ev = mk(EventKind::Permission {
                 tool: props
                     .get("type")
                     .and_then(Value::as_str)
@@ -136,7 +144,15 @@ pub fn parse(env: &Envelope, capture: &CaptureCfg) -> Vec<Event> {
                     .into(),
                 action: action.into(),
                 input: crate::adapters::cap_value(props.clone(), max),
-            })]
+            });
+            // Same id the tool events carry, so the prompt and the call it
+            // gated are one join rather than a guess from adjacency. Only the
+            // ask has it; a reply names the permission, not the call.
+            ev.meta.tool_use_id = props
+                .get("callID")
+                .and_then(Value::as_str)
+                .map(String::from);
+            vec![ev]
         }
         "file.edited" | "file.watcher.updated" => {
             let path = props
@@ -444,24 +460,6 @@ mod tests {
     }
 
     #[test]
-    fn permission_events_map() {
-        for (event, action) in [
-            ("permission.asked", "requested"),
-            ("permission.replied", "replied"),
-        ] {
-            let events = adapters::parse(
-                env(json!({"event": event, "sessionID": "oc1",
-                           "properties": {"type": "bash", "pattern": "rm *"}})),
-                &CaptureCfg::default(),
-            );
-            let EventKind::Permission { action: a, .. } = &events[0].kind else {
-                panic!()
-            };
-            assert_eq!(a, action, "event {event}");
-        }
-    }
-
-    #[test]
     fn file_edited_maps_to_file_change() {
         let events = adapters::parse(
             env(json!({"event": "file.edited", "sessionID": "oc1",
@@ -512,6 +510,73 @@ mod tests {
             &CaptureCfg::default(),
         );
         assert!(matches!(&events[0].kind, EventKind::Raw { .. }));
+    }
+
+    /// `permission.updated` is opencode's ask — the event carrying the tool
+    /// type, the pattern and the call being gated. It used to arrive labelled
+    /// `updated` while `requested` was reserved for an event that never fires.
+    #[test]
+    fn the_permission_ask_is_labelled_a_request() {
+        let events = adapters::parse(
+            env(json!({
+                "event": "permission.updated", "sessionID": "oc1",
+                "properties": {"id": "per_1", "type": "bash", "callID": "call_7",
+                               "pattern": "git push *", "sessionID": "oc1"}
+            })),
+            &CaptureCfg::default(),
+        );
+        let EventKind::Permission { tool, action, .. } = &events[0].kind else {
+            panic!("{:?}", events[0].kind)
+        };
+        assert_eq!((tool.as_str(), action.as_str()), ("bash", "requested"));
+        // The join back to the tool call the prompt gated.
+        assert_eq!(events[0].meta.tool_use_id.as_deref(), Some("call_7"));
+
+        let events = adapters::parse(
+            env(json!({
+                "event": "permission.replied", "sessionID": "oc1",
+                "properties": {"permissionID": "per_1", "response": "reject"}
+            })),
+            &CaptureCfg::default(),
+        );
+        let EventKind::Permission { action, .. } = &events[0].kind else {
+            panic!()
+        };
+        assert_eq!(action, "replied");
+        // A reply names the permission, not the call.
+        assert!(events[0].meta.tool_use_id.is_none());
+    }
+
+    /// The plugin decides what crosses the socket; this file decides what it
+    /// becomes. Nothing made the two agree, and they drifted in the direction
+    /// that is hardest to notice: `permission.asked` had an entry in
+    /// `BUS_FORWARD`, an arm here, and a fixture, and opencode has never
+    /// emitted it. Three consistent artefacts, all fictional.
+    ///
+    /// Falling to `Raw` is the failure this catches — a forwarded event with
+    /// no arm is not lost, it just arrives as an unqueryable blob, which looks
+    /// like coverage in every report that counts events.
+    #[test]
+    fn every_forwarded_bus_event_has_an_arm() {
+        let shim = crate::harness::opencode::shim_source();
+        let (_, rest) = shim.split_once("const BUS_FORWARD = new Set([").unwrap();
+        let (body, _) = rest.split_once("]);").unwrap();
+        let names: Vec<&str> = body
+            .lines()
+            .filter_map(|l| l.trim().trim_end_matches(',').strip_prefix('"'))
+            .filter_map(|l| l.strip_suffix('"'))
+            .collect();
+        assert!(names.len() > 10, "parsed {names:?} — the literal moved");
+        for name in names {
+            let events = adapters::parse(
+                env(json!({"event": name, "sessionID": "s", "properties": {}})),
+                &CaptureCfg::default(),
+            );
+            assert!(
+                !events.is_empty() && !matches!(&events[0].kind, EventKind::Raw { .. }),
+                "{name} is forwarded but has no arm — it lands in raw"
+            );
+        }
     }
 
     #[test]

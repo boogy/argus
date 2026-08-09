@@ -1239,6 +1239,48 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
     now fires three `message.updated` variants and asserts exactly one
     envelope comes out.
 
+  - [x] **T13f** — `BUS_FORWARD` audited against opencode's real event
+    vocabulary. Files: `plugins/opencode/argus.ts`,
+    `src/adapters/opencode.rs`, `tests/fixtures/opencode/` (deleted
+    `permission.asked.json`, added `permission.updated.json` and
+    `permission.replied.json`), `README.md`.
+    Ground truth is the `Event` union in the installed SDK
+    (`~/.config/opencode/node_modules/@opencode-ai/sdk/dist/gen/types.gen.d.ts`,
+    32 members), not documentation. It has no `permission.asked` — which
+    argus forwarded, had an adapter arm for, and shipped a fixture of. Three
+    artefacts agreeing with each other and with nothing real. Worse than
+    dead code: it held the only mapping to a `requested` permission action,
+    so a query for permission requests on opencode matched nothing, while
+    the events that *were* the requests arrived labelled `updated`.
+    `permission.updated` is the ask — it carries the whole `Permission`
+    (type, pattern, `callID`) — and now maps to `requested` and puts
+    `callID` in `meta.tool_use_id`, joining the prompt to the call it gated.
+    `permission.replied` carries only the answer, so it has no call id and
+    the test asserts it stays `None`.
+    New `every_forwarded_bus_event_has_an_arm` parses `BUS_FORWARD` out of
+    `shim_source()` and pushes each name through the adapter. Nothing made
+    the two halves agree before. The failure it catches is silent: a
+    forwarded event with no arm is not lost, it becomes an unqueryable blob
+    that still counts as an event in every report — which is what coverage
+    looks like from the outside.
+    Five mutations, all bite: the ask relabelled `updated`, `callID`
+    dropped, an adapter arm made unreachable, `permission.asked` put back
+    into `BUS_FORWARD` (the exact regression, now caught), and the plugin's
+    set renamed so the parse finds nothing.
+    Deliberately still not forwarded, having now looked at each: `lsp.*`
+    (high frequency, no security signal), `message.part.*` (stream deltas —
+    the hot path this list exists to stay off), `tui.*` (UI only),
+    `installation.update-available` (the result of a poll, not a state
+    change). The real events worth adding — `pty.*`, `message.removed`,
+    `vcs.branch.updated` — are T13g, because each needs a mapping decision
+    rather than a list entry.
+
+  - [ ] **T13g** — forward the audited-in events: `pty.created`/`pty.exited`
+    (a shell with `command`, `args`, `cwd` and `pid` that never appears as a
+    tool call), `message.removed` (transcript edited after the fact),
+    `vcs.branch.updated` (the repo context a rule is scoped to changing
+    under a live session).
+
 - [ ] **T14** — pi.dev harness. Dependency: T4, T5.
   Files: new `src/adapters/pi.rs`, new `plugins/pi/argus.ts`, new `src/harness/pi.rs`
 

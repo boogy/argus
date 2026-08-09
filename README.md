@@ -59,7 +59,7 @@ argus captures everything each surface offers.
 | Skill/command invocations   |             Y              | Y (command.executed)  |            —            |         —         |
 | Slash-command expansion     |     Y (expanded text)      |           —           |            —            |         —         |
 | Subagent runs               |       Y (start+stop)       |           —           |            Y            | Y (start+stop)    |
-| Permission requests         |     Y (request+denied)     |   Y (asked+replied)   |            Y            |         Y         |
+| Permission requests         |     Y (request+denied)     |  Y (request+reply)    |            Y            |         Y         |
 | Compaction                  | Y (pre+post, token counts) | Y (session.compacted) |            Y            |      Y (pre)      |
 | Errors                      |      Y (StopFailure)       |   Y (session.error)   |            —            | Y (errorOccurred) |
 | Config/instructions changes |             Y              |           —           |            —            |         —         |
@@ -280,6 +280,18 @@ extra_patterns = ["ACME-[0-9]{6}"]
   the partial receipts never leave the editor process. `meta.model` is
   `provider/model`, because the same model name is served by more than one
   provider and which one saw the turn is the question being asked.
+
+  The forwarded-event list is checked against opencode's own `Event` union
+  rather than against documentation. That audit removed `permission.asked`,
+  which never existed: it had a `BUS_FORWARD` entry, an adapter arm and a
+  fixture — three consistent artefacts describing an event opencode has never
+  emitted — and it held the only mapping to a `requested` permission action, so
+  no query for permission requests on opencode ever matched. `permission.updated`
+  *is* the ask, and now says so; it also carries the `callID` of the tool call
+  it gates, so the prompt and the call join. A test walks `BUS_FORWARD` out of
+  the plugin source and asserts each name reaches a real adapter arm, because
+  the failure mode is silent: a forwarded event with no arm is not dropped, it
+  arrives as an unqueryable blob that still counts as an event in every report.
 - **Daemon** (`argus daemon`) does everything else off that critical
   path: per-tool adapter parsing → secret redaction → durable SQLite buffering
   → batched OTLP/JSON export with exponential backoff. It also drains the

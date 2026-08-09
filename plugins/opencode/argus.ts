@@ -10,6 +10,12 @@ import type { Plugin } from "@opencode-ai/plugin";
 
 // Bus events worth forwarding. High-frequency stream deltas
 // (message.part.updated) are deliberately excluded from the hot path.
+//
+// Every name here must be a member of the SDK's `Event` union — a bus event
+// that does not exist costs nothing at runtime and is worse than useless in
+// this list, because it reads as coverage. `permission.asked` sat here for
+// exactly that reason: it had an entry, an adapter arm and a fixture, and it
+// has never once fired. opencode's ask is `permission.updated`.
 const BUS_FORWARD = new Set([
   "session.created",
   "session.updated",
@@ -19,7 +25,6 @@ const BUS_FORWARD = new Set([
   "session.compacted",
   "session.status",
   "session.diff",
-  "permission.asked",
   "permission.replied",
   "permission.updated",
   "file.edited",
