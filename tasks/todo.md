@@ -920,7 +920,7 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
     now targets `requirements.toml`, which nothing else opens.
     The plan's "untrusted/changed hook hashes" is not implementable as
     written — Codex's trust-store filename is undocumented, so there is no
-    file to read. Moved to T11c as hash drift recorded at install time, which
+    file to read. Moved to T11d as hash drift recorded at install time, which
     is the same signal from the side we control.
   - [x] **T11c** — `install` refreshes its own stale hook entries. Files:
     `src/harness/mod.rs`, `src/install.rs`, `README.md`
