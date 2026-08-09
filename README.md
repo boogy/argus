@@ -6,7 +6,7 @@ they touch, which skills/subagents run — captured through each tool's native
 hook/plugin surface (no TLS proxying, no MITM) and exported as OTLP/JSON logs to
 any observability backend (Splunk, Datadog, Grafana, an OTel Collector, ...).
 
-Supports **Claude Code**, **opencode**, **OpenAI Codex**, and **GitHub Copilot CLI**.
+Supports **Claude Code**, **opencode**, **OpenAI Codex**, **GitHub Copilot CLI**, and **pi**.
 
 ## Quick start
 
@@ -46,27 +46,27 @@ cleanly remove all wiring.
 Each tool exposes a different amount of detail through its hook/plugin API;
 argus captures everything each surface offers.
 
-| Signal                      |        Claude Code         |       opencode        |          Codex          |    Copilot CLI    |
-| --------------------------- | :------------------------: | :-------------------: | :---------------------: | :---------------: |
-| Prompts                     |             Y              |           Y           |            Y            |         Y         |
-| Prompt rewritten en route    |             —              |           —           |            —            | Y (userPromptTransformed) |
-| Assistant messages          |          Y (Stop)          |           Y           |      Y (Stop hook)      | Y (subagent only) |
-| Tool use (pre/post)         |             Y              |           Y           |            Y            |         Y         |
-| Tool outputs                |             Y              |           Y           |            Y            |         Y         |
-| Tool failures               |             Y              |           —           | Y (post incl. non-zero) |         Y         |
-| File paths touched          |             Y              |           Y           |     Y (apply_patch)     |         Y         |
-| FQDNs contacted             |             Y              |           Y           |            Y            |         Y         |
-| Skill/command invocations   |             Y              | Y (command.executed)  |            —            |         —         |
-| Slash-command expansion     |     Y (expanded text)      |           —           |            —            |         —         |
-| Subagent runs               |       Y (start+stop)       |           —           |            Y            | Y (start+stop)    |
-| Permission requests         |     Y (request+denied)     |  Y (request+reply)    |            Y            |         Y         |
-| Compaction                  | Y (pre+post, token counts) | Y (session.compacted) |            Y            |      Y (pre)      |
-| Errors                      |      Y (StopFailure)       |   Y (session.error)   |            —            | Y (errorOccurred) |
-| Config/instructions changes |             Y              |           —           |            —            |         —         |
-| Directory scope changes     |        Y (/add-dir)        |           —           |            —            |         —         |
-| Session lifecycle           |             Y              |           Y           |            Y            |         Y         |
-| Model, tokens, cost per turn |             —              |  Y (message.updated)  |            —            |         —         |
-| Interactive shells (pty)    |             —              |  Y (created+exited)   |            —            |         —         |
+| Signal                      |        Claude Code         |       opencode        |          Codex          |    Copilot CLI    |          pi           |
+| --------------------------- | :------------------------: | :-------------------: | :---------------------: | :---------------: | :-------------------: |
+| Prompts                     |             Y              |           Y           |            Y            |         Y         |           Y           |
+| Prompt rewritten en route    |             —              |           —           |            —            | Y (userPromptTransformed) |           —           |
+| Assistant messages          |          Y (Stop)          |           Y           |      Y (Stop hook)      | Y (subagent only) |           —           |
+| Tool use (pre/post)         |             Y              |           Y           |            Y            |         Y         |           Y           |
+| Tool outputs                |             Y              |           Y           |            Y            |         Y         |     Y (text parts)    |
+| Tool failures               |             Y              |           —           | Y (post incl. non-zero) |         Y         |      Y (isError)      |
+| File paths touched          |             Y              |           Y           |     Y (apply_patch)     |         Y         |           Y           |
+| FQDNs contacted             |             Y              |           Y           |            Y            |         Y         |           Y           |
+| Skill/command invocations   |             Y              | Y (command.executed)  |            —            |         —         |           —           |
+| Slash-command expansion     |     Y (expanded text)      |           —           |            —            |         —         |           —           |
+| Subagent runs               |       Y (start+stop)       |           —           |            Y            | Y (start+stop)    |           —           |
+| Permission requests         |     Y (request+denied)     |  Y (request+reply)    |            Y            |         Y         |     — (no event)      |
+| Compaction                  | Y (pre+post, token counts) | Y (session.compacted) |            Y            |      Y (pre)      | Y (pre+post, before)  |
+| Errors                      |      Y (StopFailure)       |   Y (session.error)   |            —            | Y (errorOccurred) |   Y (turn_end stop)   |
+| Config/instructions changes |             Y              |           —           |            —            |         —         |           —           |
+| Directory scope changes     |        Y (/add-dir)        |           —           |            —            |         —         |           —           |
+| Session lifecycle           |             Y              |           Y           |            Y            |         Y         |           Y           |
+| Model, tokens, cost per turn |             —              |  Y (message.updated)  |            —            |         —         |     Y (turn_end)      |
+| Interactive shells (pty)    |             —              |  Y (created+exited)   |            —            |         —         |    Y (user_bash `!`)  |
 
 Copilot's `userPromptTransformed` is the one row with no equivalent elsewhere,
 and the reason it is wired: it reports what was *actually* sent to the model
@@ -77,6 +77,16 @@ ride in one `prompt_transformed` event (`original` and `transformed`, each
 redacted), with a `prompt.rewritten` attribute so a SIEM can alert on the edit
 without diffing two prompt bodies on every turn. `capture.prompts = false`
 suppresses both halves.
+
+pi's two dashes are absences in pi, not gaps in argus. It has **no permission
+event at all** — gating a tool call is an extension's own `tool_call` handler
+returning `{block, reason}`, so there is nothing to observe and argus records
+what ran rather than what was asked. And it has no assistant-message event that
+carries the text: `turn_end` hands over the finished message, which argus reads
+for the model, tokens, cost and stop reason. The `!`-prefixed shell command is
+pi's answer to opencode's pty — a command the user runs directly, which never
+passes through `tool_call`, and whose `!!` form the transcript itself never
+records either.
 
 A row saying `Y` means the event is recorded, not that every field in it is.
 Four that used to be read past are now kept, because each is the part of its
@@ -339,7 +349,7 @@ extra_patterns = ["ACME-[0-9]{6}"]
 
   | Signal       | What it reads                                                          |
   | ------------ | ---------------------------------------------------------------------- |
-  | `config dir` | `~/.claude`, `~/.codex`, `~/.copilot`, `$XDG_CONFIG_HOME/opencode` (`%APPDATA%\opencode` on Windows), honouring `COPILOT_HOME`/`CODEX_HOME` |
+  | `config dir` | `~/.claude`, `~/.codex`, `~/.copilot`, `~/.pi/agent`, `$XDG_CONFIG_HOME/opencode` (`%APPDATA%\opencode` on Windows), honouring `COPILOT_HOME`/`CODEX_HOME` |
   | `binary`     | the tool's binary on `PATH` **and** in the per-user prefixes a hook's `PATH` often omits (`~/.local/bin`, `~/.npm-global/bin`, `%APPDATA%\npm`, scoop shims, …); on Windows the candidates come from `PATHEXT` |
   | `npm`        | that binary's real path resolving inside `node_modules/<package>/`      |
   | `brew`       | …or inside `Cellar/<formula>/`                                          |
@@ -467,8 +477,8 @@ extra_patterns = ["ACME-[0-9]{6}"]
   `WARN`.
 - **Hook not firing**: confirm `argus install` actually wrote entries —
   check `~/.claude/settings.json` (`hooks.*`), `~/.config/opencode/plugin/argus.ts`,
-  `~/.codex/config.toml` (`notify`, `[otel]`), `~/.codex/hooks.json`, or
-  `~/.copilot/hooks/argus.json`. Re-run `argus install`
+  `~/.codex/config.toml` (`notify`, `[otel]`), `~/.codex/hooks.json`,
+  `~/.copilot/hooks/argus.json`, or `~/.pi/agent/extensions/argus.ts`. Re-run `argus install`
   (idempotent) if entries are missing — it also **refreshes** an argus entry
   that an older release wrote, so an upgrade that changes a hook's command or
   timeout reaches hosts that are already wired. Hooks beside ours are left

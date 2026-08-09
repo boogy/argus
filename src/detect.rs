@@ -546,6 +546,41 @@ mod tests {
         assert!(checked > 0, "no generic-named harness ships an npm package");
     }
 
+    /// The two sweeps above skip a harness that declares no generic binary, or
+    /// no npm package to corroborate one — so both stay green if `pi` quietly
+    /// stops being either. That matters more for `pi` than for anything else
+    /// in the registry: it is the shortest name argus probes for, it is a word
+    /// people give their own scripts, and treating a bare one as proof would
+    /// have argus write an extension into a `~/.pi` that pi.dev never made.
+    /// This pins pi's own two halves of the rule directly.
+    #[test]
+    fn a_bare_pi_on_path_is_not_pi_dev_but_one_from_npm_is() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let home = dir.path().join("bare");
+        let bin = home.join("bin");
+        for platform in Platform::ALL {
+            touch_exe(&bin.join(exe(*platform, "pi")));
+        }
+        for &platform in Platform::ALL {
+            assert!(
+                detected(&detect_in(&env_for(platform, &home, &bin)), "pi").is_none(),
+                "{platform:?}: a bare `pi` on PATH was taken as evidence"
+            );
+        }
+
+        // The same name, resolved into the package that ships it.
+        let home = dir.path().join("npm");
+        let bin = home
+            .join("node_modules")
+            .join("@earendil-works/pi-coding-agent")
+            .join("bin");
+        touch_exe(&bin.join("pi"));
+        let found = detect_in(&env_for(Platform::Linux, &home, &bin));
+        let d = detected(&found, "pi").expect("npm provenance must corroborate the name");
+        assert!(d.signals.contains(&Signal::NpmGlobal), "{:?}", d.signals);
+    }
+
     fn harness(id: &str) -> &'static dyn Harness {
         HARNESSES.iter().copied().find(|h| h.id() == id).unwrap()
     }

@@ -1,0 +1,13 @@
+{
+  "source": "pi",
+  "received_at": "2026-01-01T00:00:00Z",
+  "payload": {
+    "sessionID": "ses_pi_001",
+    "cwd": "/Users/dev/src/argus",
+    "event": "session_before_compact",
+    "reason": "threshold",
+    "willRetry": false,
+    "customInstructions": "keep the signing-key decision, drop the build logs",
+    "tokensBefore": 174000
+  }
+}

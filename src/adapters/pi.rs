@@ -551,6 +551,32 @@ mod tests {
         assert_eq!(events[0].meta.model.as_deref(), Some("openai/gpt-5"));
     }
 
+    /// pi has no manifest: an extension's subscription list exists only as the
+    /// `pi.on(...)` calls in the file, so that is what this reads. An event the
+    /// plugin starts forwarding without an arm here lands in `Raw` — it is
+    /// stored, and it is invisible to every query that asks about tool calls or
+    /// spend, which is the failure that looks most like success.
+    #[test]
+    fn every_forwarded_event_has_an_arm() {
+        let shim = crate::harness::pi::shim_source();
+        let names: Vec<&str> = shim
+            .match_indices("pi.on(\"")
+            .filter_map(|(i, m)| shim[i + m.len()..].split_once('"'))
+            .map(|(name, _)| name)
+            .collect();
+        assert!(
+            names.len() >= 12,
+            "parsed {names:?} — the registration form moved"
+        );
+        for name in names {
+            let events = parse(json!({"event": name, "sessionID": "s", "cwd": "/repo"}));
+            assert!(
+                !matches!(&events[0].kind, EventKind::Raw { .. }),
+                "{name} is forwarded but has no arm — it lands in raw"
+            );
+        }
+    }
+
     #[test]
     fn an_unknown_event_falls_through_to_raw() {
         let events = parse(json!({"event": "mystery_event", "sessionID": "pi1"}));

@@ -25,6 +25,7 @@ pub mod claude_code;
 pub mod codex;
 pub mod copilot;
 pub mod opencode;
+pub mod pi;
 
 use crate::config::CaptureCfg;
 use crate::detect::{BinaryProbe, Env, Platform, detect};
@@ -63,6 +64,7 @@ pub const HARNESSES: &[&dyn Harness] = &[
     &opencode::OpenCode,
     &codex::Codex,
     &copilot::Copilot,
+    &pi::Pi,
 ];
 
 /// Which layer an install targets: the invoking user's own config, the

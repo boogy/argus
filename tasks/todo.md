@@ -1343,9 +1343,57 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
   `meta.model` dropped from `model_select`; and unknown events routed away
   from `Raw`.
 
-- [ ] **T14b** — pi.dev plugin, harness registration and fixtures. Dependency: T14a.
+- [x] **T14b** — pi.dev extension, harness registration and fixtures. Dependency: T14a.
   Files: new `plugins/pi/argus.ts`, new `src/harness/pi.rs`, `src/harness/mod.rs`,
-  new `tests/fixtures/pi/*.json`, new `tests/plugin/pi_payload.mjs`, new `tests/pi_plugin.rs`
+  new `tests/fixtures/pi/*.json` (9), new `tests/plugin/pi_payload.mjs`,
+  new `tests/pi_plugin.rs`, `src/install.rs`, `src/detect.rs`, `README.md`
+
+  Twelve of pi's 33 events are forwarded; the file lists the other twenty-one
+  and why each is not, so an absence reads as a decision rather than an
+  oversight.
+
+  Two of those decisions come from reading `dist/core/extensions/runner.js`
+  rather than the docs. `emitProjectTrustEvent` dereferences `.trusted` on
+  whatever the handler returns, so **`project_trust` is not subscribed to** —
+  there is no return value that means "no opinion", and an observability
+  extension has no business voting on a trust decision anyway. And
+  `emitToolCall` calls the handler with **no try/catch**, so a throw there
+  aborts the user's tool call: `base()` swallows its own failure, and it
+  catches the cwd read and the session lookup separately so a broken session
+  manager costs the session id and not also the field that decides which
+  repository an event belongs to.
+
+  `install` writes `~/.pi/agent/extensions/argus.ts`. pi also loads
+  `<repo>/.pi/extensions/*.ts`, in its own process with no sandbox — argus
+  declines to write there, and `a_project_install_writes_no_pi_extension` is
+  what keeps that a decision: a repository must not turn monitoring on for
+  whoever clones it.
+
+  Twenty-two mutations, all bite. Plugin: the `turn_end` assistant filter
+  removed; `images`/`messages`/`toolResults` forwarded whole instead of as
+  counts; `inputSource` renamed back onto the envelope's own `source` key; the
+  session lookup left able to throw, and its catch merged with the cwd read so
+  a failure costs both; `project_trust` subscribed to; `tool_call` returning an
+  object pi reads as a block; `user_bash` losing the directory it ran in; image
+  parts kept in a tool result; both compaction sizes read off the wrong object;
+  `responseModel` ignored; the whole `preparation` forwarded; and a
+  subscription renamed to an unforwarded event (caught by the new
+  `every_forwarded_event_has_an_arm`, which reads the `pi.on(...)` calls out of
+  the composed shim — pi has no manifest, so that is the only place the
+  subscription list exists). Harness: the `extensions/` path component dropped,
+  the project guard removed, the `send("pi"` marker changed, `rel` shortened to
+  `.pi`.
+
+  Two mutations survived the first pass and were not shrugged off. Making `pi`
+  a non-generic binary probe, and emptying its npm list, both stayed green: the
+  registry-wide sweeps in `detect.rs` *skip* a harness that declares neither, so
+  pi could quietly opt out of the corroboration rule without a test noticing.
+  `a_bare_pi_on_path_is_not_pi_dev_but_one_from_npm_is` now pins it directly —
+  it is the shortest name argus probes for, and a bare one taken as proof would
+  have argus write an extension into a `~/.pi` that pi.dev never made. A third
+  survivor was an invalid mutation, not a gap: one try block around both reads
+  is equivalent as long as the cwd is read first, so it was rewritten to put
+  the throwing read first, and then it bit.
 
 - [ ] **T15** — `install --managed`. Dependency: T10, T11, T12, T13, T14.
   Files: `src/harness/*` (`Scope::Managed` arms), `src/install.rs`, `src/integrity.rs`, `src/main.rs`

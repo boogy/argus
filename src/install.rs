@@ -487,6 +487,71 @@ mod tests {
         );
     }
 
+    /// pi is not installed on the machine this was written on, so the whole
+    /// harness — the config location, the extension path, the marker set — is
+    /// derived from pi's own type definitions and loader rather than from a
+    /// working install. This is the test that makes that derivation falsifiable
+    /// without pi: a fake `~/.pi/agent` is the only signal, and install, check
+    /// and uninstall have to agree about what to do with it.
+    ///
+    /// `.pi/agent/extensions/` is pi's *global* location. Its project location
+    /// is `.pi/extensions/` — one level shallower — and writing there is
+    /// deliberately not done, so the path is asserted in full rather than
+    /// through a helper that could quietly change which one is meant.
+    #[test]
+    fn install_writes_the_pi_extension_and_uninstall_removes_it() {
+        let home = fake_home();
+        fake_bin(home.path());
+        std::fs::create_dir_all(home.path().join(".pi/agent")).unwrap();
+        run(false).unwrap();
+
+        let path = home.path().join(".pi/agent/extensions/argus.ts");
+        let text = std::fs::read_to_string(&path).unwrap();
+        // Both halves: the shared transport, and pi's own vocabulary. A file
+        // holding only the first parses, installs, and forwards nothing.
+        assert!(text.contains("argus.sock"), "transport half missing");
+        assert!(text.contains(r#"send("pi""#), "pi half missing");
+        assert!(
+            text.contains(r#"pi.on("tool_call""#),
+            "the extension registers no tool handler"
+        );
+
+        let f = crate::integrity::check(home.path())
+            .into_iter()
+            .find(|f| f.tool == "pi")
+            .expect("check does not know about pi");
+        assert!(f.ok, "{f:?}");
+
+        // A gutted file still exists and still parses; only the markers say so.
+        std::fs::write(&path, "export default function () {}\n").unwrap();
+        let f = crate::integrity::check(home.path())
+            .into_iter()
+            .find(|f| f.tool == "pi")
+            .unwrap();
+        assert!(!f.ok && f.detail.contains("no longer contains"), "{f:?}");
+
+        run(false).unwrap();
+        uninstall().unwrap();
+        assert!(!path.exists(), "uninstall left the extension behind");
+    }
+
+    /// A repository must not be able to turn monitoring on for whoever clones
+    /// it. pi does load `<repo>/.pi/extensions/*.ts`, in its own process with
+    /// no sandbox, so this is a real location argus declines to write to —
+    /// which makes it worth a test rather than a comment.
+    #[test]
+    fn a_project_install_writes_no_pi_extension() {
+        let home = fake_home();
+        std::fs::create_dir_all(home.path().join(".pi/agent")).unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        run_project(repo.path(), false).unwrap();
+        assert!(
+            !repo.path().join(".pi").exists(),
+            "a project install created {}",
+            repo.path().join(".pi").display()
+        );
+    }
+
     #[test]
     fn install_writes_copilot_hooks_file_and_uninstall_removes_it() {
         let home = fake_home();
