@@ -1,5 +1,6 @@
 use super::{
-    Artifact, CmdStyle, ConfigDir, Detection, Harness, KillSwitch, Probes, Scope, hook_command,
+    Artifact, CmdStyle, ConfigDir, Detection, Harness, HookEvent, KillSwitch, Probes, Scope,
+    hook_command,
 };
 use crate::config::CaptureCfg;
 use crate::detect::BinaryProbe;
@@ -11,24 +12,36 @@ use std::borrow::Cow;
 /// camelCase events, `bash`/`powershell` command entries, `timeoutSec`;
 /// `permissionRequest` with empty stdout + exit 0 falls through to the normal
 /// permission flow, so observe-only wiring is safe).
-pub const EVENTS: &[&str] = &[
-    "sessionStart",
-    "sessionEnd",
-    "userPromptSubmitted",
+///
+/// `timeoutSec` is written explicitly on every entry: omitting it means 30
+/// seconds, and 30 seconds of an agent waiting on an observe-only shim is not
+/// a default worth inheriting. `HookEvent`'s `matcher` flag is unread here —
+/// Copilot's hooks file has no matcher concept, the entry is just
+/// `{type, bash, powershell, timeoutSec}` — but sharing the type is what keeps
+/// the timeout per-event rather than a literal baked into the writer.
+pub const EVENTS: &[HookEvent] = &[
+    HookEvent::new("sessionStart", false),
+    // Copilot runs this while it is shutting down, so the timeout is time the
+    // user spends watching the CLI refuse to exit. Same three seconds as the
+    // Codex shutdown hook, for the same reason: the shim gives up on the
+    // daemon after 250 ms and spools instead, so the slack is slack, not a
+    // requirement — and an event lost at shutdown is the cheapest to lose.
+    HookEvent::with_timeout("sessionEnd", false, 3),
+    HookEvent::new("userPromptSubmitted", false),
     // What was actually sent, after every hook and policy in the chain had a
     // turn at it. Without this the record shows only what the user typed, and
     // an instruction spliced in on their behalf leaves no trace anywhere.
-    "userPromptTransformed",
-    "preToolUse",
-    "postToolUse",
-    "postToolUseFailure",
-    "errorOccurred",
-    "agentStop",
-    "subagentStart",
-    "subagentStop",
-    "preCompact",
-    "notification",
-    "permissionRequest",
+    HookEvent::new("userPromptTransformed", false),
+    HookEvent::new("preToolUse", false),
+    HookEvent::new("postToolUse", false),
+    HookEvent::new("postToolUseFailure", false),
+    HookEvent::new("errorOccurred", false),
+    HookEvent::new("agentStop", false),
+    HookEvent::new("subagentStart", false),
+    HookEvent::new("subagentStop", false),
+    HookEvent::new("preCompact", false),
+    HookEvent::new("notification", false),
+    HookEvent::new("permissionRequest", false),
 ];
 
 const CONFIG_DIRS: &[ConfigDir] = &[ConfigDir {
@@ -94,17 +107,17 @@ impl Harness for Copilot {
         // merely exists makes neither.
         let mut markers = Vec::with_capacity(EVENTS.len());
         let mut commands = Vec::new();
-        for event in EVENTS {
+        for ev in EVENTS {
             // Distinct per shell: PowerShell needs the `&` call operator, and
             // each quotes the program path its own way.
-            let bash = hook_command("copilot", Some(event), CmdStyle::Shell);
+            let bash = hook_command("copilot", Some(ev.name), CmdStyle::Shell);
             hooks.insert(
-                (*event).into(),
+                ev.name.into(),
                 json!([{
                     "type": "command",
                     "bash": bash,
-                    "powershell": hook_command("copilot", Some(event), CmdStyle::PowerShell),
-                    "timeoutSec": 10,
+                    "powershell": hook_command("copilot", Some(ev.name), CmdStyle::PowerShell),
+                    "timeoutSec": ev.timeout,
                 }]),
             );
             // The file is JSON, so the command is stored escaped; compare

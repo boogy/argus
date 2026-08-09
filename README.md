@@ -217,6 +217,15 @@ extra_patterns = ["ACME-[0-9]{6}"]
   daemon-not-running it falls back to writing a JSONL spool file and
   autospawns the daemon. It never blocks the host tool and never fails loudly
   — a broken hook must not break Claude Code, opencode, or Codex.
+
+  Every hook entry argus writes carries an explicit timeout, because the
+  defaults are written for hooks that do work: Copilot reads an omitted
+  `timeoutSec` as 30 seconds. Ten is what argus writes, and that is already
+  forty times the shim's own 250 ms deadline — it is slack, not a requirement.
+  Shutdown hooks (Codex `SessionEnd`, Copilot `sessionEnd`) get three, since
+  there the timeout is time the user spends watching the CLI refuse to exit,
+  and an event lost at shutdown is the cheapest one to lose: the shim has
+  already spooled it.
 - **Daemon** (`argus daemon`) does everything else off that critical
   path: per-tool adapter parsing → secret redaction → durable SQLite buffering
   → batched OTLP/JSON export with exponential backoff. It also drains the

@@ -107,14 +107,10 @@ fn every_fixture_parses_into_a_recognised_event() {
 #[test]
 fn every_hook_we_parse_is_a_hook_we_subscribe_to() {
     let wired = |source: &str| -> Vec<&'static str> {
-        // Copilot's list is plain strings; the other two carry a per-event
-        // timeout alongside the name.
-        if source == "copilot" {
-            return argus::harness::copilot::EVENTS.to_vec();
-        }
         let events = match source {
             "claude-code" => argus::harness::claude_code::EVENTS,
             "codex" => argus::harness::codex::EVENTS,
+            "copilot" => argus::harness::copilot::EVENTS,
             _ => &[],
         };
         events.iter().map(|e| e.name).collect()

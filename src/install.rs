@@ -496,21 +496,26 @@ mod tests {
         let doc: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(doc["version"], 1);
-        for event in [
-            "sessionStart",
-            "sessionEnd",
-            "userPromptSubmitted",
-            "userPromptTransformed",
-            "preToolUse",
-            "postToolUse",
-            "postToolUseFailure",
-            "errorOccurred",
-            "agentStop",
-            "subagentStart",
-            "subagentStop",
-            "preCompact",
-            "notification",
-            "permissionRequest",
+        // Spelled out rather than read from `EVENTS`, so this states what the
+        // file must contain instead of restating whatever it happens to.
+        for (event, timeout) in [
+            ("sessionStart", 10),
+            // Shorter on purpose: Copilot runs this while it is shutting down,
+            // so the timeout is time the user spends watching the CLI refuse
+            // to exit.
+            ("sessionEnd", 3),
+            ("userPromptSubmitted", 10),
+            ("userPromptTransformed", 10),
+            ("preToolUse", 10),
+            ("postToolUse", 10),
+            ("postToolUseFailure", 10),
+            ("errorOccurred", 10),
+            ("agentStop", 10),
+            ("subagentStart", 10),
+            ("subagentStop", 10),
+            ("preCompact", 10),
+            ("notification", 10),
+            ("permissionRequest", 10),
         ] {
             let entry = &doc["hooks"][event][0];
             assert_eq!(entry["type"], "command", "event {event}");
@@ -523,7 +528,10 @@ mod tests {
                 ps.starts_with("& \""),
                 "powershell needs the call operator on a quoted path: {ps}"
             );
-            assert_eq!(entry["timeoutSec"], 10);
+            // Never absent: Copilot reads an omitted `timeoutSec` as 30, and
+            // 30 seconds of an agent waiting on an observe-only shim is not a
+            // default worth inheriting.
+            assert_eq!(entry["timeoutSec"], timeout, "event {event}");
         }
         uninstall().unwrap();
         assert!(!path.exists());

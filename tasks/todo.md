@@ -1078,6 +1078,24 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
     preference, `agent_id`, the subagent-answer emission with its capture gate
     and its empty-response guard, all three new redaction arms, and all three
     new export attributes.
+  - [x] **T12d** — Per-event `timeoutSec`. Files: `src/harness/copilot.rs`,
+    `src/install.rs`, `tests/fixtures.rs`, `README.md`.
+    Copilot's `EVENTS` was a `&[&str]` and the writer baked a flat
+    `"timeoutSec": 10`, so there was nowhere to say that one event should be
+    treated differently. Now `&[HookEvent]`, the same type Claude Code and
+    Codex use, which also removes the special case in
+    `every_hook_we_parse_is_a_hook_we_subscribe_to`. `HookEvent::matcher` is
+    unread for Copilot — its entries are `{type, bash, powershell,
+    timeoutSec}` with no matcher concept — and that is noted where the list is
+    declared.
+    `sessionEnd` drops to 3, the same treatment and the same reasoning as the
+    Codex shutdown hook in T11a: there the timeout is time the user watches
+    the CLI refuse to exit, and the shim has already spooled the event.
+    The documented default matters here — Copilot reads an *omitted*
+    `timeoutSec` as 30 — so the test now asserts a value per event rather than
+    one number for all fourteen, and says why an absent key would be wrong.
+    Two mutations, both bite: `sessionEnd` back to `HookEvent::new`, and
+    `ev.timeout` back to a literal `10`.
 
 - [ ] **T13** — opencode + shared TS transport. Dependency: T4, T5.
   Files: `plugins/opencode/argus.ts` + new shared TS transport, `src/adapters/opencode.rs`, `src/harness/opencode.rs`
