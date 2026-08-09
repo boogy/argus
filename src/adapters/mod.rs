@@ -2,6 +2,7 @@ pub mod claude_code;
 pub mod codex;
 pub mod copilot;
 pub mod opencode;
+pub mod pi;
 
 use crate::config::CaptureCfg;
 use crate::event::{Envelope, Event};

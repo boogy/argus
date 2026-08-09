@@ -1307,8 +1307,45 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
     the `info.id` fallback left unqualified, and the fallback removed
     entirely — the last two proving the scope is pinned from both sides.
 
-- [ ] **T14** — pi.dev harness. Dependency: T4, T5.
-  Files: new `src/adapters/pi.rs`, new `plugins/pi/argus.ts`, new `src/harness/pi.rs`
+- [x] **T14a** — pi.dev adapter. Dependency: T4, T5.
+  Files: new `src/adapters/pi.rs`, `src/adapters/mod.rs`
+  Split from T14: `tests/fixtures.rs` dispatches through `argus::harness::parse`
+  over `HARNESSES`, so pi fixtures cannot pass before `Pi` is registered, and
+  registering the harness before the adapter exists has nothing to dispatch to.
+  T14a is the adapter alone — nothing routes to it yet — and T14b registers it.
+
+  pi is not installed here, so the event vocabulary is taken from the type
+  definitions in `@earendil-works/pi-coding-agent@0.84.1` and
+  `@earendil-works/pi-ai@0.84.1`, not from prose docs — the T13f lesson, where
+  `permission.asked` had an entry, an arm and a fixture and has never fired.
+  The plan lists 15 pi events; the real `ExtensionAPI.on()` overload set has 33.
+  Every name the plan lists is real, the list is merely partial.
+
+  Two findings that shaped the mapping. **pi has no permission event** — gating
+  is an extension's own `tool_call` handler returning `{block, reason}` — so
+  there is no `Permission` arm, because an arm for one would be `permission.asked`
+  again. And **pi never reports the size a compaction came out at**: only
+  `tokensBefore` exists on both `CompactionPreparation` and `CompactionEntry`,
+  so `tokens_after` stays `None` rather than being guessed at.
+
+  `reasoning` is a *subset* of `output` in pi's `Usage`, not a sibling of it,
+  so the two are stored side by side and never summed.
+
+  Twenty-four mutations, all bite: session id and cwd dropped; both capture
+  gates removed; `excludeFromContext` dropped and `user_bash` host extraction
+  removed (a `!` command never passes through `tool_call`, so it is the one way
+  to run something invisible to every query about commands); `toolCallId`
+  dropped and file extraction skipped on the post leg; the failure-without-
+  output-capture fallback removed; each usage field zeroed; the turn-index
+  fallback for `turn_id` removed; provider qualification dropped; the compact
+  phase pinned, its trigger folded to `auto`, `tokensBefore` dropped, the
+  empty-instructions filter removed; the envelope keys left in `Session.detail`;
+  `meta.model` dropped from `model_select`; and unknown events routed away
+  from `Raw`.
+
+- [ ] **T14b** — pi.dev plugin, harness registration and fixtures. Dependency: T14a.
+  Files: new `plugins/pi/argus.ts`, new `src/harness/pi.rs`, `src/harness/mod.rs`,
+  new `tests/fixtures/pi/*.json`, new `tests/plugin/pi_payload.mjs`, new `tests/pi_plugin.rs`
 
 - [ ] **T15** — `install --managed`. Dependency: T10, T11, T12, T13, T14.
   Files: `src/harness/*` (`Scope::Managed` arms), `src/install.rs`, `src/integrity.rs`, `src/main.rs`
