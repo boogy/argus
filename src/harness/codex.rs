@@ -70,7 +70,22 @@ impl Harness for Codex {
         }
     }
 
-    fn artifacts(&self, d: &Detection, _scope: Scope) -> Vec<Artifact> {
+    fn artifacts(&self, d: &Detection, scope: Scope) -> Vec<Artifact> {
+        // A repository gets the hooks and nothing else. `config.toml` carries
+        // the `[otel]` block, and that block carries this install's receiver
+        // token — committing it would publish the one secret standing between
+        // the audit trail and anything else on the machine that can reach
+        // loopback. Project hooks are additive in Codex (a repository can add
+        // hooks, never replace the user's), so wiring only these leaves a
+        // user-level install intact rather than competing with it.
+        if scope == Scope::Project {
+            return vec![Artifact::JsonHooks {
+                path: d.config_home.join("hooks.json"),
+                events: EVENTS,
+                shape: HookShape::CommandArray,
+                source: "codex",
+            }];
+        }
         // Sourced from config so Codex's OTLP target and the daemon's actual
         // listen address can't drift apart.
         let endpoint = format!("http://{}", crate::config::load().codex.otlp_listen);

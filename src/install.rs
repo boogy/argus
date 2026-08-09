@@ -23,6 +23,21 @@ pub fn run(dry_run: bool) -> Result<()> {
     crate::harness::install(&home(), dry_run)
 }
 
+/// Wire a single repository rather than this user: `<dir>/.codex/hooks.json`
+/// and nothing else. Deliberately not a subset of `run` — machine-level
+/// settings stay out of a repository, most of all Codex's `[otel]` block,
+/// which carries this install's receiver token.
+pub fn run_project(root: &std::path::Path, dry_run: bool) -> Result<()> {
+    crate::harness::install_project(root, dry_run)
+}
+
+/// Reverse `run_project`.
+pub fn uninstall_project(root: &std::path::Path) -> Result<()> {
+    crate::harness::uninstall_project(root)?;
+    println!("argus unwired from {}", root.display());
+    Ok(())
+}
+
 /// Reverse `run`: remove exactly what `install` added, leaving unrelated
 /// user config (including a pre-existing Codex `[otel]`/`notify` that
 /// `install` refused to touch) untouched.
@@ -277,6 +292,101 @@ mod tests {
             arr.iter().any(|h| h.to_string().contains("audit-log")),
             "somebody else's hook was taken with it: {arr:?}"
         );
+    }
+
+    /// A repository gets the hooks and nothing else. The exclusion is the
+    /// point, not a simplification: `config.toml` carries the `[otel]` block,
+    /// that block carries this install's receiver token, and a token in a
+    /// repository is a token handed to everyone who can clone it.
+    #[test]
+    fn project_install_wires_only_repo_local_codex_hooks() {
+        let home = fake_home();
+        fake_bin(home.path());
+        let token = crate::adapters::codex::shared_token().unwrap();
+        assert!(!token.is_empty());
+        let repo = tempfile::tempdir().unwrap();
+
+        run_project(repo.path(), false).unwrap();
+
+        let hooks = repo.path().join(".codex/hooks.json");
+        let text = std::fs::read_to_string(&hooks).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&text).unwrap();
+        for ev in crate::harness::codex::EVENTS {
+            assert!(
+                doc["hooks"][ev.name].to_string().contains("argus"),
+                "missing {} in the repo hooks file",
+                ev.name
+            );
+        }
+        assert!(
+            !repo.path().join(".codex/config.toml").exists(),
+            "machine-level config must not be written into a repository"
+        );
+        // Walk the whole tree rather than checking the one file we expect to
+        // be absent — the guarantee is that the secret is nowhere under the
+        // repository, not that one particular path avoided it.
+        let mut stack = vec![repo.path().to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            for e in std::fs::read_dir(&dir).unwrap().flatten() {
+                if e.path().is_dir() {
+                    stack.push(e.path());
+                } else if let Ok(t) = std::fs::read_to_string(e.path()) {
+                    assert!(
+                        !t.contains(&token),
+                        "receiver token reached {}",
+                        e.path().display()
+                    );
+                }
+            }
+        }
+
+        // Idempotent, and reversible without touching anything else.
+        run_project(repo.path(), false).unwrap();
+        let again: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&hooks).unwrap()).unwrap();
+        let ours = again["hooks"]["PreToolUse"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|h| h[crate::harness::MARKER_KEY] == serde_json::json!(true))
+            .count();
+        assert_eq!(ours, 1);
+
+        uninstall_project(repo.path()).unwrap();
+        let after: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&hooks).unwrap_or("{}".into())).unwrap();
+        assert!(
+            !after.to_string().contains("argus"),
+            "uninstall left wiring behind: {after}"
+        );
+    }
+
+    /// The exit code is only worth reading if a repository nobody wired stays
+    /// silent — every checkout on the machine would otherwise report broken.
+    #[test]
+    fn project_check_is_silent_until_wired_and_then_holds_the_wiring() {
+        let home = fake_home();
+        fake_bin(home.path());
+        let repo = tempfile::tempdir().unwrap();
+        assert!(
+            crate::harness::check_project(repo.path()).is_empty(),
+            "an unwired repository is not a finding"
+        );
+
+        run_project(repo.path(), false).unwrap();
+        let f = crate::harness::check_project(repo.path());
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert!(f[0].ok && f[0].tool.contains("codex"), "{f:?}");
+
+        // Same standard as the user-level check: stripping one event's wiring
+        // is a finding, not a rounding error.
+        let path = repo.path().join(".codex/hooks.json");
+        let mut doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        doc["hooks"]["PreToolUse"] = serde_json::json!([]);
+        std::fs::write(&path, doc.to_string()).unwrap();
+        let f = crate::harness::check_project(repo.path());
+        assert!(!f[0].ok && f[0].detail.contains("PreToolUse"), "{f:?}");
     }
 
     #[test]

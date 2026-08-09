@@ -957,6 +957,34 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
     no `matcher`). It now installs for real — restoring the hand-built version
     fails the healthy-install tests, which is the correct signal that the
     fixture was fiction. Same shape as T10e.
+  - [x] **T11e** — Project-level `<repo>/.codex/hooks.json`. Files:
+    `src/harness/mod.rs`, `src/harness/{codex,claude_code,copilot,opencode}.rs`,
+    `src/install.rs`, `src/integrity.rs`, `src/main.rs`, `README.md`
+    `install/uninstall/check --project <dir>` wire one repository so anyone
+    running Codex inside it is captured without a per-machine hook install.
+    `Scope::Project` is a strictly *smaller* install than `User`, not a variant
+    of it: hooks only. Machine-level settings must not go into a repository —
+    Codex's `[otel]` block carries this install's receiver token, and a token
+    committed is a token handed to everyone who can clone it. Harnesses with
+    nothing to contribute return no artifacts, so only Codex is wired today.
+    Detection has no part in it: the operator named the directory, and a
+    repository that has never been opened in the tool has no `.codex/` yet,
+    which is exactly the case wiring it ahead of time is for. A repository
+    nothing wired is *silent* rather than broken, the same rule detection
+    follows for an absent tool — otherwise every checkout on the machine makes
+    the exit code meaningless. Because Codex project hooks are additive
+    ("higher-precedence layers don't replace lower-precedence hooks"), a repo
+    file can never be a kill switch, and a broken repository is a finding *on
+    top of* the user-level result rather than instead of it.
+    Six mutations, all bite. The token assertion walks the whole repository
+    tree rather than checking the one file expected to be absent — the
+    guarantee is that the secret is nowhere under the repository — and it was
+    confirmed to fire on its own, with the narrower `config.toml` assertion
+    removed, rather than only behind it.
+    Not enforcement, and documented as such: the hook command names a binary
+    that must already be on `PATH` in every clone, Codex loads a repository's
+    hooks only once that `.codex/` layer is trusted there per user, and anyone
+    who can push can delete what this writes.
 
 - [ ] **T12** — Copilot parity. Dependency: T4, T5.
   Files: `src/adapters/copilot.rs`, `src/harness/copilot.rs`

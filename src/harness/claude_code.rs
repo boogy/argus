@@ -67,7 +67,12 @@ impl Harness for ClaudeCode {
         }
     }
 
-    fn artifacts(&self, d: &Detection, _scope: Scope) -> Vec<Artifact> {
+    fn artifacts(&self, d: &Detection, scope: Scope) -> Vec<Artifact> {
+        // Nothing to put in a repository. Claude Code does have a project layer (`<repo>/.claude/settings.json`)
+        // and it works the same way; it is simply not wired yet.
+        if scope == Scope::Project {
+            return Vec::new();
+        }
         vec![Artifact::JsonHooks {
             path: d.config_home.join("settings.json"),
             events: EVENTS,

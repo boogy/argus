@@ -65,8 +65,15 @@ pub const HARNESSES: &[&dyn Harness] = &[
     &copilot::Copilot,
 ];
 
-/// Which layer an install targets: the invoking user's own config, or the
-/// admin-owned machine-wide layer users cannot disable.
+/// Which layer an install targets: the invoking user's own config, the
+/// admin-owned machine-wide layer users cannot disable, or a single
+/// repository's own config directory.
+///
+/// `Project` is a strictly smaller install than `User`, not a variant of it —
+/// only hook wiring goes into a repository. Machine-level settings must not:
+/// Codex's `[otel]` block carries this install's receiver token, and a token
+/// committed to a repository is a token published to everyone who can clone
+/// it. Harnesses with nothing to put in a repository return no artifacts.
 ///
 /// T15 implements `Managed`. It is defined here now so the artifact-producing
 /// signature is stable and later work is additive.
@@ -74,6 +81,7 @@ pub const HARNESSES: &[&dyn Harness] = &[
 pub enum Scope {
     User,
     Managed,
+    Project,
 }
 
 /// One hook event to subscribe to.
@@ -572,6 +580,94 @@ pub fn install(home: &Path, dry_run: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Where a harness keeps its config *inside a repository*. Detection has no
+/// part in it: the operator named the directory, and a repository that has
+/// never been opened in the tool has no `.codex/` yet — which is exactly the
+/// case wiring it ahead of time is for.
+fn project_detection(h: &dyn Harness, root: &Path) -> Option<Detection> {
+    let rel = h.probes().config_dirs.first()?.rel;
+    Some(Detection {
+        id: h.id(),
+        signals: Vec::new(),
+        config_home: root.join(rel),
+        binary: None,
+    })
+}
+
+/// Wire a single repository, so anyone who runs a supported agent inside it is
+/// captured without a per-machine install of the *hooks* — the argus binary
+/// itself still has to be on that machine's `PATH`, and a clone on a machine
+/// without it runs a hook command that resolves to nothing.
+///
+/// Codex additionally loads a repository's hooks only once that `.codex/`
+/// layer is trusted there, per user. This is a convenience for teams that
+/// already ship argus in their image, not an enforcement mechanism: anyone who
+/// can push to the repository can also remove what this writes.
+pub fn install_project(root: &Path, dry_run: bool) -> Result<()> {
+    let mut wired = 0;
+    for h in HARNESSES {
+        let Some(d) = project_detection(*h, root) else {
+            continue;
+        };
+        for artifact in h.artifacts(&d, Scope::Project) {
+            apply(&artifact, h.display_name(), dry_run)?;
+            wired += 1;
+        }
+    }
+    if wired == 0 {
+        println!("no tool supports repository-level wiring yet");
+    }
+    Ok(())
+}
+
+/// Exact inverse of [`install_project`].
+pub fn uninstall_project(root: &Path) -> Result<()> {
+    for h in HARNESSES {
+        let Some(d) = project_detection(*h, root) else {
+            continue;
+        };
+        for artifact in h.artifacts(&d, Scope::Project) {
+            revert(&artifact)?;
+        }
+    }
+    Ok(())
+}
+
+/// [`check`] for a repository. A repository nothing wired is silent rather
+/// than broken, the same rule detection follows for an absent tool: reporting
+/// every unwired checkout as a failure would make the exit code meaningless.
+pub fn check_project(root: &Path) -> Vec<Finding> {
+    let mut out = Vec::new();
+    for h in HARNESSES {
+        let Some(d) = project_detection(*h, root) else {
+            continue;
+        };
+        let artifacts = h.artifacts(&d, Scope::Project);
+        if artifacts.is_empty() || artifacts.iter().all(|a| !artifact_path(a).exists()) {
+            continue;
+        }
+        let problems: Vec<String> = artifacts.iter().filter_map(|a| verify(a).err()).collect();
+        out.push(Finding {
+            tool: format!("{} ({})", h.id(), root.display()),
+            ok: problems.is_empty(),
+            detail: if problems.is_empty() {
+                "wired".into()
+            } else {
+                problems.join("; ")
+            },
+        });
+    }
+    out
+}
+
+fn artifact_path(a: &Artifact) -> &Path {
+    match a {
+        Artifact::JsonHooks { path, .. }
+        | Artifact::OwnedFile { path, .. }
+        | Artifact::TomlEdit { path, .. } => path,
+    }
 }
 
 fn apply(artifact: &Artifact, display: &str, dry_run: bool) -> Result<()> {

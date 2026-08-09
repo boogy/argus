@@ -236,6 +236,32 @@ extra_patterns = ["ACME-[0-9]{6}"]
   corroborates it, otherwise a machine that has never had Codex gets wired and
   then reported as broken forever.
 
+- **Repository-level wiring** (`argus install --project <dir>`) writes
+  `<dir>/.codex/hooks.json` and nothing else, so anyone running Codex inside
+  that checkout is captured without a per-machine hook install. `uninstall
+  --project <dir>` reverses it, and `check --project <dir>` verifies it
+  alongside the user-level wiring — a repository nothing wired is silent rather
+  than broken.
+
+  Three things this is not. It is **not** a way to ship settings: machine-level
+  config stays out of the repository, most of all Codex's `[otel]` block, whose
+  `authorization` header carries this install's receiver token — committing that
+  publishes the one secret standing between the audit trail and anything else on
+  the machine that can reach loopback. It is **not** self-contained: the hook
+  command names the `argus` binary, which still has to be on `PATH` on every
+  machine that clones the repository, and Codex loads a repository's hooks only
+  once that `.codex/` layer is trusted there, per user, via `/hooks`. And it is
+  **not** enforcement — anyone who can push to the repository can also delete
+  what it writes. It is a convenience for teams that already ship argus in their
+  image. Project hooks are additive in Codex, so this never competes with a
+  user-level install; the two both run.
+
+  Only Codex is wired this way today. Claude Code has an equivalent project
+  layer (`<repo>/.claude/settings.json`) that is simply not wired yet; Copilot's
+  hook file is a machine-level path with no repository equivalent, and the
+  opencode plugin is loaded from the user's config directory, not contributed by
+  a repository.
+
 ## Troubleshooting
 
 - `argus status` — prints the resolved data dir, effective config

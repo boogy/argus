@@ -147,6 +147,7 @@ pub fn check_and_report(
     do_hooks: bool,
     do_config: bool,
     expected_remote_url: Option<&str>,
+    project: Option<&Path>,
 ) -> bool {
     let mut findings = Vec::new();
     if do_hooks {
@@ -155,6 +156,16 @@ pub fn check_and_report(
             println!("hooks: ok (no supported tools detected)");
         }
         findings.extend(hooks);
+        // Additive, never a substitute: a repository's hooks run *alongside*
+        // the user's, so a broken repository is a finding on top of whatever
+        // the user-level check said, not instead of it.
+        if let Some(root) = project {
+            let repo = crate::harness::check_project(root);
+            if repo.is_empty() {
+                println!("hooks: ok (nothing wired under {})", root.display());
+            }
+            findings.extend(repo);
+        }
     }
     if do_config {
         findings.extend(check_config(expected_remote_url));
@@ -376,7 +387,10 @@ mod tests {
         unsafe {
             std::env::set_var("ARGUS_HOME", home.path());
         }
-        assert!(check_and_report(true, false, None), "fully wired => true");
+        assert!(
+            check_and_report(true, false, None, None),
+            "fully wired => true"
+        );
         // strip one hook, as a tampering developer would
         let path = home.path().join(".claude/settings.json");
         let mut doc: serde_json::Value =
@@ -384,9 +398,37 @@ mod tests {
         doc["hooks"]["PreToolUse"] = serde_json::json!([]);
         std::fs::write(&path, doc.to_string()).unwrap();
         assert!(
-            !check_and_report(true, false, None),
+            !check_and_report(true, false, None, None),
             "broken wiring => false"
         );
+        unsafe {
+            std::env::remove_var("ARGUS_HOME");
+        }
+    }
+
+    /// A repository's hooks run *alongside* the user's, so a broken repository
+    /// has to move the exit code on its own — a user-level install that is
+    /// perfectly wired must not vote it back to healthy.
+    #[test]
+    fn a_broken_repository_fails_the_check_a_healthy_user_install_passed() {
+        let home = wired_claude_home();
+        unsafe {
+            std::env::set_var("ARGUS_HOME", home.path());
+        }
+        let repo = tempfile::tempdir().unwrap();
+        // Nothing wired here yet: silent, so every checkout on the machine
+        // isn't a failure.
+        assert!(check_and_report(true, false, None, Some(repo.path())));
+
+        crate::harness::install_project(repo.path(), false).unwrap();
+        assert!(check_and_report(true, false, None, Some(repo.path())));
+
+        let path = repo.path().join(".codex/hooks.json");
+        let mut doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        doc["hooks"]["PreToolUse"] = serde_json::json!([]);
+        std::fs::write(&path, doc.to_string()).unwrap();
+        assert!(!check_and_report(true, false, None, Some(repo.path())));
         unsafe {
             std::env::remove_var("ARGUS_HOME");
         }

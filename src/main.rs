@@ -28,9 +28,20 @@ enum Cmd {
     Install {
         #[arg(long)]
         dry_run: bool,
+        /// Wire this repository instead of the current user: writes
+        /// `<dir>/.codex/hooks.json` and nothing else. Machine-level settings
+        /// are deliberately excluded — Codex's `[otel]` block carries this
+        /// install's receiver token, which must not be committed. The argus
+        /// binary still has to be on `PATH` wherever the repository is cloned.
+        #[arg(long, value_name = "DIR")]
+        project: Option<std::path::PathBuf>,
     },
     /// Remove argus wiring from tools.
-    Uninstall,
+    Uninstall {
+        /// Unwire this repository instead of the current user.
+        #[arg(long, value_name = "DIR")]
+        project: Option<std::path::PathBuf>,
+    },
     /// Show daemon/config status.
     Status,
     /// Developer tool: promote recorded envelopes (ARGUS_RECORD_DIR) into
@@ -59,6 +70,10 @@ enum Cmd {
         /// catching a removed or repointed remote.url. Pass this from your MDM.
         #[arg(long)]
         remote_url: Option<String>,
+        /// Also verify repository-level wiring under this directory. A
+        /// repository nothing wired is silent, not broken.
+        #[arg(long, value_name = "DIR")]
+        project: Option<std::path::PathBuf>,
     },
 }
 
@@ -75,8 +90,14 @@ fn main() -> Result<()> {
         Cmd::Daemon => {
             tokio::runtime::Runtime::new()?.block_on(argus::daemon::run())?;
         }
-        Cmd::Install { dry_run } => argus::install::run(dry_run)?,
-        Cmd::Uninstall => argus::install::uninstall()?,
+        Cmd::Install { dry_run, project } => match project {
+            Some(root) => argus::install::run_project(&root, dry_run)?,
+            None => argus::install::run(dry_run)?,
+        },
+        Cmd::Uninstall { project } => match project {
+            Some(root) => argus::install::uninstall_project(&root)?,
+            None => argus::install::uninstall()?,
+        },
         Cmd::Status => print_status()?,
         Cmd::RecordFixtures { from, into } => {
             let written = argus::record::promote(&from, &into)?;
@@ -89,6 +110,7 @@ fn main() -> Result<()> {
             hooks,
             config,
             remote_url,
+            project,
         } => {
             // No flag = check everything.
             let (do_hooks, do_config) = if !hooks && !config {
@@ -98,7 +120,12 @@ fn main() -> Result<()> {
             };
             // Exit code is the contract for monitors: 0 = intact, 2 = broken.
             std::process::exit(
-                if argus::integrity::check_and_report(do_hooks, do_config, remote_url.as_deref()) {
+                if argus::integrity::check_and_report(
+                    do_hooks,
+                    do_config,
+                    remote_url.as_deref(),
+                    project.as_deref(),
+                ) {
                     0
                 } else {
                     2

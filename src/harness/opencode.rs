@@ -59,7 +59,12 @@ impl Harness for OpenCode {
         }
     }
 
-    fn artifacts(&self, d: &Detection, _scope: Scope) -> Vec<Artifact> {
+    fn artifacts(&self, d: &Detection, scope: Scope) -> Vec<Artifact> {
+        // Nothing to put in a repository. The opencode plugin is a file the runtime loads from the user's
+        // config directory, not something a repository contributes.
+        if scope == Scope::Project {
+            return Vec::new();
+        }
         vec![Artifact::OwnedFile {
             path: d.config_home.join("plugin/argus.ts"),
             contents: Cow::Borrowed(SHIM),

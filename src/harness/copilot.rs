@@ -68,7 +68,12 @@ impl Harness for Copilot {
     /// The hooks file has our own filename, so argus owns it outright:
     /// install overwrites, uninstall deletes — same policy as the opencode
     /// plugin shim, and no marker is needed inside it.
-    fn artifacts(&self, d: &Detection, _scope: Scope) -> Vec<Artifact> {
+    fn artifacts(&self, d: &Detection, scope: Scope) -> Vec<Artifact> {
+        // Nothing to put in a repository. Copilot's hook file is a machine-level path with no repository
+        // equivalent to write into.
+        if scope == Scope::Project {
+            return Vec::new();
+        }
         let mut hooks = serde_json::Map::new();
         // One marker per event, each the exact command that must still be on
         // disk. Checking the whole set is what makes "one event quietly
