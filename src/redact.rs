@@ -190,21 +190,47 @@ impl Redactor {
             EventKind::Notification {
                 message,
                 category: _,
+                title,
+            } => {
+                self.scrub_in_place(message);
+                if let Some(t) = title {
+                    self.scrub_in_place(t);
+                }
             }
-            | EventKind::Error {
+            EventKind::Error {
                 message,
                 context: _,
-            } => self.scrub_in_place(message),
+                // Scrubbed, unlike `context`, whose vocabulary the host tool
+                // enumerates. This one is whatever the throwing code called
+                // its error class, and code that builds a class name by
+                // interpolation puts the interpolated value here.
+                name,
+                // A boolean.
+                recoverable: _,
+            } => {
+                self.scrub_in_place(message);
+                if let Some(n) = name {
+                    self.scrub_in_place(n);
+                }
+            }
             EventKind::Session { action: _, detail } => self.scrub_json(detail),
             EventKind::Raw { payload } => self.scrub_json(payload),
-            // Enumerated, fixed-vocabulary fields: nothing user-authored.
+            // Everything but `instructions` is enumerated or a count. That
+            // one is free text the user typed, and it is typed at the moment
+            // they are deciding what the transcript should stop holding.
             EventKind::Compact {
                 phase: _,
                 trigger: _,
                 tokens_before: _,
                 tokens_after: _,
+                instructions,
+            } => {
+                if let Some(i) = instructions {
+                    self.scrub_in_place(i);
+                }
             }
-            | EventKind::FileChange { path: _, action: _ }
+            // Enumerated, fixed-vocabulary fields: nothing user-authored.
+            EventKind::FileChange { path: _, action: _ }
             | EventKind::Integrity {
                 status: _,
                 tool: _,
@@ -284,10 +310,36 @@ mod tests {
             crate::event::EventKind::Notification {
                 message: format!("use {secret}"),
                 category: "x".into(),
+                title: None,
+            },
+            // The title is what a human reads, and a tool that puts the
+            // interesting part in the title is not doing anything unusual.
+            crate::event::EventKind::Notification {
+                message: "use it".into(),
+                category: "x".into(),
+                title: Some(format!("copy {secret}")),
             },
             crate::event::EventKind::Error {
                 message: format!("auth {secret}"),
                 context: "x".into(),
+                name: None,
+                recoverable: None,
+            },
+            crate::event::EventKind::Error {
+                message: "auth failed".into(),
+                context: "x".into(),
+                name: Some(format!("BadTokenError({secret})")),
+                recoverable: Some(false),
+            },
+            // The one place a user is explicitly writing about what should
+            // not be kept — and quoting it while they do is the obvious way
+            // to get it wrong.
+            crate::event::EventKind::Compact {
+                phase: "pre".into(),
+                trigger: "manual".into(),
+                tokens_before: None,
+                tokens_after: None,
+                instructions: Some(format!("drop the part where I pasted {secret}")),
             },
             crate::event::EventKind::Permission {
                 tool: "Bash".into(),

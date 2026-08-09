@@ -168,6 +168,10 @@ pub(crate) fn parse_hook(source: &'static str, p: &Value, capture: &CaptureCfg) 
             category: s(p, "type")
                 .or_else(|| s(p, "notification_type"))
                 .unwrap_or_else(|| "unknown".into()),
+            // Sent alongside `message` (`{ hook_event_name: "Notification",
+            // message, title, notification_type }` in the shipped binary) and
+            // dropped until now.
+            title: s(p, "title").map(|t| cap_text(&t, max)),
         })],
         "Stop" | "SubagentStop" => {
             let mut events = vec![mk(EventKind::Session {
@@ -194,6 +198,12 @@ pub(crate) fn parse_hook(source: &'static str, p: &Value, capture: &CaptureCfg) 
             trigger: s(p, "trigger").unwrap_or_else(|| "unknown".into()),
             tokens_before: p.get("tokens_before").and_then(Value::as_u64),
             tokens_after: p.get("tokens_after").and_then(Value::as_u64),
+            // `custom_instructions` in the payload, `nullable()` in the
+            // binary's own schema — so absent, null and empty all arrive and
+            // all mean the same thing.
+            instructions: s(p, "custom_instructions")
+                .filter(|i| !i.is_empty())
+                .map(|i| cap_text(&i, max)),
         })],
         // `error` is the *type* — one of an enum (`rate_limit`,
         // `authentication_failed`, `invalid_request`, …) — and `error_details`
@@ -206,6 +216,11 @@ pub(crate) fn parse_hook(source: &'static str, p: &Value, capture: &CaptureCfg) 
                     max,
                 ),
                 context: s(p, "error").unwrap_or_else(|| "unknown".into()),
+                // Claude Code's `error` is already the type and it is put in
+                // `context`; there is no second name and no recoverability
+                // flag in this payload.
+                name: None,
+                recoverable: None,
             })];
             // A turn that ended in an error still says what the model had got
             // to before it did — and that half-finished message is the part
@@ -635,6 +650,7 @@ mod tests {
             trigger,
             tokens_before,
             tokens_after,
+            ..
         } = &events[0].kind
         else {
             panic!()
@@ -788,12 +804,51 @@ mod tests {
         assert_eq!(action, "config_changed:projectSettings");
     }
 
+    /// Both fields are in the payloads the shipped binary builds —
+    /// `{hook_event_name: "Notification", message, title, notification_type}`
+    /// and `{hook_event_name: "PreCompact", trigger, custom_instructions}` —
+    /// and both were being read past. The compaction one matters most: it is
+    /// the moment the session's own history is rewritten, and after the
+    /// rewrite the request to drop something is the only record that it was
+    /// ever there.
+    #[test]
+    fn a_notification_keeps_its_title_and_a_compaction_its_instructions() {
+        let EventKind::Notification { title, .. } = &from_fixture("Notification")[0].kind else {
+            panic!()
+        };
+        assert_eq!(title.as_deref(), Some("Permission required"));
+
+        let events = adapters::parse(
+            env(json!({"hook_event_name": "PreCompact", "trigger": "manual",
+                       "custom_instructions": "leave out the token I pasted"})),
+            &CaptureCfg::default(),
+        );
+        let EventKind::Compact { instructions, .. } = &events[0].kind else {
+            panic!()
+        };
+        assert_eq!(
+            instructions.as_deref(),
+            Some("leave out the token I pasted")
+        );
+
+        // The binary's own schema says `custom_instructions` is nullable, and
+        // the automatic path sends `""`. Neither is somebody asking for
+        // something, and `Some("")` downstream reads as if it were.
+        let EventKind::Compact { instructions, .. } = &from_fixture("PreCompact")[0].kind else {
+            panic!()
+        };
+        assert_eq!(*instructions, None);
+    }
+
     /// `error` is the enum variant and `error_details` the prose. Swapped, the
     /// context was always "unknown" and the message always empty.
     #[test]
     fn a_stop_failure_separates_the_error_type_from_its_prose() {
         let events = from_fixture("StopFailure");
-        let EventKind::Error { message, context } = &events[0].kind else {
+        let EventKind::Error {
+            message, context, ..
+        } = &events[0].kind
+        else {
             panic!("{:?}", events[0].kind)
         };
         assert_eq!(context, "rate_limit");

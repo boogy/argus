@@ -105,9 +105,24 @@ fn record(e: &Event) -> Value {
             attrs.push(attr("notification.category", category));
             "notification"
         }
-        EventKind::Compact { phase, trigger, .. } => {
+        EventKind::Compact {
+            phase,
+            trigger,
+            instructions,
+            ..
+        } => {
             attrs.push(attr("compact.phase", phase));
             attrs.push(attr("compact.trigger", trigger));
+            // Presence is the alertable part and is cheap to index; the text
+            // itself rides in the body with the rest of the event.
+            attrs.push(attr(
+                "compact.directed",
+                if instructions.is_some() {
+                    "true"
+                } else {
+                    "false"
+                },
+            ));
             "compact"
         }
         EventKind::FileChange { path, action } => {
@@ -115,8 +130,22 @@ fn record(e: &Event) -> Value {
             attrs.push(attr("file.action", action));
             "file_change"
         }
-        EventKind::Error { context, .. } => {
+        EventKind::Error {
+            context,
+            name,
+            recoverable,
+            ..
+        } => {
             attrs.push(attr("error.context", context));
+            // Both are what makes errors groupable and triageable without
+            // reading prose: the type says which errors are the same error,
+            // and `recoverable = false` is the one that ended a session.
+            if let Some(n) = name {
+                attrs.push(attr("error.name", n));
+            }
+            if let Some(r) = recoverable {
+                attrs.push(attr("error.recoverable", if *r { "true" } else { "false" }));
+            }
             "error"
         }
         EventKind::Session { action, .. } => {
@@ -448,6 +477,71 @@ mod tests {
             })
             .1,
             Some("false".to_string())
+        );
+    }
+
+    /// An operator triages on attributes, not bodies. These three answer
+    /// "which errors are the same error", "which one ended the session", and
+    /// "which compaction was told what to leave out" — none of which is worth
+    /// having if it means scanning prose.
+    #[test]
+    fn error_type_recoverability_and_a_directed_compaction_are_attributes() {
+        let attrs_of = |kind| {
+            let e = Event::new("copilot", None, None, kind);
+            let body = to_otlp_body(std::slice::from_ref(&e));
+            body["resourceLogs"][0]["scopeLogs"][0]["logRecords"][0]["attributes"]
+                .as_array()
+                .unwrap()
+                .clone()
+        };
+        let get = |attrs: &Vec<serde_json::Value>, k: &str| {
+            attrs
+                .iter()
+                .find(|a| a["key"] == k)
+                .map(|a| a["value"]["stringValue"].as_str().unwrap().to_string())
+        };
+
+        let a = attrs_of(EventKind::Error {
+            message: "the model took too long".into(),
+            context: "model_call".into(),
+            name: Some("TimeoutError".into()),
+            recoverable: Some(false),
+        });
+        assert_eq!(get(&a, "error.name").as_deref(), Some("TimeoutError"));
+        assert_eq!(get(&a, "error.recoverable").as_deref(), Some("false"));
+
+        // A tool that reports neither must not have them invented for it: an
+        // absent flag and `recoverable = true` are different claims.
+        let a = attrs_of(EventKind::Error {
+            message: "boom".into(),
+            context: "rate_limit".into(),
+            name: None,
+            recoverable: None,
+        });
+        assert_eq!(get(&a, "error.name"), None);
+        assert_eq!(get(&a, "error.recoverable"), None);
+
+        let directed = EventKind::Compact {
+            phase: "pre".into(),
+            trigger: "manual".into(),
+            tokens_before: None,
+            tokens_after: None,
+            instructions: Some("drop the token I pasted".into()),
+        };
+        assert_eq!(
+            get(&attrs_of(directed), "compact.directed").as_deref(),
+            Some("true")
+        );
+        let plain = EventKind::Compact {
+            phase: "pre".into(),
+            trigger: "auto".into(),
+            tokens_before: None,
+            tokens_after: None,
+            instructions: None,
+        };
+        assert_eq!(
+            get(&attrs_of(plain), "compact.directed").as_deref(),
+            Some("false")
         );
     }
 

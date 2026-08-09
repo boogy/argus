@@ -1043,6 +1043,41 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
     substring-based), and relaxing `== Some(true)` to `.is_some()`, which the
     explicit `disableAllHooks: false` case exists to catch, since the
     documented example writes that key.
+  - [x] **T12c** — Map the payload fields that were being read past. Files:
+    `src/event.rs`, `src/redact.rs`, `src/export.rs`,
+    `src/adapters/copilot.rs`, `src/adapters/claude_code.rs`, fixtures,
+    `README.md`.
+    Four new `EventKind` fields: `Notification.title`, `Compact.instructions`,
+    `Error.name`, `Error.recoverable`. Adding them broke every construction
+    site (E0063 ×3) and every destructuring pattern (E0027 ×3), which is the
+    forcing function working as designed — and both exhaustive matches
+    (`redact::scrub_event`, `export::record`) had to be extended by hand
+    before it compiled, so none of the four could ship unscrubbed or
+    unexported.
+    `Compact.instructions` is the one that matters: compaction rewrites the
+    session's own history, and afterwards the request to leave something out
+    is the only surviving evidence it was there. `Compact` moved out of
+    redact's no-op group for it, and `compact.directed` is exported as a
+    boolean so a SIEM can alert without reading prose.
+    Not speculative for Claude Code either — `title` and `custom_instructions`
+    are in the payload constructors inside the shipped binary (2.1.224), so
+    both adapters map them.
+    Copilot's `subagentStop.response` is emitted as a second
+    `EventKind::AssistantMessage` rather than stuffed into `Session.detail`,
+    which is what makes capping, redaction and `capture.assistant_messages`
+    apply to it; an empty response emits no second event. `meta.agent_type`
+    now prefers `agentType` (the kind) over `agentName` (the instance) —
+    grouping by a per-instance name is no grouping at all — and `meta.agent_id`
+    is populated. Empty `customInstructions` is filtered to `None` in both
+    adapters: `Some("")` reads downstream as a directed compaction.
+    Deliberately dropped: `error.stack` (unbounded, and describes the host
+    tool's file layout, not the session) and `toolResult.resultType` (the doc
+    says it is always `"success"`; failures arrive on `postToolUseFailure`).
+    Nineteen mutations, all bite — each of the four field mappings in both
+    adapters, both empty-string filters, the `agentType`/`agentName`
+    preference, `agent_id`, the subagent-answer emission with its capture gate
+    and its empty-response guard, all three new redaction arms, and all three
+    new export attributes.
 
 - [ ] **T13** — opencode + shared TS transport. Dependency: T4, T5.
   Files: `plugins/opencode/argus.ts` + new shared TS transport, `src/adapters/opencode.rs`, `src/harness/opencode.rs`

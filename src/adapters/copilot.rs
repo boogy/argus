@@ -46,7 +46,14 @@ pub fn parse(env: &Envelope, capture: &CaptureCfg) -> Vec<Event> {
     let session_id = sfield(p, "sessionId", "session_id");
     let cwd = p.get("cwd").and_then(Value::as_str).map(String::from);
     let meta = Meta {
-        agent_type: sfield(p, "agentName", "agent_name"),
+        // `agentType` is the subagent's *kind* and `agentName` its instance
+        // name; only `subagentStop` carries both. Preferring the kind keeps
+        // this field comparable with the other adapters, which fill it with a
+        // type — grouping by it is the point, and a per-instance name makes
+        // every subagent its own group.
+        agent_type: sfield(p, "agentType", "agent_type")
+            .or_else(|| sfield(p, "agentName", "agent_name")),
+        agent_id: sfield(p, "agentId", "agent_id"),
         transcript_path: sfield(p, "transcriptPath", "transcript_path"),
         ..Meta::default()
     };
@@ -154,11 +161,24 @@ pub fn parse(env: &Envelope, capture: &CaptureCfg) -> Vec<Event> {
                 max,
             ),
             context: sfield(p, "errorContext", "error_context").unwrap_or_else(|| "unknown".into()),
+            name: p
+                .pointer("/error/name")
+                .and_then(Value::as_str)
+                .map(|n| cap_text(n, max)),
+            recoverable: p.get("recoverable").and_then(Value::as_bool),
+            // `error.stack` is deliberately dropped. It is the one field here
+            // that is unbounded, and what it adds over name + message +
+            // context is the internal file layout of the host tool, not
+            // anything about this session.
         })],
         "notification" => vec![mk(EventKind::Notification {
             message: cap_text(p.get("message").and_then(Value::as_str).unwrap_or(""), max),
             category: sfield(p, "notification_type", "notificationType")
                 .unwrap_or_else(|| "unknown".into()),
+            title: p
+                .get("title")
+                .and_then(Value::as_str)
+                .map(|t| cap_text(t, max)),
         })],
         "preCompact" => vec![mk(EventKind::Compact {
             phase: "pre".into(),
@@ -169,16 +189,47 @@ pub fn parse(env: &Envelope, capture: &CaptureCfg) -> Vec<Event> {
                 .into(),
             tokens_before: None,
             tokens_after: None,
+            // Empty and absent mean the same thing here — an automatic
+            // compaction sends no instructions and some builds send `""` —
+            // and `Some("")` would read downstream as a directed compaction.
+            instructions: sfield(p, "customInstructions", "custom_instructions")
+                .filter(|s| !s.is_empty())
+                .map(|s| cap_text(&s, max)),
         })],
         "sessionStart" | "sessionEnd" | "agentStop" | "subagentStart" | "subagentStop" => {
-            vec![mk(EventKind::Session {
+            let mut events = vec![mk(EventKind::Session {
                 action: name.clone(),
                 detail: json!({
                     "source": field(p, "source", "source").cloned().unwrap_or(Value::Null),
                     "reason": field(p, "reason", "reason").cloned().unwrap_or(Value::Null),
                     "stop_reason": field(p, "stopReason", "stop_reason").cloned().unwrap_or(Value::Null),
+                    // What the subagent was called and what it was told to do.
+                    // The name alone is an identifier; the description is the
+                    // only record of the task it was spawned for, and a
+                    // subagent is exactly where work gets delegated out of
+                    // sight of the main transcript.
+                    "agent_display_name": field(p, "agentDisplayName", "agent_display_name").cloned().unwrap_or(Value::Null),
+                    "agent_description": field(p, "agentDescription", "agent_description").cloned().unwrap_or(Value::Null),
                 }),
-            })]
+            })];
+            // A subagent's final answer is assistant text, so it is recorded
+            // as one rather than buried in a session detail blob: it is
+            // capped, redacted and suppressed by `capture.assistant_messages`
+            // like every other assistant message. Copilot also spells it
+            // `last_assistant_message` in the snake_case payloads.
+            if name == "subagentStop"
+                && let Some(text) = sfield(p, "response", "last_assistant_message")
+                && !text.is_empty()
+            {
+                events.push(mk(EventKind::AssistantMessage {
+                    text: if capture.assistant_messages {
+                        cap_text(&text, max)
+                    } else {
+                        "[not captured]".into()
+                    },
+                }));
+            }
+            events
         }
         _ => vec![mk(EventKind::Raw { payload: p.clone() })],
     }
@@ -336,7 +387,8 @@ mod tests {
             &CaptureCfg::default(),
         );
         assert!(matches!(&events[0].kind,
-            EventKind::Error { message, context } if message == "model timeout" && context == "model_call"));
+            EventKind::Error { message, context, .. }
+                if message == "model timeout" && context == "model_call"));
 
         let events = adapters::parse(
             env(
@@ -382,6 +434,170 @@ mod tests {
         );
         assert!(matches!(&events[0].kind,
             EventKind::Compact { phase, trigger, .. } if phase == "pre" && trigger == "auto"));
+    }
+
+    /// Every field in these payloads that argus used to read past. Each one
+    /// answers a question the fields around it cannot: which errors are the
+    /// same error, which one ended the session, what a notification actually
+    /// said, and what a compaction was told to leave out.
+    #[test]
+    fn the_fields_around_the_message_are_kept_too() {
+        let events = adapters::parse(
+            env(
+                "errorOccurred",
+                json!({"sessionId": "cp1",
+                       "error": {"message": "model timeout", "name": "TimeoutError",
+                                 "stack": "at Session.send (/opt/copilot/dist/session.js:1:1)"},
+                       "errorContext": "model_call", "recoverable": false}),
+            ),
+            &CaptureCfg::default(),
+        );
+        let EventKind::Error {
+            context,
+            name,
+            recoverable,
+            ..
+        } = &events[0].kind
+        else {
+            panic!("{:?}", events[0].kind)
+        };
+        // The coarse stage and the specific type are different answers and
+        // both are kept: `model_call` says where, `TimeoutError` says what.
+        assert_eq!(context, "model_call");
+        assert_eq!(name.as_deref(), Some("TimeoutError"));
+        // `false` is the whole point of the field — an error the tool does not
+        // expect to recover from — so it must survive as `Some(false)` rather
+        // than collapse into "not reported".
+        assert_eq!(*recoverable, Some(false));
+        // Unbounded, and about the host tool's file layout rather than this
+        // session.
+        let json = serde_json::to_string(&events[0]).unwrap();
+        assert!(!json.contains("session.js"), "stack was kept: {json}");
+
+        let events = adapters::parse(
+            env(
+                "notification",
+                json!({"sessionId": "cp1", "message": "Approve running `rm -rf build`?",
+                       "title": "Permission required", "notification_type": "permission_prompt"}),
+            ),
+            &CaptureCfg::default(),
+        );
+        let EventKind::Notification { title, .. } = &events[0].kind else {
+            panic!()
+        };
+        assert_eq!(title.as_deref(), Some("Permission required"));
+
+        let events = adapters::parse(
+            env(
+                "preCompact",
+                json!({"sessionId": "cp1", "trigger": "manual",
+                       "customInstructions": "drop the credentials I pasted"}),
+            ),
+            &CaptureCfg::default(),
+        );
+        let EventKind::Compact { instructions, .. } = &events[0].kind else {
+            panic!()
+        };
+        assert_eq!(
+            instructions.as_deref(),
+            Some("drop the credentials I pasted")
+        );
+
+        // An automatic compaction is undirected, and both spellings of that
+        // have to arrive as `None` — `Some("")` reads downstream as somebody
+        // having asked for something.
+        for payload in [
+            json!({"sessionId": "cp1", "trigger": "auto"}),
+            json!({"sessionId": "cp1", "trigger": "auto", "customInstructions": ""}),
+        ] {
+            let events =
+                adapters::parse(env("preCompact", payload.clone()), &CaptureCfg::default());
+            let EventKind::Compact { instructions, .. } = &events[0].kind else {
+                panic!()
+            };
+            assert_eq!(*instructions, None, "{payload}");
+        }
+    }
+
+    /// A subagent is where work is delegated out of sight of the main
+    /// transcript: who it was, what it was told to do, and what it came back
+    /// with are the three things that make it auditable.
+    #[test]
+    fn a_subagent_carries_its_identity_its_brief_and_its_answer() {
+        let events = adapters::parse(
+            env(
+                "subagentStart",
+                json!({"sessionId": "cp1", "agentName": "reviewer-1",
+                       "agentDisplayName": "Code reviewer",
+                       "agentDescription": "review the staged diff"}),
+            ),
+            &CaptureCfg::default(),
+        );
+        let EventKind::Session { detail, .. } = &events[0].kind else {
+            panic!()
+        };
+        assert_eq!(detail["agent_display_name"], "Code reviewer");
+        assert_eq!(detail["agent_description"], "review the staged diff");
+
+        let stop = json!({"sessionId": "cp1", "agentId": "sub-7f21",
+                          "agentType": "reviewer", "agentName": "reviewer-1",
+                          "response": "no blocking issues", "stopReason": "end_turn"});
+        let events = adapters::parse(env("subagentStop", stop.clone()), &CaptureCfg::default());
+        // The kind, not the instance name: grouping by `agent_type` is what
+        // the field is for, and one group per subagent instance is no
+        // grouping at all.
+        assert_eq!(events[0].meta.agent_type.as_deref(), Some("reviewer"));
+        assert_eq!(events[0].meta.agent_id.as_deref(), Some("sub-7f21"));
+        // The answer is assistant text and is recorded as such — capped,
+        // redacted and suppressible like every other assistant message,
+        // instead of riding along inside a session blob that none of that
+        // applies to.
+        assert!(
+            matches!(&events[1].kind, EventKind::AssistantMessage { text } if text == "no blocking issues"),
+            "{:?}",
+            events[1].kind
+        );
+
+        let off = CaptureCfg {
+            assistant_messages: false,
+            ..CaptureCfg::default()
+        };
+        let events = adapters::parse(env("subagentStop", stop), &off);
+        assert!(
+            matches!(&events[1].kind, EventKind::AssistantMessage { text } if text == "[not captured]"),
+            "{:?}",
+            events[1].kind
+        );
+
+        // Nothing to say, nothing to record: a second event with an empty
+        // body is a row that looks like a subagent that answered.
+        let events = adapters::parse(
+            env(
+                "subagentStop",
+                json!({"sessionId": "cp1", "agentType": "reviewer", "response": ""}),
+            ),
+            &CaptureCfg::default(),
+        );
+        assert_eq!(events.len(), 1, "{:?}", events);
+    }
+
+    /// The name only appears in the plain-shell payloads under a different
+    /// key, so reading one spelling drops the answer for half the installs.
+    #[test]
+    fn the_snake_case_subagent_response_is_read_too() {
+        let events = adapters::parse(
+            env(
+                "subagentStop",
+                json!({"session_id": "cp1", "agent_type": "reviewer",
+                       "last_assistant_message": "done"}),
+            ),
+            &CaptureCfg::default(),
+        );
+        assert!(
+            matches!(&events[1].kind, EventKind::AssistantMessage { text } if text == "done"),
+            "{:?}",
+            events
+        );
     }
 
     #[test]

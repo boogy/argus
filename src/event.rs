@@ -146,6 +146,12 @@ pub enum EventKind {
     Notification {
         message: String,
         category: String,
+        /// The short label shown above `message`. Optional in the payload and
+        /// often the only part a human reads, so a record that keeps the body
+        /// and drops this one describes a different notification than the one
+        /// that appeared on screen.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
     },
     Compact {
         phase: String,   // "pre" | "post"
@@ -154,6 +160,17 @@ pub enum EventKind {
         tokens_before: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tokens_after: Option<u64>,
+        /// What the compaction was told to keep or leave out.
+        ///
+        /// Compaction is the one point where the session's own history is
+        /// rewritten, and these instructions decide what survives the rewrite.
+        /// "Summarize the work but leave out the credentials I used" is a
+        /// reasonable thing for a developer to type and an unreasonable thing
+        /// for an audit trail to lose: after the compaction the transcript no
+        /// longer holds what was dropped, so the request to drop it is the
+        /// only remaining evidence.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        instructions: Option<String>,
     },
     FileChange {
         path: String,
@@ -162,6 +179,19 @@ pub enum EventKind {
     Error {
         message: String,
         context: String,
+        /// The error's own type, where the host tool reports one separately
+        /// from the prose. `context` says which part of the system failed
+        /// (`model_call`, `tool_execution`, …) and this says what failed
+        /// there — the two together are what makes an error groupable across
+        /// sessions, which a free-text message never is.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        /// Whether the host tool expects to carry on. The distinction is the
+        /// whole difference between a retried blip and a session that stopped
+        /// working, and both arrive here looking identical otherwise. `None`
+        /// where the tool does not say.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        recoverable: Option<bool>,
     },
     Session {
         action: String,
@@ -366,6 +396,7 @@ mod tests {
                 EventKind::Notification {
                     message: "m".into(),
                     category: "idle_prompt".into(),
+                    title: None,
                 },
                 "notification",
             ),
@@ -375,6 +406,7 @@ mod tests {
                     trigger: "auto".into(),
                     tokens_before: Some(1000),
                     tokens_after: Some(200),
+                    instructions: None,
                 },
                 "compact",
             ),
@@ -389,6 +421,8 @@ mod tests {
                 EventKind::Error {
                     message: "boom".into(),
                     context: "rate_limit".into(),
+                    name: None,
+                    recoverable: None,
                 },
                 "error",
             ),

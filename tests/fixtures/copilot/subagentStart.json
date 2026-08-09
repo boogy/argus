@@ -1,0 +1,13 @@
+{
+  "source": "copilot",
+  "received_at": "2026-01-01T00:00:00Z",
+  "event": "subagentStart",
+  "payload": {
+    "sessionId": "sess-copilot-001",
+    "cwd": "/Users/dev/project",
+    "transcriptPath": "/Users/dev/.copilot/history/sess-copilot-001-sub.json",
+    "agentName": "reviewer-1",
+    "agentDisplayName": "Code reviewer",
+    "agentDescription": "Review the staged diff for auth regressions and report back"
+  }
+}

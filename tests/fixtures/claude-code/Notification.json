@@ -9,6 +9,7 @@
     "model": "claude-opus-5",
     "hook_event_name": "Notification",
     "message": "Claude needs your permission to use Bash",
-    "type": "permission_prompt"
+    "type": "permission_prompt",
+    "title": "Permission required"
   }
 }

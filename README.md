@@ -50,7 +50,7 @@ argus captures everything each surface offers.
 | --------------------------- | :------------------------: | :-------------------: | :---------------------: | :---------------: |
 | Prompts                     |             Y              |           Y           |            Y            |         Y         |
 | Prompt rewritten en route    |             —              |           —           |            —            | Y (userPromptTransformed) |
-| Assistant messages          |          Y (Stop)          |           Y           |      Y (Stop hook)      |         —         |
+| Assistant messages          |          Y (Stop)          |           Y           |      Y (Stop hook)      | Y (subagent only) |
 | Tool use (pre/post)         |             Y              |           Y           |            Y            |         Y         |
 | Tool outputs                |             Y              |           Y           |            Y            |         Y         |
 | Tool failures               |             Y              |           —           | Y (post incl. non-zero) |         Y         |
@@ -58,7 +58,7 @@ argus captures everything each surface offers.
 | FQDNs contacted             |             Y              |           Y           |            Y            |         Y         |
 | Skill/command invocations   |             Y              | Y (command.executed)  |            —            |         —         |
 | Slash-command expansion     |     Y (expanded text)      |           —           |            —            |         —         |
-| Subagent runs               |       Y (start+stop)       |           —           |            Y            |         Y         |
+| Subagent runs               |       Y (start+stop)       |           —           |            Y            | Y (start+stop)    |
 | Permission requests         |     Y (request+denied)     |   Y (asked+replied)   |            Y            |         Y         |
 | Compaction                  | Y (pre+post, token counts) | Y (session.compacted) |            Y            |      Y (pre)      |
 | Errors                      |      Y (StopFailure)       |   Y (session.error)   |            —            | Y (errorOccurred) |
@@ -75,6 +75,22 @@ ride in one `prompt_transformed` event (`original` and `transformed`, each
 redacted), with a `prompt.rewritten` attribute so a SIEM can alert on the edit
 without diffing two prompt bodies on every turn. `capture.prompts = false`
 suppresses both halves.
+
+A row saying `Y` means the event is recorded, not that every field in it is.
+Four that used to be read past are now kept, because each is the part of its
+event a reviewer would actually look for. A compaction's `custom_instructions`
+/ `customInstructions`: compaction is the one point where the session's own
+history is rewritten, and after the rewrite the request to leave something out
+is the only surviving evidence that it was ever there — so it is captured,
+redacted, and exported as a `compact.directed` boolean for alerting. A
+notification's `title`, which is usually the only part a human reads. An
+error's `name` and `recoverable`, which are what make errors groupable and
+what separate a retried blip from a session that stopped working. And a
+Copilot subagent's `agentDescription` (the task it was spawned for) plus its
+`response`, recorded as an assistant message rather than buried in a session
+blob so that capping, redaction and `capture.assistant_messages = false` apply
+to it like any other. Copilot's `error.stack` is deliberately dropped: it is
+unbounded and describes the host tool's own file layout, not the session.
 
 Codex is wired three ways at once: its hooks system (`~/.codex/hooks.json`,
 Claude-compatible payloads — note new hooks need one-time trust via `/hooks`

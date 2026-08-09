@@ -8,8 +8,11 @@
     "agentName": "copilot",
     "transcriptPath": "/Users/dev/.copilot/history/sess-copilot-001.json",
     "error": {
-      "message": "model request timed out"
+      "message": "model request timed out",
+      "name": "TimeoutError",
+      "stack": "Error: model request timed out\n    at Session.send (/opt/copilot/dist/session.js:412:19)"
     },
-    "errorContext": "completion"
+    "errorContext": "completion",
+    "recoverable": true
   }
 }
