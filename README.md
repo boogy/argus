@@ -302,8 +302,13 @@ extra_patterns = ["ACME-[0-9]{6}"]
   check `~/.claude/settings.json` (`hooks.*`), `~/.config/opencode/plugin/argus.ts`,
   `~/.codex/config.toml` (`notify`, `[otel]`), `~/.codex/hooks.json`, or
   `~/.copilot/hooks/argus.json`. Re-run `argus install`
-  (idempotent) if entries are missing. Codex hooks additionally need one-time
-  trust: run `/hooks` inside Codex and trust the argus entries.
+  (idempotent) if entries are missing — it also **refreshes** an argus entry
+  that an older release wrote, so an upgrade that changes a hook's command or
+  timeout reaches hosts that are already wired. Hooks beside ours are left
+  alone. Codex hooks additionally need one-time trust: run `/hooks` inside
+  Codex and trust the argus entries, and re-trust after any upgrade that
+  rewrote them — Codex records trust against a hook's current hash and skips
+  changed hooks until reviewed.
 - **Codex config not touched**: install never overwrites an existing `notify`
   or `[otel]` block — it warns on stderr and leaves it alone so it can't
   silently break another integration. Remove the conflicting block manually

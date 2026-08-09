@@ -879,9 +879,10 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
 
 - [ ] **T11** — Codex parity. Dependency: T4, T5.
   Files: `src/adapters/codex.rs`, `src/harness/codex.rs`, `src/integrity.rs`
-  Split under the sizing rule — four independent behavioral changes: T11a
-  `SessionEnd`, T11b kill-switch detection in `check`, T11c hook-trust hash
-  drift, T11d project-level `<repo>/.codex/hooks.json`. Codex is **not installed on this machine**, so
+  Split under the sizing rule — five independent behavioral changes: T11a
+  `SessionEnd`, T11b kill-switch detection in `check`, T11c install refreshes
+  its own stale hook entries, T11d hook-trust drift in `check`, T11e
+  project-level `<repo>/.codex/hooks.json`. Codex is **not installed on this machine**, so
   every payload assertion stays doc-derived, as the plan requires.
   - [x] **T11a** — Subscribe to Codex `SessionEnd`, timeout 3. Files:
     `src/harness/codex.rs`, `src/harness/mod.rs`, `src/install.rs`,
@@ -921,6 +922,21 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
     written — Codex's trust-store filename is undocumented, so there is no
     file to read. Moved to T11c as hash drift recorded at install time, which
     is the same signal from the side we control.
+  - [x] **T11c** — `install` refreshes its own stale hook entries. Files:
+    `src/harness/mod.rs`, `src/install.rs`, `README.md`
+    Prerequisite for T11d, and a bug on its own. `apply` skipped any event
+    that already carried an argus entry, so the entry the *first* install
+    wrote was the entry forever: T11a changed `SessionEnd`'s timeout from 10
+    to 3, and no already-wired host would ever have received it short of
+    uninstalling. Now the entry is replaced in place — the same rule
+    `OwnedFile` already used ("versioned with the binary, so a stale copy must
+    be replaced"), and idempotent for the same reason.
+    Ownership still decides: only an entry carrying our marker is replaced, a
+    hand-written hook in the same array is not ours to touch.
+    Three mutations, all bite. The first version of the test did not catch
+    replacing whichever entry came first, because it appended the foreign hook
+    *after* ours — with ours at index 0, "the entry that is ours" and "the
+    first entry" are the same edit. The foreign hook now goes in ahead of ours.
 
 - [ ] **T12** — Copilot parity. Dependency: T4, T5.
   Files: `src/adapters/copilot.rs`, `src/harness/copilot.rs`

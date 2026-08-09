@@ -591,11 +591,22 @@ fn apply(artifact: &Artifact, display: &str, dry_run: bool) -> Result<()> {
                     *arr = json!([]);
                 }
                 let arr = arr.as_array_mut().unwrap();
-                // Idempotent: never a second argus entry for one event.
-                if arr.iter().any(|h| is_ours(h, source)) {
-                    continue;
+                // Refreshed rather than skipped. The entry is versioned with
+                // the binary — the baked command and the per-event timeout
+                // both change between releases — so skipping an event that
+                // already has an argus entry left every upgraded host running
+                // whatever the *first* install wrote, forever, with no way
+                // short of uninstalling to correct it. Same rule as
+                // `OwnedFile` below, and idempotent for the same reason:
+                // exactly one argus entry per event, and an unchanged release
+                // rewrites identical bytes. Only entries carrying our own
+                // marker are touched; a hand-written hook beside ours is not
+                // ours to replace.
+                let want = hook_entry(*shape, &cmd, ev);
+                match arr.iter_mut().find(|h| is_ours(h, source)) {
+                    Some(ours) => *ours = want,
+                    None => arr.push(want),
                 }
-                arr.push(hook_entry(*shape, &cmd, ev));
             }
             if dry_run {
                 println!("[dry-run] would update {}", path.display());

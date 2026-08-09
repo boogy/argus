@@ -225,6 +225,60 @@ mod tests {
         }
     }
 
+    /// An upgrade has to reach hosts that are already wired. The entry argus
+    /// writes is versioned with the binary — T11a changed `SessionEnd`'s
+    /// timeout from 10 to 3 — and install used to skip any event that already
+    /// had an argus entry, so every host wired before that release kept the
+    /// old one with no way short of uninstalling to correct it.
+    #[test]
+    fn install_refreshes_a_stale_argus_hook_entry_and_leaves_foreign_ones() {
+        let home = fake_home();
+        run(false).unwrap();
+        let path = home.path().join(".codex/hooks.json");
+        let mut doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+
+        // What a pre-T11a install left behind, plus somebody else's hook in
+        // the same array — the case that makes "just overwrite the file" the
+        // wrong fix.
+        // Ahead of ours, not after it: "refresh the entry that is ours" and
+        // "refresh the first entry" are the same edit when ours is first, and
+        // only one of them is correct.
+        let arr = doc["hooks"]["SessionEnd"].as_array_mut().unwrap();
+        arr.insert(
+            0,
+            serde_json::json!({
+                "hooks": [{ "type": "command", "command": "/usr/local/bin/audit-log" }]
+            }),
+        );
+        arr[1]["hooks"][0]["timeout"] = serde_json::json!(10);
+        arr[1]["hooks"][0]["command"] = serde_json::json!("/opt/old/argus hook");
+        std::fs::write(&path, doc.to_string()).unwrap();
+
+        run(false).unwrap();
+
+        let doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let arr = doc["hooks"]["SessionEnd"].as_array().unwrap();
+        let ours: Vec<_> = arr
+            .iter()
+            .filter(|h| h[crate::harness::MARKER_KEY] == serde_json::json!(true))
+            .collect();
+        assert_eq!(ours.len(), 1, "still exactly one argus entry: {arr:?}");
+        assert_eq!(ours[0]["hooks"][0]["timeout"], 3, "{arr:?}");
+        assert!(
+            !ours[0]["hooks"][0]["command"]
+                .as_str()
+                .unwrap()
+                .contains("/opt/old/"),
+            "stale command survived: {arr:?}"
+        );
+        assert!(
+            arr.iter().any(|h| h.to_string().contains("audit-log")),
+            "somebody else's hook was taken with it: {arr:?}"
+        );
+    }
+
     #[test]
     fn uninstall_removes_codex_hooks_entries_only() {
         let home = fake_home();
