@@ -152,6 +152,41 @@ fn record(e: &Event) -> Value {
             attrs.push(attr("session.action", action));
             "session"
         }
+        EventKind::Usage {
+            input_tokens,
+            output_tokens,
+            reasoning_tokens,
+            cache_read_tokens,
+            cache_write_tokens,
+            cost,
+            finish,
+        } => {
+            // Named for OTel's GenAI semantic conventions where they have a
+            // name for it, so these aggregate alongside whatever else in the
+            // collector reports LLM usage.
+            attrs.push(attr("gen_ai.usage.input_tokens", &input_tokens.to_string()));
+            attrs.push(attr(
+                "gen_ai.usage.output_tokens",
+                &output_tokens.to_string(),
+            ));
+            attrs.push(attr(
+                "gen_ai.usage.reasoning_tokens",
+                &reasoning_tokens.to_string(),
+            ));
+            attrs.push(attr(
+                "gen_ai.usage.cache_read_tokens",
+                &cache_read_tokens.to_string(),
+            ));
+            attrs.push(attr(
+                "gen_ai.usage.cache_write_tokens",
+                &cache_write_tokens.to_string(),
+            ));
+            attrs.push(attr("gen_ai.usage.cost", &cost.to_string()));
+            if let Some(f) = finish {
+                attrs.push(attr("gen_ai.response.finish_reason", f));
+            }
+            "usage"
+        }
         EventKind::Raw { .. } => "raw",
         EventKind::Loss {
             reason,
@@ -543,6 +578,53 @@ mod tests {
             get(&attrs_of(plain), "compact.directed").as_deref(),
             Some("false")
         );
+    }
+
+    /// Usage is only worth capturing if it can be aggregated without parsing
+    /// the body, so every count has to reach the collector as its own
+    /// attribute — under OTel's GenAI names, so it sums alongside whatever
+    /// else there reports LLM spend.
+    #[test]
+    fn usage_counts_and_cost_are_each_their_own_attribute() {
+        let mut e = Event::new(
+            "opencode",
+            Some("s".into()),
+            None,
+            EventKind::Usage {
+                input_tokens: 120,
+                output_tokens: 31,
+                reasoning_tokens: 9,
+                cache_read_tokens: 98,
+                cache_write_tokens: 12,
+                cost: 0.0421,
+                finish: Some("stop".into()),
+            },
+        );
+        e.meta.model = Some("anthropic/claude-opus-5".into());
+        let body = to_otlp_body(std::slice::from_ref(&e));
+        let attrs = body["resourceLogs"][0]["scopeLogs"][0]["logRecords"][0]["attributes"].clone();
+        let get = |k: &str| {
+            attrs
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|a| a["key"] == k)
+                .map(|a| a["value"]["stringValue"].as_str().unwrap().to_string())
+        };
+        assert_eq!(get("event.type").as_deref(), Some("usage"));
+        for (key, want) in [
+            ("gen_ai.usage.input_tokens", "120"),
+            ("gen_ai.usage.output_tokens", "31"),
+            ("gen_ai.usage.reasoning_tokens", "9"),
+            ("gen_ai.usage.cache_read_tokens", "98"),
+            ("gen_ai.usage.cache_write_tokens", "12"),
+            ("gen_ai.usage.cost", "0.0421"),
+            ("gen_ai.response.finish_reason", "stop"),
+        ] {
+            assert_eq!(get(key).as_deref(), Some(want), "{key}");
+        }
+        // Which model spent it is half the record.
+        assert_eq!(get("llm.model").as_deref(), Some("anthropic/claude-opus-5"));
     }
 
     #[test]

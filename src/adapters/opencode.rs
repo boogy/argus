@@ -94,6 +94,34 @@ pub fn parse(env: &Envelope, capture: &CaptureCfg) -> Vec<Event> {
             ev.meta.tool_use_id = p.get("callID").and_then(Value::as_str).map(String::from);
             vec![ev]
         }
+        // One per finished assistant turn — the plugin drops the streaming
+        // updates, so anything arriving here is final.
+        "message.updated" => {
+            let n = |ptr: &str| p.pointer(ptr).and_then(Value::as_u64).unwrap_or(0);
+            let mut ev = mk(EventKind::Usage {
+                input_tokens: n("/tokens/input"),
+                output_tokens: n("/tokens/output"),
+                reasoning_tokens: n("/tokens/reasoning"),
+                cache_read_tokens: n("/tokens/cache/read"),
+                cache_write_tokens: n("/tokens/cache/write"),
+                cost: p.get("cost").and_then(Value::as_f64).unwrap_or(0.0),
+                finish: p.get("finish").and_then(Value::as_str).map(String::from),
+            });
+            // Qualified with the provider, because a bare `modelID` is not
+            // unique: the same name is served by more than one provider, and
+            // which one saw the turn is the whole question a policy about
+            // third-party models is asking.
+            ev.meta.model = match (
+                p.get("providerID").and_then(Value::as_str),
+                p.get("modelID").and_then(Value::as_str),
+            ) {
+                (Some(provider), Some(model)) => Some(format!("{provider}/{model}")),
+                (None, Some(model)) => Some(model.to_string()),
+                _ => None,
+            };
+            ev.meta.turn_id = p.get("messageID").and_then(Value::as_str).map(String::from);
+            vec![ev]
+        }
         "permission.asked" | "permission.replied" | "permission.updated" => {
             let action = match event {
                 "permission.asked" => "requested",
@@ -250,6 +278,78 @@ mod tests {
             vec![Some("call_7".into()), Some("call_7".into())],
             "both legs must carry the same id"
         );
+    }
+
+    /// opencode is the only harness that reports what a turn cost. The plugin
+    /// forwards it and this is where it stops being a JSON blob: summing spend
+    /// per session has to be a query, not a parse.
+    #[test]
+    fn a_finished_assistant_turn_becomes_a_usage_event() {
+        let events = adapters::parse(
+            env(json!({
+                "event": "message.updated", "sessionID": "oc1",
+                "messageID": "msg_1", "modelID": "claude-opus-5",
+                "providerID": "anthropic", "cost": 0.0421, "finish": "stop",
+                "tokens": {"input": 120, "output": 31, "reasoning": 9,
+                           "cache": {"read": 98, "write": 12}}
+            })),
+            &CaptureCfg::default(),
+        );
+        let EventKind::Usage {
+            input_tokens,
+            output_tokens,
+            reasoning_tokens,
+            cache_read_tokens,
+            cache_write_tokens,
+            cost,
+            finish,
+        } = &events[0].kind
+        else {
+            panic!("{:?}", events[0].kind)
+        };
+        assert_eq!(
+            (
+                *input_tokens,
+                *output_tokens,
+                *reasoning_tokens,
+                *cache_read_tokens,
+                *cache_write_tokens
+            ),
+            (120, 31, 9, 98, 12)
+        );
+        assert_eq!(*cost, 0.0421);
+        assert_eq!(finish.as_deref(), Some("stop"));
+        // Provider-qualified: the same model name is served by more than one
+        // provider, and which one saw the turn is the question a policy about
+        // third-party models is asking.
+        assert_eq!(
+            events[0].meta.model.as_deref(),
+            Some("anthropic/claude-opus-5")
+        );
+        assert_eq!(events[0].meta.turn_id.as_deref(), Some("msg_1"));
+    }
+
+    /// A provider that omits a leg must not make the whole receipt vanish —
+    /// the counts that did arrive are still worth having.
+    #[test]
+    fn usage_survives_a_payload_missing_every_optional_field() {
+        let events = adapters::parse(
+            env(json!({"event": "message.updated", "sessionID": "oc1"})),
+            &CaptureCfg::default(),
+        );
+        let EventKind::Usage {
+            input_tokens,
+            cost,
+            finish,
+            ..
+        } = &events[0].kind
+        else {
+            panic!("{:?}", events[0].kind)
+        };
+        assert_eq!(*input_tokens, 0);
+        assert_eq!(*cost, 0.0);
+        assert!(finish.is_none());
+        assert!(events[0].meta.model.is_none());
     }
 
     #[test]

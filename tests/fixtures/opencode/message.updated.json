@@ -1,0 +1,23 @@
+{
+  "source": "opencode",
+  "received_at": "2026-01-01T00:00:00Z",
+  "payload": {
+    "sessionID": "ses_opencode_001",
+    "event": "message.updated",
+    "cwd": "/repo",
+    "messageID": "msg_opencode_001",
+    "modelID": "claude-opus-5",
+    "providerID": "anthropic",
+    "cost": 0.0421,
+    "tokens": {
+      "input": 12043,
+      "output": 318,
+      "reasoning": 96,
+      "cache": {
+        "read": 9800,
+        "write": 1200
+      }
+    },
+    "finish": "stop"
+  }
+}

@@ -104,6 +104,27 @@ in the shim, so no adapter change can recover it.
 the plugin; map `modelID` → `meta.model` and add token/cost to a new event
 field or `Session` detail.
 
+**Closed (T13e).** Of the two options in that fix, the new event kind rather
+than `Session.detail`: a receipt buried in a JSON blob can only be aggregated
+by parsing every row, and cost-per-session is exactly the query that has to be
+cheap for the number to ever get looked at. `EventKind::Usage` carries the five
+counts, the cost, and the stop reason as separate fields; `redact.rs` and
+`export.rs` match `EventKind` exhaustively, so the variant forced both to say
+what they do with it.
+
+`meta.model` is `providerID/modelID`, not `modelID` alone — the same model name
+is served by more than one provider, and which one saw the turn is the whole
+question a policy about third-party models is asking. `messageID` →
+`meta.turn_id`, which is what a turn id is; `callID` already took
+`meta.tool_use_id` in T13d.
+
+The filter that keeps this off the hot path lives in the plugin, not the
+adapter: `message.updated` fires on every streamed delta and only the last one
+carries totals, so the plugin forwards it only when
+`info.role === "assistant" && info.time.completed`. The partial receipts never
+leave the editor process, and the daemon never has to guess which of a dozen
+frames was final.
+
 ### 10. opencode: no cwd, and callID is dropped
 
 - Events from opencode always have `cwd: null`; the plugin has access to the

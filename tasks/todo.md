@@ -1203,6 +1203,42 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
     (driver). Also: the two drivers write per-name shim files — one shared
     path would race and the loser would import a half-written file.
 
+  - [x] **T13e** — model, tokens, cost (telemetry-gaps #9). Files:
+    `src/event.rs`, `src/redact.rs`, `src/export.rs`,
+    `src/adapters/opencode.rs`, `plugins/opencode/argus.ts`,
+    `tests/plugin/opencode_payload.mjs`, new
+    `tests/fixtures/opencode/message.updated.json`,
+    `docs/telemetry-gaps.md`, `README.md`.
+    The gap doc offered two shapes — a new event field or `Session.detail` —
+    and this took the first. A receipt buried in a JSON blob can only be
+    aggregated by parsing every row, and cost-per-session has to be a cheap
+    query for anyone to ever look at the number. `EventKind::Usage` holds the
+    five counts, the cost and the stop reason as separate fields. It is also
+    self-enforcing: `redact.rs` and `export.rs` match `EventKind` with no
+    catch-all, so adding the variant was a compile error in both until each
+    said what it does with it. Export names the attributes after OTel's GenAI
+    conventions so they aggregate next to anything else reporting LLM usage.
+    `cost` is recorded, never derived — a price table living in argus would be
+    wrong the week after a provider changed one.
+    `meta.model` is `providerID/modelID`. A bare model name is not unique;
+    which provider served the turn is the whole question a policy about
+    third-party models asks. `messageID` → `meta.turn_id`.
+    The streaming filter lives in the plugin, not the adapter.
+    `message.updated` fires on every delta and only the last carries totals,
+    so the plugin forwards it only when `role === "assistant"` **and**
+    `time.completed` is set. The partial receipts never leave the editor
+    process and the daemon never has to pick which frame was final.
+    Thirteen mutations, all bite. Adapter: arm never matches, model
+    unqualified, cache-read zeroed, reasoning read from the wrong pointer,
+    `finish` dropped, `turn_id` dropped. Redact: the `finish` scrub removed —
+    which needed a `Usage` case added to `new_kinds_are_scrubbed` first, since
+    without it the arm was untested and the mutation would have survived.
+    Export: an attribute renamed, `cost` dropped. Plugin: the
+    `time.completed` gate removed, the `role` gate removed, `tokens` dropped,
+    `providerID` dropped — all four caught by `opencode_payload.mjs`, which
+    now fires three `message.updated` variants and asserts exactly one
+    envelope comes out.
+
 - [ ] **T14** — pi.dev harness. Dependency: T4, T5.
   Files: new `src/adapters/pi.rs`, new `plugins/pi/argus.ts`, new `src/harness/pi.rs`
 

@@ -65,6 +65,7 @@ argus captures everything each surface offers.
 | Config/instructions changes |             Y              |           —           |            —            |         —         |
 | Directory scope changes     |        Y (/add-dir)        |           —           |            —            |         —         |
 | Session lifecycle           |             Y              |           Y           |            Y            |         Y         |
+| Model, tokens, cost per turn |             —              |  Y (message.updated)  |            —            |         —         |
 
 Copilot's `userPromptTransformed` is the one row with no equivalent elsewhere,
 and the reason it is wired: it reports what was *actually* sent to the model
@@ -267,6 +268,18 @@ extra_patterns = ["ACME-[0-9]{6}"]
   `tests/plugin/opencode_payload.mjs` asserts the plugin puts them on the
   wire, because a field the plugin stops sending breaks no Rust test on its
   own — the adapter reads `None` and the column just goes quietly empty.
+
+  opencode is also the one surface that reports what a turn cost, so it is the
+  one that gets a `usage` event: model, provider, the five token counts and the
+  host tool's own cost figure, each its own field rather than a JSON blob —
+  spend-per-session has to be a query for the number to ever get looked at.
+  Token volume is also the cheapest thing that separates a session doing work
+  from one looping on the same failure. The streaming filter lives in the
+  plugin: `message.updated` fires on every delta and only the last one carries
+  totals, so the plugin forwards it only once the turn is marked complete, and
+  the partial receipts never leave the editor process. `meta.model` is
+  `provider/model`, because the same model name is served by more than one
+  provider and which one saw the turn is the question being asked.
 - **Daemon** (`argus daemon`) does everything else off that critical
   path: per-tool adapter parsing → secret redaction → durable SQLite buffering
   → batched OTLP/JSON export with exponential backoff. It also drains the

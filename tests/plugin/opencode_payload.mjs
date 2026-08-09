@@ -65,6 +65,31 @@ await hooks.event({ event: { type: "session.error", properties: { sessionID: "s1
 // Not in BUS_FORWARD: forwarding every bus event would put the plugin on the
 // token-streaming hot path.
 await hooks.event({ event: { type: "message.part.updated", properties: {} } });
+
+// `message.updated` fires repeatedly while a turn streams. Only the last one
+// has the totals, so the two below must be dropped and the third kept —
+// forwarding all three would report the same turn's cost three times.
+const usage = (extra) => ({
+  event: {
+    type: "message.updated",
+    properties: {
+      info: {
+        id: "msg_1",
+        sessionID: "s1",
+        role: "assistant",
+        modelID: "claude-opus-5",
+        providerID: "anthropic",
+        cost: 0.0421,
+        tokens: { input: 120, output: 31, reasoning: 9, cache: { read: 98, write: 12 } },
+        finish: "stop",
+        ...extra,
+      },
+    },
+  },
+});
+await hooks.event(usage({ time: { created: 1 } })); // still streaming
+await hooks.event(usage({ role: "user", time: { created: 1, completed: 2 } })); // not a turn
+await hooks.event(usage({ time: { created: 1, completed: 2 } })); // the receipt
 await tick();
 await new Promise((ok) => setTimeout(ok, 500));
 server.close();
@@ -72,13 +97,31 @@ server.close();
 const problems = [];
 const by = (name) => received.find((e) => e.payload.event === name);
 
-if (received.length !== 4) {
+if (received.length !== 5) {
   problems.push(
-    `expected 4 envelopes, got ${received.length}: ` +
+    `expected 5 envelopes, got ${received.length}: ` +
       JSON.stringify(received.map((e) => e.payload.event)),
   );
 }
 if (by("message.part.updated")) problems.push("a filtered bus event was forwarded");
+
+const usages = received.filter((e) => e.payload.event === "message.updated");
+if (usages.length !== 1) {
+  problems.push(`${usages.length} usage envelopes for one turn (want 1)`);
+}
+const u = usages[0];
+if (u) {
+  if (u.payload.messageID !== "msg_1") problems.push(`usage: messageID ${u.payload.messageID}`);
+  if (u.payload.modelID !== "claude-opus-5") problems.push(`usage: modelID ${u.payload.modelID}`);
+  if (u.payload.providerID !== "anthropic") {
+    problems.push(`usage: providerID ${u.payload.providerID}`);
+  }
+  if (u.payload.cost !== 0.0421) problems.push(`usage: cost ${u.payload.cost}`);
+  if (u.payload.finish !== "stop") problems.push(`usage: finish ${u.payload.finish}`);
+  if (JSON.stringify(u.payload.tokens?.cache) !== JSON.stringify({ read: 98, write: 12 })) {
+    problems.push(`usage: cache tokens ${JSON.stringify(u.payload.tokens)}`);
+  }
+}
 
 for (const e of received) {
   if (e.source !== "opencode") problems.push(`${e.payload.event}: source ${e.source}`);

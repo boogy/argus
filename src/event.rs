@@ -198,6 +198,38 @@ pub enum EventKind {
         #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
         detail: serde_json::Value,
     },
+    /// What one assistant turn consumed, as the host tool accounts for it.
+    ///
+    /// Not billing trivia. Token volume is the cheapest signal that separates
+    /// a session doing real work from one looping on the same failure, and
+    /// spend per session is the number that makes an exfiltration-by-a-
+    /// thousand-prompts pattern visible at all. The model itself rides in
+    /// `meta.model`, because "which model saw this" is a question asked of
+    /// every event, not only of the one carrying the receipt.
+    ///
+    /// Counts are separate fields rather than a JSON blob so they can be
+    /// summed without parsing, and the cache legs are separate from the rest
+    /// because they are the difference between a long session that is cheap
+    /// and one that is not.
+    Usage {
+        input_tokens: u64,
+        output_tokens: u64,
+        /// Tokens spent thinking rather than answering. Priced differently by
+        /// most providers, and a turn that reasons at length before acting is
+        /// a different shape of turn.
+        reasoning_tokens: u64,
+        cache_read_tokens: u64,
+        cache_write_tokens: u64,
+        /// The host tool's own figure, in the host tool's own currency.
+        /// Recorded rather than derived: a price table living in argus would
+        /// be wrong the week after a provider changed one.
+        cost: f64,
+        /// Why the turn stopped, where the tool says. A turn cut off by a
+        /// token ceiling costs the same as one that finished and means
+        /// something entirely different.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        finish: Option<String>,
+    },
     Raw {
         payload: serde_json::Value,
     },

@@ -214,6 +214,23 @@ impl Redactor {
                 }
             }
             EventKind::Session { action: _, detail } => self.scrub_json(detail),
+            // Counts and a price. `finish` is the provider's own stop reason
+            // — a fixed vocabulary in every provider that documents one — but
+            // it is the only string here, and a provider is free to put an
+            // error string in it, so it goes through the scrubber anyway.
+            EventKind::Usage {
+                input_tokens: _,
+                output_tokens: _,
+                reasoning_tokens: _,
+                cache_read_tokens: _,
+                cache_write_tokens: _,
+                cost: _,
+                finish,
+            } => {
+                if let Some(f) = finish {
+                    self.scrub_in_place(f);
+                }
+            }
             EventKind::Raw { payload } => self.scrub_json(payload),
             // Everything but `instructions` is enumerated or a count. That
             // one is free text the user typed, and it is typed at the moment
@@ -360,6 +377,17 @@ mod tests {
             crate::event::EventKind::PromptTransformed {
                 original: "deploy".into(),
                 transformed: format!("deploy using {secret}"),
+            },
+            // A receipt is almost all numbers, but the stop reason is a string
+            // the provider chose, and a provider is free to put an error there.
+            crate::event::EventKind::Usage {
+                input_tokens: 1,
+                output_tokens: 2,
+                reasoning_tokens: 0,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+                cost: 0.5,
+                finish: Some(format!("error: rejected {secret}")),
             },
             crate::event::EventKind::ToolUse {
                 tool: "Bash".into(),

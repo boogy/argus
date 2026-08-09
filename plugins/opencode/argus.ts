@@ -74,6 +74,28 @@ export const ArgusPlugin: Plugin = async (input) => {
       });
     },
     event: async ({ event }) => {
+      // `message.updated` fires repeatedly while a turn streams, and only the
+      // last one has the totals on it — an unfiltered forward would send a
+      // dozen partial receipts per turn and leave the daemon to guess which
+      // was final. `time.completed` is opencode's own "this turn is done"
+      // marker, so the filter lives here rather than in the adapter: the
+      // frames never leave the editor process at all.
+      if (event?.type === "message.updated") {
+        const info = (event.properties as any)?.info;
+        if (info?.role !== "assistant" || !info?.time?.completed) return;
+        send("opencode", {
+          event: "message.updated",
+          cwd,
+          sessionID: info.sessionID,
+          messageID: info.id,
+          modelID: info.modelID,
+          providerID: info.providerID,
+          cost: info.cost,
+          tokens: info.tokens,
+          finish: info.finish,
+        });
+        return;
+      }
       if (!event?.type || !BUS_FORWARD.has(event.type)) return;
       send("opencode", {
         event: event.type,
