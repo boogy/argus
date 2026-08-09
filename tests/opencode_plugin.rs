@@ -28,11 +28,23 @@ fn run_driver(name: &str) {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let driver = root.join("tests/plugin").join(name);
 
+    // The driver runs the composed shim, not the source fragment: install
+    // joins the shared transport onto opencode's half, and only the joined
+    // file is a thing that runs. Written next to the driver so its relative
+    // imports — currently only the type-only `@opencode-ai/plugin` — resolve
+    // the same way they will in the user's config directory.
+    let shim = root.join("target/opencode-shim.test.ts");
+    std::fs::write(&shim, argus::harness::opencode::shim_source()).unwrap();
+
     // Deliberately not a silent skip. The plugin is the only thing standing
     // between opencode and the daemon; a run that quietly does not test it
     // reports the same green as a run that does. Opting out has to be a
     // decision somebody made on purpose.
-    let out = match std::process::Command::new("node").arg(&driver).output() {
+    let out = match std::process::Command::new("node")
+        .arg(&driver)
+        .arg(&shim)
+        .output()
+    {
         Ok(out) => out,
         Err(e) => {
             if std::env::var_os("ARGUS_SKIP_PLUGIN_TESTS").is_some() {

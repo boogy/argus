@@ -390,7 +390,10 @@ mod tests {
     /// not checking the algorithm, but it is the drift that actually happens.
     #[test]
     fn the_opencode_plugin_still_hashes_the_same_way() {
-        let shim = include_str!("../plugins/opencode/argus.ts");
+        // The composed shim, not either half: the discriminator lives in the
+        // shared transport today, and this test is about what gets installed,
+        // not about which file currently holds the arithmetic.
+        let shim = crate::harness::opencode::shim_source();
         for constant in ["0xcbf29ce484222325n", "0x100000001b3n", r"pipe\\argus-$"] {
             assert!(
                 shim.contains(constant),

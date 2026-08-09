@@ -1129,6 +1129,35 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
     script.
     Verified by reverting the fix in place: the driver goes from
     `200 -> 16 socket + 184 spawned, no duplicates` to `400`.
+  - [x] **T13b** — Extract the transport into one shared module. Files: new
+    `plugins/shared/transport.ts`, `plugins/opencode/argus.ts`,
+    `src/harness/opencode.rs`, `src/paths.rs`, `tests/opencode_plugin.rs`,
+    `tests/plugin/opencode_transport.mjs`, `README.md`.
+    T14 adds a second TypeScript plugin host, which would have meant a second
+    copy of the socket path, the FNV discriminator and the envelope frame —
+    the three things that must agree with the Rust side and the three things a
+    copy drifts on silently. A drifted copy still loads and still forwards; it
+    just stops finding the daemon and spawns a process per event forever.
+    Split as transport (shared) + adapter (host's own event vocabulary), joined
+    by `shim_source()` in Rust rather than by a relative import between two
+    installed files: a plugin host loads exactly one file, and an import that
+    resolves on this machine need not resolve in someone else's config
+    directory. `strings` on the shipped opencode binary yielded no discovery
+    glob, so guessing whether a second file would even be loaded was not an
+    option worth taking.
+    Consequence, and the reason two tests changed: `plugins/opencode/argus.ts`
+    on its own no longer runs — `send` is not in scope. The Node driver and the
+    `paths.rs` hash test now both read `shim_source()`, i.e. the exact bytes
+    install writes, which is what they should have been reading all along.
+    A third marker, `send("opencode"`, ties the installed file to this harness
+    so a transport-only file fails `check` instead of installing quietly.
+    Four mutations, all bite: shim = transport only (install-check, driver);
+    shim = adapter only (install-check, paths-hash, driver); driver reads the
+    adapter fragment (driver); paths test reads the adapter fragment
+    (paths-hash). `paths-hash` passing under transport-only is not a miss — the
+    FNV constants live in the transport. A fifth, compound, confirms the layers
+    are independent: transport-only *with* the new marker removed passes
+    `check` and is caught only by the driver.
 
 - [ ] **T14** — pi.dev harness. Dependency: T4, T5.
   Files: new `src/adapters/pi.rs`, new `plugins/pi/argus.ts`, new `src/harness/pi.rs`

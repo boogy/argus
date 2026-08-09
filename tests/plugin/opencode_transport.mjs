@@ -53,7 +53,15 @@ const server = createServer((conn) => {
 
 await new Promise((ok) => server.listen(sockPath, ok));
 
-const { ArgusPlugin } = await import("../../plugins/opencode/argus.ts");
+// argv[1] is the composed shim — the exact bytes `install` writes, transport
+// and adapter joined. `plugins/opencode/argus.ts` on its own has no `send` in
+// scope, so testing that file directly would test something nobody runs.
+const shim = process.argv[2];
+if (!shim) {
+  console.error("usage: opencode_transport.mjs <path to composed shim>");
+  process.exit(2);
+}
+const { ArgusPlugin } = await import(shim);
 const hooks = await ArgusPlugin({});
 
 // The plugin's hooks are `async` but do all their work synchronously, so

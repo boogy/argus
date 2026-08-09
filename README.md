@@ -238,6 +238,18 @@ extra_patterns = ["ACME-[0-9]{6}"]
   grow the editor's memory without bound. `tests/plugin/` drives the real
   plugin against a stalled reader to hold that line — the pre-fix shim scores
   400 envelopes for 200 events there.
+
+  That transport is not opencode's. It lives in `plugins/shared/transport.ts`
+  and is joined onto each host's adapter half at build time, so every
+  TypeScript plugin argus installs derives its socket path, its FNV
+  discriminator and its envelope frame from one copy. A second copy would not
+  fail loudly if it drifted: the plugin would still load and still forward, it
+  would just stop finding the daemon and spawn a process per event forever.
+  The join happens in Rust rather than through a relative import because a
+  plugin host loads exactly one file, and an import that resolves here need
+  not resolve in someone else's config directory. The two halves are checked
+  as one — `check` looks for a marker from each, and the plugin test runs the
+  composed file rather than either fragment.
 - **Daemon** (`argus daemon`) does everything else off that critical
   path: per-tool adapter parsing → secret redaction → durable SQLite buffering
   → batched OTLP/JSON export with exponential backoff. It also drains the

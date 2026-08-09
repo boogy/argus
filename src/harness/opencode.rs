@@ -4,18 +4,37 @@ use crate::detect::{BinaryProbe, Platform};
 use crate::event::{Envelope, Event};
 use std::borrow::Cow;
 
-const SHIM: &str = include_str!("../../plugins/opencode/argus.ts");
+/// The socket/spawn transport, shared with every other TypeScript plugin host.
+/// Kept in one file because the pieces that must agree with the Rust side —
+/// the FNV discriminator, the socket path, the envelope frame — are pieces a
+/// second copy would drift away from silently: the plugin would still work, it
+/// would just stop finding the daemon and spawn a process per event forever.
+const TRANSPORT: &str = include_str!("../../plugins/shared/transport.ts");
+/// opencode's own half: its event vocabulary and nothing else.
+const ADAPTER: &str = include_str!("../../plugins/opencode/argus.ts");
+
+/// The bytes `install` writes. A plugin host loads exactly one file, so the
+/// two halves are joined here rather than shipped as two files with a relative
+/// import between them — an import that resolves on this machine and not
+/// necessarily in someone else's editor.
+pub fn shim_source() -> String {
+    format!("{TRANSPORT}\n{ADAPTER}")
+}
 
 /// Substrings the installed shim must still contain for events to reach us:
-/// one per transport it uses. The plugin talks to the daemon directly rather
-/// than invoking the binary through a shell, so there is no hook command to
-/// resolve — these are what "still wired" means here.
+/// one per transport it uses, plus the line that ties the file to this
+/// harness. The plugin talks to the daemon directly rather than invoking the
+/// binary through a shell, so there is no hook command to resolve — these are
+/// what "still wired" means here.
 fn markers() -> Vec<String> {
     vec![
         // Fast path: the daemon's local socket.
         "argus.sock".into(),
         // Fallback: spawn the shim binary.
-        r#""hook", "--source", "opencode""#.into(),
+        r#""hook", "--source", source"#.into(),
+        // Both halves are present, and the adapter half is opencode's. A file
+        // holding only the transport parses, installs, and forwards nothing.
+        r#"send("opencode""#.into(),
     ]
 }
 
@@ -67,7 +86,7 @@ impl Harness for OpenCode {
         }
         vec![Artifact::OwnedFile {
             path: d.config_home.join("plugin/argus.ts"),
-            contents: Cow::Borrowed(SHIM),
+            contents: Cow::Owned(shim_source()),
             markers: markers(),
             // The plugin reaches the daemon over the socket and resolves the
             // fallback binary itself at runtime, so there is no baked-in path
