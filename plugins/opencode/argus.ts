@@ -11,6 +11,14 @@ import type { Plugin } from "@opencode-ai/plugin";
 let sock: Socket | null = null;
 let sockBroken = false;
 
+// Bytes handed to the socket that have not been flushed yet. A stream accepts
+// writes while it is still connecting and while the kernel buffer is full, so
+// without a cap a daemon that stops reading turns into unbounded memory growth
+// inside the user's editor. One mebibyte is thousands of events; past it, new
+// events take the spawn fallback, which spools.
+let pending = 0;
+const MAX_PENDING = 1 << 20;
+
 // FNV-1a over the data directory, matching `endpoint_discriminator` in
 // src/paths.rs. The Windows pipe namespace is machine-global and flat, so the
 // name has to carry something per-user or every account on the box shares one
@@ -47,8 +55,16 @@ function socketPath(): string {
   return `${dataDir()}/argus.sock`;
 }
 
+/// Returns whether the frame was accepted by the socket — *not* whether it has
+/// reached the daemon. A caller that treats "not yet flushed" as failure sends
+/// the same event twice.
 function sendViaSocket(frame: string): boolean {
   if (sockBroken) return false;
+  const size = Buffer.byteLength(frame, "utf8");
+  // Checked before writing, so the fallback takes an event we have not also
+  // queued. Diverting an event is one envelope; queueing it and diverting it
+  // is two.
+  if (pending + size > MAX_PENDING) return false;
   try {
     if (!sock) {
       sock = createConnection(socketPath());
@@ -58,13 +74,28 @@ function sendViaSocket(frame: string): boolean {
         sock?.destroy();
         sock = null;
         sockBroken = true;
+        // Whatever was queued died with the socket; keeping the count would
+        // wedge the fast path shut for the rest of the session.
+        pending = 0;
         // Retry the fast path after a cool-down; fallback covers the gap.
         setTimeout(() => (sockBroken = false), 5000).unref?.();
       });
     }
-    return sock.write(frame);
+    pending += size;
+    // `write()` returning false means the stream is over its high-water mark,
+    // not that the frame was refused — it is queued and goes out on drain.
+    // The old code returned that boolean to the caller, which then spawned the
+    // shim for an event the socket was already carrying: one event, two
+    // envelopes, every time the buffer filled or the connection was still
+    // being established. The completion callback is the per-frame form of the
+    // `drain` event and is what releases the byte count here.
+    sock.write(frame, () => {
+      pending -= size;
+    });
+    return true;
   } catch {
     sock = null;
+    pending = 0;
     return false;
   }
 }

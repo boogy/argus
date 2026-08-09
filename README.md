@@ -226,6 +226,18 @@ extra_patterns = ["ACME-[0-9]{6}"]
   there the timeout is time the user spends watching the CLI refuse to exit,
   and an event lost at shutdown is the cheapest one to lose: the shim has
   already spooled it.
+
+- **opencode plugin** talks to the same socket from inside the editor process,
+  so it carries the fallback itself: an event the socket will not take is
+  handed to `argus hook`, which spools it. "Will not take" is deliberately not
+  the same as "has not sent yet". A stream write returns `false` once the
+  stream is over its high-water mark, but the frame is queued and still goes
+  out; sending it again through the fallback is how one tool call became two
+  rows. The plugin instead tracks unflushed bytes and diverts only what it has
+  not already queued, capped at 1 MiB so a daemon that stops reading cannot
+  grow the editor's memory without bound. `tests/plugin/` drives the real
+  plugin against a stalled reader to hold that line — the pre-fix shim scores
+  400 envelopes for 200 events there.
 - **Daemon** (`argus daemon`) does everything else off that critical
   path: per-tool adapter parsing → secret redaction → durable SQLite buffering
   → batched OTLP/JSON export with exponential backoff. It also drains the

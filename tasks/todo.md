@@ -1099,6 +1099,36 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
 
 - [ ] **T13** — opencode + shared TS transport. Dependency: T4, T5.
   Files: `plugins/opencode/argus.ts` + new shared TS transport, `src/adapters/opencode.rs`, `src/harness/opencode.rs`
+  - [x] **T13a** — Stop sending the same event twice. Files:
+    `plugins/opencode/argus.ts`, new `tests/opencode_plugin.rs`, new
+    `tests/plugin/opencode_transport.mjs`, `README.md`.
+    `sock.write()` returns `false` when the stream is over its high-water
+    mark. The frame is queued and goes out on drain — that is backpressure,
+    not refusal — but the shim returned that boolean as "the socket did not
+    take it" and spawned the fallback binary for the same event. Under a
+    stalled reader the driver measures **400 envelopes for 200 events** on the
+    old code, which is what double-counted tool calls look like in a dashboard.
+    Fixed by tracking unflushed bytes (the per-frame write callback is the
+    `drain` event at frame granularity) and checking the cap *before* writing,
+    so the fallback only ever gets an event the socket has not also queued.
+    Capped at 1 MiB: a stream accepts writes while connecting and while the
+    kernel buffer is full, so an unread daemon would otherwise grow the
+    editor's memory without bound.
+    First test in this repo that runs the TypeScript. Node 24 loads the
+    plugin's `.ts` directly (type stripping), so no build step. The driver
+    stalls the reader on purpose and asserts three things: no duplicate
+    session IDs, socket + spawned == events sent, and that the overflow path
+    actually ran — without the last one a fast reader would make it pass
+    vacuously.
+    Two traps found while writing it: the plugin's hooks are `async` but
+    synchronous inside, so `await`ing them in a loop drains only microtasks
+    and libuv never connects the socket (`setImmediate` between events fixes
+    it); and a missing `node` **fails** rather than skips, since a silent skip
+    reports the same green as a real run — `ARGUS_SKIP_PLUGIN_TESTS=1` is the
+    deliberate opt-out. Unix only: the driver's stand-in binary is a `sh`
+    script.
+    Verified by reverting the fix in place: the driver goes from
+    `200 -> 16 socket + 184 spawned, no duplicates` to `400`.
 
 - [ ] **T14** — pi.dev harness. Dependency: T4, T5.
   Files: new `src/adapters/pi.rs`, new `plugins/pi/argus.ts`, new `src/harness/pi.rs`
