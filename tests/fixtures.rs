@@ -94,6 +94,30 @@ fn every_fixture_parses_into_a_recognised_event() {
     }
 }
 
+/// Parsing an event proves nothing if nobody subscribed to it: `install`
+/// writes exactly the hooks in `EVENTS`, so an adapter arm for a hook that is
+/// not in that list is dead code that looks, from every query afterwards, like
+/// a hook that simply never fires.
+#[test]
+fn every_claude_hook_we_parse_is_a_hook_we_subscribe_to() {
+    let wired: Vec<&str> = argus::harness::claude_code::EVENTS
+        .iter()
+        .map(|e| e.name)
+        .collect();
+    for path in fixtures() {
+        let envelope = load(&path);
+        if envelope.source != "claude-code" {
+            continue;
+        }
+        let hook = envelope.payload["hook_event_name"].as_str().unwrap();
+        assert!(
+            wired.contains(&hook),
+            "{} parses {hook}, which install never subscribes to",
+            path.display()
+        );
+    }
+}
+
 /// Wave 2 is implementable without a live session only if every harness has
 /// something to work against.
 #[test]

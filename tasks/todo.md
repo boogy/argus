@@ -751,8 +751,10 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
 - [ ] **T10** — Claude Code field-mismatch fixes. Dependency: T4, T5.
   Files: `src/adapters/claude_code.rs`, `src/adapters/mod.rs`, `src/harness/claude_code.rs`
   Split under the sizing rule: T10a wrong field names on the non-tool arms,
-  T10b tool-arm extras, T10c `effort.level` into `Meta`, T10d the three
-  unwired hooks, T10e `extract_files_for_tool`'s sortless `dedup`.
+  T10b `Meta` gains `tool_use_id`/`effort`, T10c `ToolUse` gains
+  `duration_ms`/`interrupted`, T10d `StopFailure`'s last assistant message,
+  T10e the three unwired hooks, T10f `extract_files_for_tool`'s sortless
+  `dedup`.
   - [x] **T10a** — Wrong field names on the non-tool arms. Files:
     `src/adapters/claude_code.rs`, five new `tests/fixtures/claude-code/*.json`
     The plan's finding table was derived from the published hook docs. Those
@@ -835,6 +837,35 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
     nothing anywhere asserted that an empty `last_assistant_message` produces no
     event. It does now, and the mutation bites. A blank message row reads as
     "the model said nothing", which is a claim; no row is the absence of one.
+
+  - [x] **T10e** — Wire the three unwired hooks. Files:
+    `src/adapters/claude_code.rs`, `src/harness/claude_code.rs`,
+    `tests/fixtures.rs`, 3 new fixtures, `README.md`,
+    `docs/querying-local-database.md`
+    `DirectoryAdded` → `FileChange { path, action: "directory_added:<how>" }`:
+    `/add-dir` widens the tree the agent may reach, which is a scope change and
+    belongs with the other scope-shaped facts. `UserPromptExpansion` → one
+    `Session` carrying `expansion_type`/`command_name`/`command_args`/
+    `command_source` plus the expanded text behind `capture.prompts`.
+    `PostToolBatch` → `Session` carrying **only** each call's `tool_name` and
+    `tool_use_id`: the batch's finding is the grouping, and the inputs and
+    outputs already arrived on their own `PostToolUse` events, so repeating
+    them would spend the buffer's byte cap on a copy.
+    The README's stated reason for leaving `UserPromptExpansion` unwired —
+    "expansion input is already captured at `UserPromptSubmit`" — is false in
+    2.1.224: the binary has both as separate generators, and `UserPromptSubmit`
+    carries what the human typed, not what the command body expanded it into.
+    That body lives in a file they are not looking at when they type it, which
+    is the whole reason to capture it. Corrected in the README, and the
+    fidelity table gained rows for both new signals.
+    Eight mutations, all bite. Three of them (M6–M8) delete a `HookEvent` entry
+    rather than touching the parser, and before this task **none of those would
+    have bitten**: `integrity.rs`'s wiring test builds its `settings.json` from
+    `EVENTS` itself, so it can never notice an event missing from that list.
+    A parser arm for a hook `install` never subscribes to is dead code that
+    looks, from every query afterwards, exactly like a hook that never fires —
+    the same mechanism-vs-wiring gap as T8e/T9b/T10b. `tests/fixtures.rs` now
+    asserts every claude-code fixture's `hook_event_name` appears in `EVENTS`.
 
 - [ ] **T11** — Codex parity. Dependency: T4, T5.
   Files: `src/adapters/codex.rs`, `src/harness/codex.rs`, `src/integrity.rs`

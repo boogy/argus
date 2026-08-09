@@ -56,11 +56,13 @@ argus captures everything each surface offers.
 | File paths touched          |             Y              |           Y           |     Y (apply_patch)     |         Y         |
 | FQDNs contacted             |             Y              |           Y           |            Y            |         Y         |
 | Skill/command invocations   |             Y              | Y (command.executed)  |            —            |         —         |
+| Slash-command expansion     |     Y (expanded text)      |           —           |            —            |         —         |
 | Subagent runs               |       Y (start+stop)       |           —           |            Y            |         Y         |
 | Permission requests         |     Y (request+denied)     |   Y (asked+replied)   |            Y            |         Y         |
 | Compaction                  | Y (pre+post, token counts) | Y (session.compacted) |            Y            |      Y (pre)      |
 | Errors                      |      Y (StopFailure)       |   Y (session.error)   |            —            | Y (errorOccurred) |
 | Config/instructions changes |             Y              |           —           |            —            |         —         |
+| Directory scope changes     |        Y (/add-dir)        |           —           |            —            |         —         |
 | Session lifecycle           |             Y              |           Y           |            Y            |         Y         |
 
 Codex is wired three ways at once: its hooks system (`~/.codex/hooks.json`,
@@ -73,8 +75,6 @@ OTLP logs (`[otel]` in `config.toml`) for token/model telemetry.
 - `MessageDisplay` — fires on every rendered assistant-message chunk
   (hot-path cost); the final text is already captured via
   `Stop.last_assistant_message`.
-- `UserPromptExpansion` — expansion input is already captured at
-  `UserPromptSubmit`.
 - `FileChanged` — requires literal filename matchers, not wildcardable.
 - `WorktreeCreate`/`WorktreeRemove` — `WorktreeCreate` interprets hook stdout
   as a replacement worktree path and a non-zero exit fails creation; too

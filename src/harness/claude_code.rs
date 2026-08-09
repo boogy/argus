@@ -6,13 +6,15 @@ use crate::event::{Envelope, Event};
 /// Events we subscribe to, and whether the entry carries a `"matcher": "*"`.
 /// Matchers are set only for tool-name-matched events; matcher-less entries
 /// run for every matcher value anyway. Deliberately not wired (see README):
-/// MessageDisplay, UserPromptExpansion, FileChanged, Worktree*, Setup,
-/// TeammateIdle, Elicitation*.
+/// MessageDisplay, FileChanged, Worktree*, Setup, TeammateIdle, Elicitation*.
 pub const EVENTS: &[HookEvent] = &[
     HookEvent::new("UserPromptSubmit", false),
+    HookEvent::new("UserPromptExpansion", false),
     HookEvent::new("PreToolUse", true),
     HookEvent::new("PostToolUse", true),
     HookEvent::new("PostToolUseFailure", true),
+    // A batch spans several tools, so no single tool name can match it.
+    HookEvent::new("PostToolBatch", false),
     HookEvent::new("PermissionRequest", true),
     HookEvent::new("PermissionDenied", true),
     HookEvent::new("Notification", false),
@@ -29,6 +31,7 @@ pub const EVENTS: &[HookEvent] = &[
     HookEvent::new("InstructionsLoaded", false),
     HookEvent::new("TaskCreated", false),
     HookEvent::new("TaskCompleted", false),
+    HookEvent::new("DirectoryAdded", false),
 ];
 
 const CONFIG_DIRS: &[ConfigDir] = &[ConfigDir {

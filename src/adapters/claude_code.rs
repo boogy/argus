@@ -232,6 +232,67 @@ pub(crate) fn parse_hook(source: &'static str, p: &Value, capture: &CaptureCfg) 
                     .unwrap_or("unknown")
             ),
         })],
+        // `/add-dir`, or the SDK's `register_repo_root`, widening what the
+        // agent is allowed to reach. `source` says which, and the two are not
+        // equally interesting: a human typing `/add-dir` chose the expansion,
+        // an SDK caller may have been talked into it.
+        "DirectoryAdded" => vec![mk(EventKind::FileChange {
+            path: s(p, "directory").unwrap_or_default(),
+            action: format!(
+                "directory_added:{}",
+                p.get("source").and_then(Value::as_str).unwrap_or("unknown")
+            ),
+        })],
+        // A slash command or MCP prompt turning into the text the model
+        // actually reads. `UserPromptSubmit` carries what the human typed;
+        // this carries what it became — and the gap between the two is the
+        // whole point, because the expansion body lives in a file the human
+        // is not looking at when they type the command.
+        "UserPromptExpansion" => {
+            let prompt = if capture.prompts {
+                cap_text(p.get("prompt").and_then(Value::as_str).unwrap_or(""), max)
+            } else {
+                "[not captured]".into()
+            };
+            vec![mk(EventKind::Session {
+                action: hook.into(),
+                detail: json!({
+                    "expansion_type": p.get("expansion_type").cloned().unwrap_or(Value::Null),
+                    "command_name": p.get("command_name").cloned().unwrap_or(Value::Null),
+                    "command_args": p.get("command_args").cloned().unwrap_or(Value::Null),
+                    // Which tier defined the command — a project-level one is
+                    // repo-controlled, so whoever can push can change it.
+                    "command_source": p.get("command_source").cloned().unwrap_or(Value::Null),
+                    "prompt": prompt,
+                }),
+            })]
+        }
+        // The finding here is the *grouping*: which calls the model chose to
+        // run in one parallel batch. Every call's input and output already
+        // arrived on its own `PostToolUse`, so repeating them would double the
+        // bytes against the buffer's caps for nothing — the ids are what stitch
+        // this row back to those.
+        "PostToolBatch" => {
+            let tool_calls: Vec<Value> = p
+                .get("tool_calls")
+                .and_then(Value::as_array)
+                .map(|calls| {
+                    calls
+                        .iter()
+                        .map(|c| {
+                            json!({
+                                "tool_name": c.get("tool_name").cloned().unwrap_or(Value::Null),
+                                "tool_use_id": c.get("tool_use_id").cloned().unwrap_or(Value::Null),
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            vec![mk(EventKind::Session {
+                action: hook.into(),
+                detail: json!({ "tool_calls": tool_calls }),
+            })]
+        }
         "CwdChanged" => vec![mk(EventKind::Session {
             action: hook.into(),
             detail: json!({
@@ -843,5 +904,79 @@ mod tests {
             &CaptureCfg::default(),
         );
         assert_eq!(events[0].meta.effort, None);
+    }
+
+    /// `/add-dir` widens the tree the agent may reach, so it has to arrive as a
+    /// scope change and say which mechanism widened it.
+    #[test]
+    fn adding_a_directory_records_the_path_and_who_added_it() {
+        assert_eq!(
+            file_change("DirectoryAdded"),
+            (
+                "/Users/dev/other-project".into(),
+                "directory_added:slash_command".into()
+            )
+        );
+    }
+
+    /// The expanded text is the part `UserPromptSubmit` cannot show: the human
+    /// typed `/deploy staging`, and this is what that became.
+    #[test]
+    fn a_slash_command_records_what_it_expanded_into() {
+        let events = from_fixture("UserPromptExpansion");
+        assert_eq!(events.len(), 1, "{events:?}");
+        let EventKind::Session { action, detail } = &events[0].kind else {
+            panic!("{:?}", events[0].kind)
+        };
+        assert_eq!(action, "UserPromptExpansion");
+        assert_eq!(detail["command_name"], json!("deploy"));
+        assert_eq!(detail["command_args"], json!("staging"));
+        assert_eq!(detail["expansion_type"], json!("slash_command"));
+        // Which tier defined the command: a project-level one is repo-controlled.
+        assert_eq!(detail["command_source"], json!("project"));
+        assert!(
+            detail["prompt"].as_str().unwrap().contains("staging"),
+            "{detail}"
+        );
+
+        // The expansion body is prompt text, so the prompt switch has to reach
+        // it — capturing it here would otherwise be a hole in a flag people
+        // turn off precisely to keep prompt text off disk.
+        let off = CaptureCfg {
+            prompts: false,
+            ..CaptureCfg::default()
+        };
+        let events = adapters::parse(
+            env(json!({"hook_event_name": "UserPromptExpansion",
+                       "command_name": "deploy", "prompt": "secret expansion"})),
+            &off,
+        );
+        let EventKind::Session { detail, .. } = &events[0].kind else {
+            panic!("{:?}", events[0].kind)
+        };
+        assert_eq!(detail["prompt"], json!("[not captured]"));
+    }
+
+    /// The batch is worth recording for the grouping alone; its calls' inputs
+    /// and outputs already arrived on their own `PostToolUse` events, and
+    /// carrying them twice would spend the buffer's byte cap on a copy.
+    #[test]
+    fn a_tool_batch_records_the_grouping_and_not_a_second_copy_of_it() {
+        let events = from_fixture("PostToolBatch");
+        assert_eq!(events.len(), 1, "{events:?}");
+        let EventKind::Session { action, detail } = &events[0].kind else {
+            panic!("{:?}", events[0].kind)
+        };
+        assert_eq!(action, "PostToolBatch");
+        assert_eq!(
+            detail["tool_calls"],
+            json!([
+                {"tool_name": "Read", "tool_use_id": "toolu_03BatchRead"},
+                {"tool_name": "Bash", "tool_use_id": "toolu_04BatchBash"},
+            ])
+        );
+        let text = serde_json::to_string(detail).unwrap();
+        assert!(!text.contains("api.example.com"), "{text}");
+        assert!(!text.contains("numLines"), "{text}");
     }
 }

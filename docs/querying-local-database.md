@@ -96,9 +96,9 @@ builds use `json_extract(body, '$.path')` — they are equivalent.
 | `permission`        | `tool`, `action` (`requested`/`denied`/`replied`/`updated`), `input`                                                                                  |
 | `notification`      | `message`, `category`                                                                                                                                 |
 | `compact`           | `phase`, `trigger`, `tokens_before`, `tokens_after`                                                                                                   |
-| `file_change`       | `path`, `action` (`edited`, `config_changed:<src>`, `instructions_loaded:<tier>`, …)                                                                  |
+| `file_change`       | `path`, `action` (`edited`, `config_changed:<src>`, `instructions_loaded:<tier>`, `directory_added:<how>`, …)                                          |
 | `error`             | `message`, `context`                                                                                                                                  |
-| `session`           | `action` (`SessionStart`, `Stop`, `session.created`, `turn-complete`, …), `detail` (JSON)                                                             |
+| `session`           | `action` (`SessionStart`, `Stop`, `UserPromptExpansion`, `PostToolBatch`, `session.created`, `turn-complete`, …), `detail` (JSON)                      |
 | `raw`               | `payload` (unmapped upstream event, kept verbatim)                                                                                                    |
 
 Fields that are null/empty may be omitted entirely (`output`, `error`, `meta`,
@@ -229,6 +229,46 @@ FROM events WHERE body->>'$.type' = 'skill';
 SELECT body->>'$.ts', body->>'$.agent_type', body->>'$.description',
        body->>'$.meta.model'
 FROM events WHERE body->>'$.type' = 'agent';
+```
+
+### What slash commands actually expanded into
+
+The `prompt` row shows what the human typed; this shows the text the command
+turned into, which lives in a file they were not looking at when they typed it.
+
+```sql
+SELECT body->>'$.ts',
+       body->>'$.detail.command_name'   AS command,
+       body->>'$.detail.command_source' AS defined_in,
+       substr(body->>'$.detail.prompt', 1, 200) AS expanded
+FROM events
+WHERE body->>'$.type' = 'session'
+  AND body->>'$.action' = 'UserPromptExpansion'
+ORDER BY seq DESC;
+```
+
+`defined_in = 'project'` means the command body is repo-controlled: whoever can
+push to the repo can change what it expands to.
+
+### Which tool calls ran in the same parallel batch
+
+`PostToolBatch` carries only the grouping (`tool_name` + `tool_use_id`); join
+back to the `tool_use` rows via `$.meta.tool_use_id` for inputs and outputs.
+
+```sql
+SELECT body->>'$.ts', c.value->>'$.tool_name', c.value->>'$.tool_use_id'
+FROM events, json_each(events.body, '$.detail.tool_calls') AS c
+WHERE body->>'$.action' = 'PostToolBatch'
+ORDER BY seq DESC;
+```
+
+### Directory scope expansions (`/add-dir`)
+
+```sql
+SELECT body->>'$.ts', body->>'$.session_id', body->>'$.path', body->>'$.action'
+FROM events
+WHERE body->>'$.type' = 'file_change'
+  AND body->>'$.action' LIKE 'directory_added:%';
 ```
 
 ### Compaction / context pressure
