@@ -9,7 +9,8 @@ pub fn parse(env: &Envelope, capture: &CaptureCfg) -> Vec<Event> {
         .and_then(Value::as_str)
         .or_else(|| p.pointer("/properties/sessionID").and_then(Value::as_str))
         .map(String::from);
-    let mk = |kind| Event::new("opencode", session_id.clone(), None, kind);
+    let cwd = p.get("cwd").and_then(Value::as_str).map(String::from);
+    let mk = |kind| Event::new("opencode", session_id.clone(), cwd.clone(), kind);
     let event = p.get("event").and_then(Value::as_str).unwrap_or("");
     let max = capture.max_field_bytes;
     let props = p.get("properties").cloned().unwrap_or(Value::Null);
@@ -73,7 +74,7 @@ pub fn parse(env: &Envelope, capture: &CaptureCfg) -> Vec<Event> {
             } else {
                 Value::Null
             };
-            vec![mk(EventKind::ToolUse {
+            let mut ev = mk(EventKind::ToolUse {
                 tool,
                 phase,
                 input,
@@ -84,7 +85,14 @@ pub fn parse(env: &Envelope, capture: &CaptureCfg) -> Vec<Event> {
                 interrupted: false,
                 files,
                 fqdns,
-            })]
+            });
+            // The plugin has always sent this and the adapter has always
+            // dropped it. It is the only thing that pairs the `before` with
+            // the `after`: two `bash` calls in a turn are otherwise
+            // indistinguishable, so a call that hung — a `pre` whose `post`
+            // never arrived — could not be told from one that finished.
+            ev.meta.tool_use_id = p.get("callID").and_then(Value::as_str).map(String::from);
+            vec![ev]
         }
         "permission.asked" | "permission.replied" | "permission.updated" => {
             let action = match event {
@@ -201,6 +209,47 @@ mod tests {
             panic!()
         };
         assert_eq!(fqdns, &vec!["registry.npmjs.org".to_string()]);
+    }
+
+    /// Every other harness reports where the session is running; opencode
+    /// reported `null`, which silently excluded its events from anything
+    /// scoped to a repository.
+    #[test]
+    fn events_carry_the_working_directory_the_plugin_reports() {
+        for payload in [
+            json!({"event": "chat.message", "cwd": "/repo",
+                   "message": {"role": "user"}, "parts": [{"text": "hi"}]}),
+            json!({"event": "tool.execute.before", "cwd": "/repo", "tool": "bash",
+                   "args": {"command": "ls"}}),
+            json!({"event": "session.error", "cwd": "/repo", "properties": {}}),
+        ] {
+            let events = adapters::parse(env(payload.clone()), &CaptureCfg::default());
+            assert_eq!(events[0].cwd.as_deref(), Some("/repo"), "payload {payload}");
+        }
+    }
+
+    /// The `before` and the `after` of one call are otherwise
+    /// indistinguishable from a second call of the same tool in the same turn,
+    /// so without this there is no duration and no way to spot a call whose
+    /// `after` never arrived.
+    #[test]
+    fn tool_events_keep_the_call_id_that_pairs_them() {
+        let ids: Vec<_> = ["tool.execute.before", "tool.execute.after"]
+            .iter()
+            .map(|event| {
+                let events = adapters::parse(
+                    env(json!({"event": event, "sessionID": "oc1", "tool": "bash",
+                               "callID": "call_7", "args": {"command": "ls"}})),
+                    &CaptureCfg::default(),
+                );
+                events[0].meta.tool_use_id.clone()
+            })
+            .collect();
+        assert_eq!(
+            ids,
+            vec![Some("call_7".into()), Some("call_7".into())],
+            "both legs must carry the same id"
+        );
     }
 
     #[test]

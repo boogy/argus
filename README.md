@@ -258,6 +258,15 @@ extra_patterns = ["ACME-[0-9]{6}"]
   leaving a stale one in the other directory, and a first install joins the
   user's plugins rather than creating a second, one-file collection beside
   them. `check` and `uninstall` resolve the same way.
+
+  Two fields the plugin is the only possible source of: the working directory
+  — opencode hands it to a plugin once, at load, and never repeats it on an
+  event, so without the plugin sending it every opencode event was `cwd: null`
+  and invisible to anything scoped to a repository — and the tool `callID`,
+  which is what pairs a `before` with its `after`. Both halves are tested:
+  `tests/plugin/opencode_payload.mjs` asserts the plugin puts them on the
+  wire, because a field the plugin stops sending breaks no Rust test on its
+  own — the adapter reads `None` and the column just goes quietly empty.
 - **Daemon** (`argus daemon`) does everything else off that critical
   path: per-tool adapter parsing → secret redaction → durable SQLite buffering
   → batched OTLP/JSON export with exponential backoff. It also drains the

@@ -1177,6 +1177,31 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
     singular (both new tests); drop the existing-`argus.ts` pass (reinstall);
     drop the existing-directory pass (join-existing); default flipped to
     plural (the three tests that assume the fresh-install path).
+  - [x] **T13d** — cwd and callID (telemetry-gaps #10). Files:
+    `plugins/opencode/argus.ts`, `src/adapters/opencode.rs`, new
+    `tests/plugin/opencode_payload.mjs`, `tests/opencode_plugin.rs`,
+    `docs/telemetry-gaps.md`, `README.md`.
+    Both fields are ones only the plugin can supply. opencode hands a plugin
+    its `directory` once, at load, and never repeats it on an event — so every
+    opencode event was `cwd: null` while every other harness reported one,
+    which silently excluded opencode from anything scoped to a repository.
+    `worktree` is the fallback, not the preference: inside a git worktree the
+    two differ and `directory` is where the session actually runs.
+    `callID` the plugin was already sending and the adapter was already
+    dropping. Mapped to `meta.tool_use_id` — the field Claude Code's
+    `tool_use_id` uses — rather than to `turn_id` as the gap doc suggested: a
+    turn holds many calls, so pairing on `turn_id` would pair the wrong ones.
+    New driver `opencode_payload.mjs`, because the plugin half is untestable
+    from Rust: a field the plugin stops sending breaks nothing, the adapter
+    just reads `None` forever. It asserts the wire format of all four hooks
+    and that the bus filter still filters. `ARGUS_BIN` deliberately points at
+    a non-existent file so a missed socket fails loudly instead of being
+    counted as delivered by a stand-in.
+    Six mutations, all bite, split across the halves they belong to: adapter
+    cwd → `None` and callID → `None` (adapter tests); plugin drops cwd, drops
+    callID, prefers `worktree` over `directory`, or forwards every bus event
+    (driver). Also: the two drivers write per-name shim files — one shared
+    path would race and the loser would import a half-written file.
 
 - [ ] **T14** — pi.dev harness. Dependency: T4, T5.
   Files: new `src/adapters/pi.rs`, new `plugins/pi/argus.ts`, new `src/harness/pi.rs`

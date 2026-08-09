@@ -23,6 +23,20 @@ fn one_event_is_one_envelope_even_when_the_socket_is_backed_up() {
     run_driver("opencode_transport.mjs");
 }
 
+/// The plugin half of the contract with `src/adapters/opencode.rs`: every hook
+/// must put `cwd`, `sessionID` and — for tool calls — `callID` into the
+/// envelope, and the bus filter must still filter.
+///
+/// A field the plugin stops sending breaks no Rust test on its own. The
+/// adapter reads `None`, every event still parses, and the column just goes
+/// empty — which is why this asserts on the wire format rather than on what
+/// the adapter makes of it.
+#[cfg(unix)]
+#[test]
+fn every_hook_sends_the_fields_the_adapter_reads() {
+    run_driver("opencode_payload.mjs");
+}
+
 #[cfg(unix)]
 fn run_driver(name: &str) {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -33,7 +47,9 @@ fn run_driver(name: &str) {
     // file is a thing that runs. Written next to the driver so its relative
     // imports — currently only the type-only `@opencode-ai/plugin` — resolve
     // the same way they will in the user's config directory.
-    let shim = root.join("target/opencode-shim.test.ts");
+    // Named per driver: two tests writing one path would race, and the loser
+    // would import a half-written file.
+    let shim = root.join(format!("target/opencode-shim.{name}.ts"));
     std::fs::write(&shim, argus::harness::opencode::shim_source()).unwrap();
 
     // Deliberately not a silent skip. The plugin is the only thing standing

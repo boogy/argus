@@ -30,11 +30,20 @@ const BUS_FORWARD = new Set([
   "installation.updated",
 ]);
 
-export const ArgusPlugin: Plugin = async () => {
+export const ArgusPlugin: Plugin = async (input) => {
+  // opencode hands the plugin its directory once, at load, and never repeats
+  // it on an event. Every other harness reports a working directory and
+  // opencode reported none, which quietly excluded its events from anything
+  // scoped to a repository. `worktree` is the fallback rather than the
+  // preference: `directory` is where the session actually runs, and in a git
+  // worktree those differ.
+  const cwd = input?.directory ?? input?.worktree;
+
   return {
     "chat.message": async (_input, output) => {
       send("opencode", {
         event: "chat.message",
+        cwd,
         sessionID: output.message?.sessionID,
         message: { role: output.message?.role },
         parts: output.parts,
@@ -43,6 +52,7 @@ export const ArgusPlugin: Plugin = async () => {
     "tool.execute.before": async (input, output) => {
       send("opencode", {
         event: "tool.execute.before",
+        cwd,
         sessionID: input.sessionID,
         callID: input.callID,
         tool: input.tool,
@@ -52,6 +62,7 @@ export const ArgusPlugin: Plugin = async () => {
     "tool.execute.after": async (input, output) => {
       send("opencode", {
         event: "tool.execute.after",
+        cwd,
         sessionID: input.sessionID,
         callID: input.callID,
         tool: input.tool,
@@ -66,6 +77,7 @@ export const ArgusPlugin: Plugin = async () => {
       if (!event?.type || !BUS_FORWARD.has(event.type)) return;
       send("opencode", {
         event: event.type,
+        cwd,
         sessionID:
           (event.properties as any)?.sessionID ??
           (event.properties as any)?.info?.id,

@@ -112,6 +112,12 @@ field or `Session` detail.
   pre/post tool events can't be paired (no duration, no output↔input join).
   Map `callID` → `meta.turn_id` (or a dedicated `call_id`).
 
+**Closed (T13d).** The plugin sends `cwd` on every hook, taken from the
+`directory` opencode hands it at load (`worktree` only as a fallback — the two
+differ inside a git worktree). `callID` maps to `meta.tool_use_id`, the field
+Claude Code's `tool_use_id` already uses, rather than to `turn_id`: a turn and
+a call are not the same thing, and one turn holds many calls.
+
 ### 11. No pre/post correlation → no tool durations anywhere
 
 Same story for the other tools: if the hook payload carries a call id
