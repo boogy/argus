@@ -298,7 +298,8 @@ impl Detection {
 /// A harness-specific setting that silently disables capture (e.g. Codex's
 /// `[features] hooks = false`). Check-only: reported, never written.
 ///
-/// T11/T12 populate these; no harness reports one yet.
+/// Codex and Copilot report these; Claude Code and opencode document no
+/// equivalent setting.
 pub struct KillSwitch {
     pub name: &'static str,
     pub detail: String,

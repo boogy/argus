@@ -315,6 +315,24 @@ extra_patterns = ["ACME-[0-9]{6}"]
     anything; `check` simply says so now. `argus install` re-points it, and
     installs now bake the stable `PATH` alias rather than the resolved real
     path, so the next upgrade doesn't repeat it.
+
+    Wiring that is intact is not the same as wiring that runs, so `check` also
+    reads the settings that leave every entry in place and stop it firing.
+    Codex: `[features] hooks = false` (and its deprecated `codex_hooks` alias)
+    and `allow_managed_hooks_only = true`, which keeps only
+    administrator-managed hooks and so discards ours — read from both
+    `config.toml` and the administrator-supplied `requirements.toml`, and a
+    file of either name that no longer parses is itself a finding, because
+    Codex cannot read it either. Copilot: `disableAllHooks: true` at the top of
+    argus's own `~/.copilot/hooks/argus.json`, plus the same
+    does-it-still-parse test, since marker text survives trailing garbage that
+    makes the document unloadable. Every one of these passes the wiring checks
+    above — that is what makes them worth a separate read. Two limits worth
+    stating: `disableAllHooks` in a *repository* `settings.json` skips every
+    hook from every source for sessions in that repository, which no
+    machine-level check can see; and a `disableAllHooks` in someone else's
+    hooks file is file-scoped, disables their hooks rather than ours, and is
+    deliberately not reported.
   - **config** — a remote policy (`[remote].url`) is loaded and effective, and
     the effective config matches it. Fails if the host isn't policy-managed, the
     policy never loaded (no/invalid cache → running on local/defaults), or a

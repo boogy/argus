@@ -1,8 +1,10 @@
-use super::{Artifact, CmdStyle, ConfigDir, Detection, Harness, Probes, Scope, hook_command};
+use super::{
+    Artifact, CmdStyle, ConfigDir, Detection, Harness, KillSwitch, Probes, Scope, hook_command,
+};
 use crate::config::CaptureCfg;
 use crate::detect::BinaryProbe;
 use crate::event::{Envelope, Event};
-use serde_json::json;
+use serde_json::{Value, json};
 use std::borrow::Cow;
 
 /// Copilot CLI hook events (verified against the Copilot hooks reference:
@@ -47,6 +49,13 @@ fn json_escaped(s: &str) -> String {
     q.get(1..q.len().saturating_sub(1))
         .unwrap_or("")
         .to_string()
+}
+
+/// The one file argus writes for Copilot. Named once so the artifact and the
+/// kill-switch read can never drift onto different paths — a kill switch
+/// looked for in a file nobody writes reports healthy forever.
+fn hooks_path(d: &Detection) -> std::path::PathBuf {
+    d.config_home.join("hooks/argus.json")
 }
 
 pub struct Copilot;
@@ -108,13 +117,65 @@ impl Harness for Copilot {
         }
         let doc = json!({ "version": 1, "hooks": hooks });
         vec![Artifact::OwnedFile {
-            path: d.config_home.join("hooks/argus.json"),
+            path: hooks_path(d),
             contents: Cow::Owned(
                 serde_json::to_string_pretty(&doc).unwrap_or_else(|_| "{}".into()),
             ),
             markers,
             commands,
         }]
+    }
+
+    /// States that leave every hook entry in place and still stop it running.
+    /// Artifact verification reads this file for markers and a resolvable
+    /// program, and both survive either of these — so without this read,
+    /// `check` says "present" about a tool capturing nothing.
+    ///
+    /// Only argus's own file is consulted, and that is the documented scope:
+    /// "Inside a single `.github/hooks/*.json` file — only the hooks declared
+    /// in that file are skipped." A `disableAllHooks` in some other hooks file
+    /// disables that file's hooks, not ours, and reporting it would be a false
+    /// alarm. The flag's session-wide form lives at the top level of a
+    /// *repository* `settings.json`, where it skips "every hook from every
+    /// source" for sessions in that repository — out of reach of a
+    /// machine-level check, and noted as such in the README.
+    ///
+    /// Doc-derived from <https://docs.github.com/en/copilot/reference/hooks-configuration>;
+    /// Copilot CLI is not installed on the machine this was written on.
+    fn kill_switches(&self, d: &Detection) -> Vec<KillSwitch> {
+        let path = hooks_path(d);
+        // A file that is not there is already reported as missing by artifact
+        // verification. Saying it twice is noise, not a second finding.
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            return Vec::new();
+        };
+        let doc = match serde_json::from_str::<Value>(&text) {
+            Ok(v) => v,
+            Err(e) => {
+                // Copilot parses this file too. Marker text can survive
+                // trailing garbage that makes the document unloadable, so the
+                // hooks read as present and none of them run.
+                return vec![KillSwitch {
+                    name: "unreadable hooks file",
+                    detail: format!(
+                        "{} is not valid JSON ({e}) — Copilot cannot load it either, \
+                         so none of the hooks it lists run",
+                        path.display()
+                    ),
+                }];
+            }
+        };
+        if doc.get("disableAllHooks").and_then(Value::as_bool) == Some(true) {
+            return vec![KillSwitch {
+                name: "hooks disabled",
+                detail: format!(
+                    "disableAllHooks = true in {} — every hook in the file is skipped \
+                     without being deleted; re-run `argus install` to rewrite it",
+                    path.display()
+                ),
+            }];
+        }
+        Vec::new()
     }
 
     fn parse(&self, env: &Envelope, cfg: &CaptureCfg) -> Vec<Event> {

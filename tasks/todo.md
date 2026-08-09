@@ -1019,6 +1019,30 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
     field, which is why install passes `--event`). That test now consults both,
     which brings every Copilot and opencode fixture under it for the first
     time.
+  - [x] **T12b** — Detect the settings that leave the wiring in place and stop
+    it running. Files: `src/harness/copilot.rs`, `src/harness/mod.rs` (stale
+    doc), `src/install.rs`, `README.md`.
+    Copilot's `disableAllHooks: true` at the top of argus's own
+    `~/.copilot/hooks/argus.json`, plus the file no longer parsing as JSON.
+    Both pass every check argus already made — the markers are still in the
+    text, the binary still resolves — so `check` reported "present" about a
+    tool capturing nothing.
+    Scope decided from the doc's own wording rather than guessed: *"Inside a
+    single `.github/hooks/*.json` file — only the hooks declared in that file
+    are skipped"*, so a `disableAllHooks` in someone else's hooks file is not
+    our finding and is deliberately not reported. The session-wide form is
+    *"At the top level of repository `settings.json` … Every hook from every
+    source … is skipped for sessions in that repository"*, which a
+    machine-level check cannot see; `check --project` reaches only Codex today,
+    so this is documented as a limit instead of half-implemented.
+    `hooks_path()` extracted so the artifact and the kill-switch read cannot
+    drift onto different paths — a kill switch looked for in a file nobody
+    writes reports healthy forever.
+    Three mutations, all bite: neutralising the `disableAllHooks` arm, the
+    unreadable-JSON arm (nothing else catches it — `OwnedFile` verification is
+    substring-based), and relaxing `== Some(true)` to `.is_some()`, which the
+    explicit `disableAllHooks: false` case exists to catch, since the
+    documented example writes that key.
 
 - [ ] **T13** — opencode + shared TS transport. Dependency: T4, T5.
   Files: `plugins/opencode/argus.ts` + new shared TS transport, `src/adapters/opencode.rs`, `src/harness/opencode.rs`

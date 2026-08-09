@@ -754,6 +754,77 @@ mod tests {
         assert!(!f.ok && f.detail.contains("not valid TOML"), "{f:?}");
     }
 
+    /// Edit argus's own Copilot hooks file and return the copilot finding.
+    /// Every case starts from a healthy install, so a finding that flips can
+    /// only have flipped because of the edit.
+    fn copilot_finding_after(
+        home: &std::path::Path,
+        edit: impl FnOnce(&str) -> String,
+    ) -> crate::integrity::Finding {
+        let path = home.join(".copilot/hooks/argus.json");
+        let text = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, edit(&text)).unwrap();
+        crate::integrity::check(home)
+            .into_iter()
+            .find(|f| f.tool == "copilot")
+            .unwrap()
+    }
+
+    /// Every hook entry present, correct, naming a binary that runs — and
+    /// skipped. Artifact verification looks for markers and a resolvable
+    /// program, and both of these edits leave those untouched, so without the
+    /// kill-switch read `check` reports "present" about a tool capturing
+    /// nothing.
+    #[test]
+    fn check_detects_copilot_kill_switches() {
+        let home = fake_home();
+        std::fs::create_dir_all(home.path().join(".copilot")).unwrap();
+        fake_bin(home.path());
+        run(false).unwrap();
+        // The baseline has to be healthy or the cases below prove nothing.
+        let f = crate::integrity::check(home.path())
+            .into_iter()
+            .find(|f| f.tool == "copilot")
+            .unwrap();
+        assert!(f.ok, "{f:?}");
+
+        // Kept on disk, stopped from running: the documented purpose of the
+        // flag, and indistinguishable from a healthy install by every other
+        // check argus makes.
+        let f = copilot_finding_after(home.path(), |text| {
+            let mut doc: serde_json::Value = serde_json::from_str(text).unwrap();
+            doc["disableAllHooks"] = serde_json::json!(true);
+            serde_json::to_string_pretty(&doc).unwrap()
+        });
+        assert!(
+            !f.ok && f.detail.contains("disableAllHooks = true"),
+            "{f:?}"
+        );
+
+        // `false` is what the documented example writes, and a schema key
+        // being *present* must not be the thing that trips the check.
+        let home2 = fake_home();
+        std::fs::create_dir_all(home2.path().join(".copilot")).unwrap();
+        fake_bin(home2.path());
+        run(false).unwrap();
+        let f = copilot_finding_after(home2.path(), |text| {
+            let mut doc: serde_json::Value = serde_json::from_str(text).unwrap();
+            doc["disableAllHooks"] = serde_json::json!(false);
+            serde_json::to_string_pretty(&doc).unwrap()
+        });
+        assert!(f.ok, "disableAllHooks = false is a healthy install: {f:?}");
+
+        // Trailing garbage: Copilot cannot load the document, yet every
+        // marker is still in the text and the binary still resolves, so
+        // artifact verification alone reads this as present.
+        let home3 = fake_home();
+        std::fs::create_dir_all(home3.path().join(".copilot")).unwrap();
+        fake_bin(home3.path());
+        run(false).unwrap();
+        let f = copilot_finding_after(home3.path(), |text| format!("{text}}}"));
+        assert!(!f.ok && f.detail.contains("not valid JSON"), "{f:?}");
+    }
+
     /// A dry run's whole contract is that it is safe to run anywhere. Now that
     /// install *creates* config directories for a tool detected by its binary
     /// alone, "writes nothing" has to be asserted against the tree, not
