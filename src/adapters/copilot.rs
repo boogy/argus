@@ -102,6 +102,9 @@ pub fn parse(env: &Envelope, capture: &CaptureCfg) -> Vec<Event> {
                     .get("error")
                     .and_then(Value::as_str)
                     .map(|e| cap_text(e, max)),
+                // Copilot's hook payloads carry neither.
+                duration_ms: None,
+                interrupted: false,
                 files,
                 fqdns,
             })]

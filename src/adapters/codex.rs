@@ -67,6 +67,9 @@ pub fn parse(env: &Envelope, capture: &CaptureCfg) -> Vec<Event> {
                 input,
                 output: Value::Null,
                 error: None,
+                // Codex's hook payloads carry neither.
+                duration_ms: None,
+                interrupted: false,
                 files: vec![],
                 fqdns: extract_fqdns(&text_blob),
             })]

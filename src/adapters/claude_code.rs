@@ -101,6 +101,14 @@ pub(crate) fn parse_hook(source: &'static str, p: &Value, capture: &CaptureCfg) 
                 input: kept_input,
                 output,
                 error,
+                duration_ms: p.get("duration_ms").and_then(Value::as_u64),
+                // Only the failure leg carries it, and only there does the
+                // distinction matter: it says a human stopped the call rather
+                // than the call going wrong.
+                interrupted: p
+                    .get("is_interrupt")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
                 files,
                 fqdns,
             })];
@@ -738,6 +746,34 @@ mod tests {
             Some("toolu_01AbCdEfGhIjKlMnOpQrStUv")
         );
         assert_eq!(pre[0].meta.tool_use_id, post[0].meta.tool_use_id);
+    }
+
+    /// A duration exists only once the call has run, and an interruption is a
+    /// human stopping the call rather than the call going wrong — so the two
+    /// failure legs must not read alike.
+    #[test]
+    fn a_finished_call_carries_its_duration_and_says_who_ended_it() {
+        let dur = |events: &[crate::event::Event]| match &events[0].kind {
+            EventKind::ToolUse {
+                duration_ms,
+                interrupted,
+                ..
+            } => (*duration_ms, *interrupted),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(dur(&from_fixture("PreToolUse")), (None, false));
+        assert_eq!(dur(&from_fixture("PostToolUse")), (Some(1843), false));
+        assert_eq!(dur(&from_fixture("PostToolUseFailure")), (Some(12), false));
+
+        let cancelled = adapters::parse(
+            env(
+                json!({"hook_event_name": "PostToolUseFailure", "tool_name": "Bash",
+                       "tool_input": {"command": "sleep 600"},
+                       "error": "interrupted", "is_interrupt": true, "duration_ms": 4000}),
+            ),
+            &CaptureCfg::default(),
+        );
+        assert_eq!(dur(&cancelled), (Some(4000), true));
     }
 
     /// `effort` arrives as an object; `Meta` holds the level.

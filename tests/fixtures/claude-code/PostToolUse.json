@@ -16,6 +16,7 @@
     "tool_input": {
       "command": "cargo test --lib"
     },
+    "duration_ms": 1843,
     "tool_response": {
       "stdout": "test result: ok. 149 passed",
       "stderr": "",

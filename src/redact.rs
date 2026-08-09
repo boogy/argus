@@ -145,6 +145,10 @@ impl Redactor {
                 input,
                 output,
                 error,
+                // A duration and a cancelled-by-a-human flag: neither can
+                // carry a secret, so neither is scrubbed.
+                duration_ms: _,
+                interrupted: _,
                 files: _,
                 fqdns: _,
             } => {
@@ -249,6 +253,8 @@ mod tests {
                 input: serde_json::json!({"command": "curl -H 'Authorization: Bearer ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789'"}),
                 output: serde_json::Value::Null,
                 error: None,
+                duration_ms: None,
+                interrupted: false,
                 files: vec![],
                 fqdns: vec![],
             },
@@ -288,6 +294,8 @@ mod tests {
                 input: serde_json::Value::Null,
                 output: serde_json::json!({"stdout": format!("printed {secret}")}),
                 error: Some(format!("failed with {secret}")),
+                duration_ms: None,
+                interrupted: false,
                 files: vec![],
                 fqdns: vec![],
             },

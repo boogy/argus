@@ -79,6 +79,9 @@ pub fn parse(env: &Envelope, capture: &CaptureCfg) -> Vec<Event> {
                 input,
                 output,
                 error: None,
+                // opencode's plugin events carry neither.
+                duration_ms: None,
+                interrupted: false,
                 files,
                 fqdns,
             })]

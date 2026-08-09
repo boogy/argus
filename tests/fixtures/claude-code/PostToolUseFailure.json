@@ -9,9 +9,12 @@
     "model": "claude-opus-5",
     "hook_event_name": "PostToolUseFailure",
     "tool_name": "Read",
+    "tool_use_id": "toolu_02FailedRead",
     "tool_input": {
       "file_path": "/Users/dev/project/missing.rs"
     },
-    "error": "File does not exist: /Users/dev/project/missing.rs"
+    "error": "File does not exist: /Users/dev/project/missing.rs",
+    "is_interrupt": false,
+    "duration_ms": 12
   }
 }

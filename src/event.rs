@@ -103,6 +103,15 @@ pub enum EventKind {
         output: serde_json::Value,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
+        /// Wall-clock time the call took, as the host tool measured it. On the
+        /// `pre` leg there is nothing to measure yet, so it is absent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration_ms: Option<u64>,
+        /// The call ended because a human stopped it, not because it failed.
+        /// Worth separating: an interrupted `Bash` may have run half its
+        /// command, which reads as a failure but is not one.
+        #[serde(default, skip_serializing_if = "is_false")]
+        interrupted: bool,
         files: Vec<String>,
         fqdns: Vec<String>,
     },
@@ -256,6 +265,8 @@ mod tests {
                 input: serde_json::json!({"file_path": "/repo/a.rs"}),
                 output: serde_json::Value::Null,
                 error: None,
+                duration_ms: None,
+                interrupted: false,
                 files: vec!["/repo/a.rs".into()],
                 fqdns: vec![],
             },
@@ -393,6 +404,8 @@ mod tests {
                 input: serde_json::json!({}),
                 output: serde_json::Value::Null,
                 error: None,
+                duration_ms: None,
+                interrupted: false,
                 files: vec![],
                 fqdns: vec![],
             },

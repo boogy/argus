@@ -90,13 +90,13 @@ builds use `json_extract(body, '$.path')` — they are equivalent.
 | ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `prompt`            | `text`                                                                                                                                                |
 | `assistant_message` | `text`                                                                                                                                                |
-| `tool_use`          | `tool`, `phase` (`pre`/`post`/`error`), `input` (JSON), `output` (JSON, post only), `error` (string, failures only), `files` (array), `fqdns` (array) |
+| `tool_use`          | `tool`, `phase` (`pre`/`post`/`error`), `input` (JSON), `output` (JSON, post only), `error` (string, failures only), `duration_ms` (post legs only), `interrupted` (present only when a human stopped the call), `files` (array), `fqdns` (array) |
 | `skill`             | `name`, `args`                                                                                                                                        |
 | `agent`             | `agent_type`, `description`                                                                                                                           |
 | `permission`        | `tool`, `action` (`requested`/`denied`/`replied`/`updated`), `input`                                                                                  |
 | `notification`      | `message`, `category`                                                                                                                                 |
 | `compact`           | `phase`, `trigger`, `tokens_before`, `tokens_after`                                                                                                   |
-| `file_change`       | `path`, `action` (`edited`, `config_changed:<src>`, `instructions_loaded`, …)                                                                         |
+| `file_change`       | `path`, `action` (`edited`, `config_changed:<src>`, `instructions_loaded:<tier>`, …)                                                                  |
 | `error`             | `message`, `context`                                                                                                                                  |
 | `session`           | `action` (`SessionStart`, `Stop`, `session.created`, `turn-complete`, …), `detail` (JSON)                                                             |
 | `raw`               | `payload` (unmapped upstream event, kept verbatim)                                                                                                    |

@@ -806,6 +806,23 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
     again and target `export.rs`, not the adapter: a `Meta` field nobody exports
     is a field nobody can query, so dropping either attribute from the OTLP
     attribute list must fail, and does.
+  - [x] **T10c** — `ToolUse` gains `duration_ms` and `interrupted`. Files:
+    `src/event.rs`, `src/adapters/{claude_code,codex,copilot,opencode}.rs`,
+    `src/export.rs`, `src/redact.rs`, two fixtures,
+    `docs/querying-local-database.md`
+    `PostToolUse` sends `duration_ms`; `PostToolUseFailure` sends both that and
+    `is_interrupt`. The interrupt flag is the one that changes a reading: an
+    interrupted `Bash` may have run half its command, which looks like a failure
+    in the record but is a human pressing stop. Stored as `interrupted` — this
+    is our schema, not theirs — and only serialized/exported when true, because
+    an attribute on every row is one nobody reads.
+    The other three adapters pass `None`/`false` explicitly; their hook surfaces
+    carry neither, and T11–T13 revisit that.
+    `redact.rs`'s exhaustive match did its job and refused to compile until both
+    new fields were named. Both are listed `_` with a note: a duration and a
+    stopped-by-a-human flag cannot carry a secret.
+    Five mutations, all bit — including one asserting the *absence* of the two
+    attributes on a `pre` leg, which is the half a "does it export?" test misses.
 
 - [ ] **T11** — Codex parity. Dependency: T4, T5.
   Files: `src/adapters/codex.rs`, `src/harness/codex.rs`, `src/integrity.rs`

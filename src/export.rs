@@ -45,12 +45,22 @@ fn record(e: &Event) -> Value {
             files,
             fqdns,
             error,
+            duration_ms,
+            interrupted,
             ..
         } => {
             attrs.push(attr("tool.name", tool));
             attrs.push(attr("tool.phase", phase));
             if error.is_some() {
                 attrs.push(attr("tool.failed", "true"));
+            }
+            if let Some(ms) = duration_ms {
+                attrs.push(attr("tool.duration_ms", &ms.to_string()));
+            }
+            // Only said when true: a human stopping a call is the exception,
+            // and an attribute on every row is one nobody reads.
+            if *interrupted {
+                attrs.push(attr("tool.interrupted", "true"));
             }
             if !files.is_empty() {
                 attrs.push(attr("file.paths", &files.join(",")));
@@ -324,6 +334,8 @@ mod tests {
                 input: serde_json::json!({}),
                 output: serde_json::Value::Null,
                 error: None,
+                duration_ms: None,
+                interrupted: false,
                 files: vec!["/a.rs".into()],
                 fqdns: vec![],
             },
@@ -343,6 +355,44 @@ mod tests {
         assert_eq!(get("event.type").as_deref(), Some("tool_use"));
         assert_eq!(get("tool.name").as_deref(), Some("Write"));
         assert_eq!(get("session.id").as_deref(), Some("s1"));
+        // A `pre` leg has nothing to time and was not cancelled, so it must
+        // say neither — an attribute present on every row is one nobody reads.
+        assert_eq!(get("tool.duration_ms"), None);
+        assert_eq!(get("tool.interrupted"), None);
+    }
+
+    /// A duration and a cancellation that reach the event but not the wire are
+    /// invisible to whoever has to query them.
+    #[test]
+    fn a_cancelled_call_exports_its_duration_and_its_cancellation() {
+        let e = Event::new(
+            "claude-code",
+            Some("s1".into()),
+            None,
+            EventKind::ToolUse {
+                tool: "Bash".into(),
+                phase: "error".into(),
+                input: serde_json::json!({}),
+                output: serde_json::Value::Null,
+                error: Some("interrupted".into()),
+                duration_ms: Some(4000),
+                interrupted: true,
+                files: vec![],
+                fqdns: vec![],
+            },
+        );
+        let body = to_otlp_body(std::slice::from_ref(&e));
+        let attrs = body["resourceLogs"][0]["scopeLogs"][0]["logRecords"][0]["attributes"].clone();
+        let get = |k: &str| {
+            attrs
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|a| a["key"] == k)
+                .map(|a| a["value"]["stringValue"].as_str().unwrap().to_string())
+        };
+        assert_eq!(get("tool.duration_ms").as_deref(), Some("4000"));
+        assert_eq!(get("tool.interrupted").as_deref(), Some("true"));
     }
 
     #[test]
