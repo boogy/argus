@@ -91,13 +91,130 @@ impl Listener {
         Ok(Listener { inner })
     }
 
-    pub async fn accept_loop(self, tx: tokio::sync::mpsc::Sender<Envelope>) {
+    pub async fn accept_loop(self, tx: Ingress) {
         loop {
             let Ok(conn) = self.inner.accept().await else {
                 continue;
             };
             let tx = tx.clone();
             tokio::spawn(async move { handle(conn, tx).await });
+        }
+    }
+}
+
+/// How many envelopes may queue ahead of the daemon's pipeline.
+const INGRESS_ROWS: usize = 1024;
+
+/// How many bytes of payload may queue ahead of it.
+///
+/// The row count alone is not a memory bound. Every producer feeding this
+/// channel is already capped per item — a socket frame at
+/// [`MAX_FRAME_BYTES`], an OTLP body at its own ceiling — but the *queue* was
+/// bounded only by [`INGRESS_ROWS`], so the worst case was a thousand
+/// 16 MiB frames: 16 GiB resident in a daemon whose job is to still be alive
+/// during the incident it is recording. Whichever of the two bounds binds
+/// first wins, exactly as in the buffer.
+///
+/// Reaching this bound is not data loss. The sender blocks, the socket reader
+/// stops draining, and the shim's send deadline fires and spools the payload
+/// to disk — where the next quiet moment replays it.
+const MAX_INGRESS_BYTES: usize = 64 * 1024 * 1024;
+
+/// An envelope that has been charged against the ingress byte budget. The
+/// permit rides along with it and is released when it leaves the queue, so
+/// the budget describes what is actually queued rather than what has ever
+/// been sent.
+struct Admitted {
+    envelope: Envelope,
+    _permit: tokio::sync::OwnedSemaphorePermit,
+}
+
+/// Sending half of the daemon's ingress queue, bounded by rows *and* bytes.
+#[derive(Clone)]
+pub struct Ingress {
+    tx: tokio::sync::mpsc::Sender<Admitted>,
+    budget: std::sync::Arc<tokio::sync::Semaphore>,
+    total: usize,
+}
+
+pub struct IngressRx(tokio::sync::mpsc::Receiver<Admitted>);
+
+impl Ingress {
+    pub fn channel() -> (Ingress, IngressRx) {
+        Ingress::with_limits(INGRESS_ROWS, MAX_INGRESS_BYTES)
+    }
+
+    /// Same channel with limits a test can reach in milliseconds. Not a knob:
+    /// nothing outside tests picks its own bounds, so the daemon cannot be
+    /// wired to an unbounded one by editing a call site.
+    pub fn with_limits(rows: usize, bytes: usize) -> (Ingress, IngressRx) {
+        // Permits are counted in `u32`, so a budget wider than that is not
+        // expressible; clamping is the only reading that never wraps a charge
+        // around into a smaller one.
+        let bytes = bytes.min(u32::MAX as usize);
+        let (tx, rx) = tokio::sync::mpsc::channel(rows);
+        (
+            Ingress {
+                tx,
+                budget: std::sync::Arc::new(tokio::sync::Semaphore::new(bytes)),
+                total: bytes,
+            },
+            IngressRx(rx),
+        )
+    }
+
+    /// Queue an envelope, waiting until it fits within both bounds.
+    ///
+    /// The charge is clamped to the whole budget so an envelope larger than
+    /// the budget still gets through once the queue empties, rather than
+    /// waiting forever for permits that cannot exist.
+    pub async fn send(&self, envelope: Envelope) {
+        let want = admission_bytes(&envelope).min(self.total);
+        let Ok(permit) = self.budget.clone().acquire_many_owned(want as u32).await else {
+            return; // budget closed: the daemon is going away
+        };
+        let _ = self
+            .tx
+            .send(Admitted {
+                envelope,
+                _permit: permit,
+            })
+            .await;
+    }
+}
+
+impl IngressRx {
+    pub async fn recv(&mut self) -> Option<Envelope> {
+        self.0.recv().await.map(|a| a.envelope)
+    }
+
+    pub fn try_recv(&mut self) -> Option<Envelope> {
+        self.0.try_recv().ok().map(|a| a.envelope)
+    }
+}
+
+/// What one envelope costs the ingress budget.
+///
+/// An estimate, not a measurement: serializing every envelope to count its
+/// bytes would spend more time than the queueing it governs. Walking the
+/// parsed payload costs one pass with no allocation, and the per-node
+/// constants stand in for the `Value` enum's own footprint — an object of a
+/// thousand empty strings is not free just because its strings are.
+fn admission_bytes(envelope: &Envelope) -> usize {
+    envelope.source.len() + 64 + value_bytes(&envelope.payload)
+}
+
+fn value_bytes(v: &serde_json::Value) -> usize {
+    match v {
+        serde_json::Value::Null | serde_json::Value::Bool(_) => 8,
+        serde_json::Value::Number(_) => 16,
+        serde_json::Value::String(s) => s.len() + 24,
+        serde_json::Value::Array(a) => 24 + a.iter().map(value_bytes).sum::<usize>(),
+        serde_json::Value::Object(o) => {
+            24 + o
+                .iter()
+                .map(|(k, v)| k.len() + 24 + value_bytes(v))
+                .sum::<usize>()
         }
     }
 }
@@ -358,7 +475,7 @@ pub const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 /// newline, so the connection survives it exactly as it survives a malformed
 /// one — a peer that sends one bad frame has not earned the right to end the
 /// conversation for the good frames behind it.
-async fn handle(conn: AsyncStream, tx: tokio::sync::mpsc::Sender<Envelope>) {
+async fn handle(conn: AsyncStream, tx: Ingress) {
     let mut reader = BufReader::new(conn);
     let mut frame: Vec<u8> = Vec::new();
     let mut overflowed = false;
@@ -419,11 +536,7 @@ fn push_bounded(frame: &mut Vec<u8>, chunk: &[u8], overflowed: &mut bool) {
 pub(crate) static PEAK_FRAME_BYTES: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
-async fn dispatch(
-    frame: &mut Vec<u8>,
-    overflowed: &mut bool,
-    tx: &tokio::sync::mpsc::Sender<Envelope>,
-) {
+async fn dispatch(frame: &mut Vec<u8>, overflowed: &mut bool, tx: &Ingress) {
     if std::mem::take(overflowed) {
         tracing::warn!("dropping frame over the {MAX_FRAME_BYTES}-byte limit");
         frame.clear();
@@ -433,9 +546,7 @@ async fn dispatch(
         return;
     }
     match serde_json::from_slice::<Envelope>(frame) {
-        Ok(env) => {
-            let _ = tx.send(env).await;
-        }
+        Ok(env) => tx.send(env).await,
         Err(e) => tracing::warn!("dropping malformed frame: {e}"),
     }
     frame.clear();
@@ -446,6 +557,109 @@ mod tests {
     use super::*;
     use crate::event::Envelope;
 
+    fn envelope_of(text: &str) -> Envelope {
+        Envelope {
+            source: "claude-code".into(),
+            received_at: chrono::Utc::now(),
+            truncated: false,
+            dropped: 0,
+            event: None,
+            payload: serde_json::json!({"hook_event_name": "UserPromptSubmit", "prompt": text}),
+        }
+    }
+
+    /// The queue is bounded by bytes as well as rows, and reaching the byte
+    /// bound blocks the sender rather than dropping the envelope.
+    ///
+    /// Both halves matter. Without the byte bound a thousand rows of 16 MiB
+    /// frames are a legal queue, and the daemon dies of memory exhaustion
+    /// during the incident it exists to record. Without *blocking* — a
+    /// `try_send` that discards on a full queue — the bound would be paid for
+    /// with the events themselves, silently, which is the one currency a
+    /// security monitor may not spend.
+    #[tokio::test]
+    async fn ingress_is_bounded_by_bytes_and_blocks_rather_than_dropping() {
+        // Rows are deliberately generous: only the byte budget can bind here,
+        // so a passing test cannot be explained by the row count.
+        let (tx, mut rx) = Ingress::with_limits(1024, 4096);
+        let big = envelope_of(&"x".repeat(3000));
+
+        tx.send(big.clone()).await;
+
+        let second = tx.clone();
+        let payload = big.clone();
+        let mut pending = tokio::spawn(async move { second.send(payload).await });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(150), &mut pending)
+                .await
+                .is_err(),
+            "a second 3 KiB envelope was admitted into a 4 KiB queue"
+        );
+
+        // Draining the first releases its charge, and the waiting sender —
+        // still holding its envelope, not having thrown it away — proceeds.
+        let first = rx.recv().await.expect("first envelope");
+        assert_eq!(first.payload["prompt"].as_str().unwrap().len(), 3000);
+        tokio::time::timeout(std::time::Duration::from_secs(5), pending)
+            .await
+            .expect("the blocked sender never woke")
+            .expect("sender task panicked");
+        assert_eq!(
+            rx.recv().await.expect("second envelope").source,
+            "claude-code",
+            "the blocked envelope was dropped instead of queued"
+        );
+    }
+
+    /// The row bound blocks too. Byte and row are two independent ways to
+    /// find the queue full, and only one of them runs through the semaphore —
+    /// a `try_send` on the channel itself would satisfy every byte-budget
+    /// assertion above and still discard a flood of small envelopes, which is
+    /// the traffic a busy agent actually produces.
+    #[tokio::test]
+    async fn a_full_row_bound_blocks_rather_than_dropping() {
+        // Bytes are deliberately generous: only the row count can bind here.
+        let (tx, mut rx) = Ingress::with_limits(1, 1 << 20);
+        tx.send(envelope_of("first")).await;
+
+        let second = tx.clone();
+        let mut pending = tokio::spawn(async move { second.send(envelope_of("second")).await });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(150), &mut pending)
+                .await
+                .is_err(),
+            "a second envelope was admitted into a one-row queue"
+        );
+
+        assert_eq!(rx.recv().await.expect("first").payload["prompt"], "first");
+        tokio::time::timeout(std::time::Duration::from_secs(5), pending)
+            .await
+            .expect("the blocked sender never woke")
+            .expect("sender task panicked");
+        assert_eq!(
+            rx.recv()
+                .await
+                .expect("second envelope was dropped")
+                .payload["prompt"],
+            "second"
+        );
+    }
+
+    /// An envelope bigger than the entire budget must still get through once
+    /// the queue is empty. Charging it in full would ask for permits that
+    /// cannot exist and wedge the ingress path forever.
+    #[tokio::test]
+    async fn an_envelope_larger_than_the_whole_budget_still_passes() {
+        let (tx, mut rx) = Ingress::with_limits(8, 1024);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            tx.send(envelope_of(&"x".repeat(50_000))),
+        )
+        .await
+        .expect("an oversized envelope wedged the queue");
+        assert_eq!(rx.recv().await.expect("envelope").source, "claude-code");
+    }
+
     #[tokio::test]
     async fn shim_send_reaches_daemon_listener() {
         let sock = std::env::temp_dir().join(format!("lm-ipc-{}.sock", std::process::id()));
@@ -454,7 +668,7 @@ mod tests {
         }
 
         let listener = Listener::bind().unwrap();
-        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        let (tx, mut rx) = Ingress::with_limits(8, 1 << 20);
         tokio::spawn(listener.accept_loop(tx));
 
         let env = Envelope {
@@ -492,7 +706,7 @@ mod tests {
         }
 
         let listener = Listener::bind().unwrap();
-        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        let (tx, mut rx) = Ingress::with_limits(8, 1 << 20);
         tokio::spawn(listener.accept_loop(tx));
 
         let env = Envelope {
@@ -543,7 +757,7 @@ mod tests {
             std::env::set_var("ARGUS_SOCKET", &sock);
         }
         let listener = Listener::bind().unwrap();
-        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        let (tx, mut rx) = Ingress::with_limits(8, 1 << 20);
         tokio::spawn(listener.accept_loop(tx));
         PEAK_FRAME_BYTES.store(0, Relaxed);
 
@@ -607,7 +821,7 @@ mod tests {
             std::env::set_var("ARGUS_SOCKET", &sock);
         }
         let listener = Listener::bind().unwrap();
-        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        let (tx, mut rx) = Ingress::with_limits(8, 1 << 20);
         tokio::spawn(listener.accept_loop(tx));
 
         let env = Envelope {
@@ -773,7 +987,7 @@ mod tests {
             std::env::set_var("ARGUS_SOCKET", &sock);
         }
         let listener = Listener::bind().unwrap();
-        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        let (tx, _rx) = Ingress::with_limits(8, 1 << 20);
         tokio::spawn(listener.accept_loop(tx));
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         let second = tokio::task::spawn_blocking(Listener::bind).await.unwrap();

@@ -1651,6 +1651,44 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
 - [ ] **T16** — Pipeline restructure (A/B/C stages). Dependency: T7.
   Files: `src/daemon.rs`, new `src/enrich.rs`, `src/ipc.rs`
 
+  Split into T16a (byte-bounded ingress) and T16b (the A/B/C stage split with
+  its ordered shutdown drain), per the sizing rule.
+
+- [x] **T16a** — bound the ingress queue by bytes as well as rows.
+  Dependency: T7.
+  Files: `src/ipc.rs`, `src/daemon.rs`, `src/adapters/codex.rs`
+
+  The daemon's ingress channel was `mpsc::channel::<Envelope>(1024)`: a row
+  count and nothing else. Every producer is capped per item — a socket frame at
+  `MAX_FRAME_BYTES` (16 MiB), an OTLP body at 10 MB — but the *queue* was not,
+  so a legal worst case was a thousand 16 MiB frames, 16 GiB resident, in the
+  one process that has to survive the incident it is recording.
+
+  `ipc::Ingress`/`IngressRx` replace the raw channel: the same bounded `mpsc`
+  plus a `Semaphore` charged in bytes, the permit riding along inside the queued
+  item so the budget describes what is *queued* rather than what has ever been
+  sent. `Ingress::channel()` takes no arguments — the limits live in the module,
+  so no call site can quietly wire an unbounded one; `with_limits` exists for
+  tests that need a budget reachable in milliseconds.
+
+  Two decisions worth recording. The charge is an estimate (`admission_bytes`
+  walks the parsed payload, no allocation) rather than a re-serialization, which
+  would cost more than the queueing it governs. And it is clamped to the whole
+  budget, so an envelope larger than the budget still passes once the queue
+  drains instead of waiting forever for permits that cannot exist.
+
+  Reaching either bound blocks the sender. That is the design, not a
+  compromise: the shim's own send deadline then fires and the payload goes to
+  the spool, so backpressure costs latency, never events.
+
+  Six mutations, all biting. The fifth — `try_send`, dropping on a full queue —
+  **survived the first run**, because the only test then written exercised the
+  byte bound, where blocking happens on the semaphore before `try_send` is ever
+  reached. Investigated rather than shrugged off: the row bound is a second,
+  independent way to find the queue full, and it had no test. Added
+  `a_full_row_bound_blocks_rather_than_dropping` (one row, a generous byte
+  budget, so only the row count can bind), and the mutation bites.
+
 - [ ] **T17** — Truncation rework. Dependency: T16.
   Files: `src/adapters/mod.rs`, `src/config.rs`, `src/redact.rs`
 

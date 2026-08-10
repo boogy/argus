@@ -62,7 +62,7 @@ pub async fn run() -> Result<()> {
     let shared_cfg = Arc::new(RwLock::new(config::load()));
     tokio::spawn(config::poll_loop(shared_cfg.clone()));
 
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<Envelope>(1024);
+    let (tx, mut rx) = ipc::Ingress::channel();
     tokio::spawn(listener.accept_loop(tx.clone()));
 
     // Codex OTLP receiver (Task 13 wires real events into tx; stub for now).
@@ -122,7 +122,7 @@ pub async fn run() -> Result<()> {
                 tracing::info!("shutdown signal received, draining queued envelopes and flushing final batch");
                 // Drain whatever is already queued in the channel so it
                 // isn't silently dropped on shutdown.
-                while let Ok(envelope) = rx.try_recv() {
+                while let Some(envelope) = rx.try_recv() {
                     process(envelope);
                 }
                 // Stop the export loop before the final flush so the two

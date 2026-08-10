@@ -1,11 +1,11 @@
 use crate::adapters::extract_fqdns;
 use crate::config::{CaptureCfg, Config};
 use crate::event::{Envelope, Event, EventKind};
+use crate::ipc::Ingress;
 use serde_json::{Value, json};
 use std::sync::{Arc, RwLock};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
-use tokio::sync::mpsc::Sender;
 
 /// Parses either a flattened OTLP logRecord (`{"event_name": ..., "attributes": {...}}`)
 /// or a raw Codex `notify` payload (top-level `{"type": "agent-turn-complete", ...}`,
@@ -157,7 +157,7 @@ pub fn shared_token() -> anyhow::Result<String> {
 /// and forwards parsed logRecords into `tx`. Never crashes the daemon: a
 /// bind failure just disables the listener, and per-connection errors
 /// (bad HTTP, oversized bodies, malformed JSON) are dropped silently.
-pub async fn otlp_listener(cfg: Arc<RwLock<Config>>, tx: Sender<Envelope>) {
+pub async fn otlp_listener(cfg: Arc<RwLock<Config>>, tx: Ingress) {
     // Resolved before the bind, and fatal to the listener if it fails: a
     // receiver that cannot tell Codex from anything else on loopback is worse
     // than no receiver, because it still fills the trail and still looks
@@ -178,7 +178,7 @@ pub async fn otlp_listener(cfg: Arc<RwLock<Config>>, tx: Sender<Envelope>) {
 const MAX_BODY_BYTES: usize = 10_000_000;
 
 /// Minimal HTTP/1.1 server: enough for Codex's OTLP/JSON POSTs on localhost.
-pub async fn serve(listener: TcpListener, tx: Sender<Envelope>, token: String) {
+pub async fn serve(listener: TcpListener, tx: Ingress, token: String) {
     let token: Arc<str> = token.into();
     loop {
         let Ok((stream, _)) = listener.accept().await else {
@@ -189,7 +189,7 @@ pub async fn serve(listener: TcpListener, tx: Sender<Envelope>, token: String) {
     }
 }
 
-async fn handle_conn(stream: tokio::net::TcpStream, tx: Sender<Envelope>, token: Arc<str>) {
+async fn handle_conn(stream: tokio::net::TcpStream, tx: Ingress, token: Arc<str>) {
     let _ = tokio::time::timeout(
         std::time::Duration::from_secs(10),
         handle_conn_inner(stream, tx, token),
@@ -197,11 +197,7 @@ async fn handle_conn(stream: tokio::net::TcpStream, tx: Sender<Envelope>, token:
     .await;
 }
 
-async fn handle_conn_inner(
-    mut stream: tokio::net::TcpStream,
-    tx: Sender<Envelope>,
-    token: Arc<str>,
-) {
+async fn handle_conn_inner(mut stream: tokio::net::TcpStream, tx: Ingress, token: Arc<str>) {
     let mut buf = Vec::with_capacity(8192);
     let mut tmp = [0u8; 4096];
     // Read until end of headers, then content-length worth of body.
@@ -259,16 +255,15 @@ async fn handle_conn_inner(
     let ok = addressed && authenticated;
     if ok && let Ok(v) = serde_json::from_slice::<Value>(&buf[headers_end..body_end]) {
         for record in flatten_otlp_records(&v) {
-            let _ = tx
-                .send(Envelope {
-                    source: "codex".into(),
-                    received_at: chrono::Utc::now(),
-                    truncated: false,
-                    dropped: 0,
-                    event: None,
-                    payload: record,
-                })
-                .await;
+            tx.send(Envelope {
+                source: "codex".into(),
+                received_at: chrono::Utc::now(),
+                truncated: false,
+                dropped: 0,
+                event: None,
+                payload: record,
+            })
+            .await;
         }
     }
     // 404 for a path we do not serve, 401 for ours without the secret: saying
@@ -505,13 +500,10 @@ mod tests {
 
     /// Returns the bound address and the receiving end, so each test says only
     /// what it is actually about.
-    async fn receiver() -> (
-        std::net::SocketAddr,
-        tokio::sync::mpsc::Receiver<crate::event::Envelope>,
-    ) {
+    async fn receiver() -> (std::net::SocketAddr, crate::ipc::IngressRx) {
         let cfg = std::sync::Arc::new(std::sync::RwLock::new(crate::config::Config::default()));
         cfg.write().unwrap().codex.otlp_listen = "127.0.0.1:0".into();
-        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        let (tx, rx) = crate::ipc::Ingress::with_limits(8, 1 << 20);
         let bound = super::bind_listener(cfg).await.unwrap();
         let addr = bound.local_addr().unwrap();
         tokio::spawn(super::serve(bound, tx, TOKEN.into()));
@@ -642,7 +634,7 @@ mod tests {
     async fn oversized_content_length_does_not_panic_and_listener_survives() {
         let cfg = std::sync::Arc::new(std::sync::RwLock::new(crate::config::Config::default()));
         cfg.write().unwrap().codex.otlp_listen = "127.0.0.1:0".into();
-        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        let (tx, _rx) = crate::ipc::Ingress::with_limits(8, 1 << 20);
         let bound = super::bind_listener(cfg.clone()).await.unwrap();
         let addr = bound.local_addr().unwrap();
         tokio::spawn(super::serve(bound, tx, TOKEN.into()));
@@ -674,7 +666,7 @@ mod tests {
     async fn wrong_path_returns_404() {
         let cfg = std::sync::Arc::new(std::sync::RwLock::new(crate::config::Config::default()));
         cfg.write().unwrap().codex.otlp_listen = "127.0.0.1:0".into();
-        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        let (tx, _rx) = crate::ipc::Ingress::with_limits(8, 1 << 20);
         let bound = super::bind_listener(cfg.clone()).await.unwrap();
         let addr = bound.local_addr().unwrap();
         tokio::spawn(super::serve(bound, tx, TOKEN.into()));
@@ -692,7 +684,7 @@ mod tests {
     async fn otlp_listener_accepts_json_logs_and_forwards_envelopes() {
         let cfg = std::sync::Arc::new(std::sync::RwLock::new(crate::config::Config::default()));
         cfg.write().unwrap().codex.otlp_listen = "127.0.0.1:0".into();
-        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        let (tx, mut rx) = crate::ipc::Ingress::with_limits(8, 1 << 20);
         let bound = super::bind_listener(cfg.clone()).await.unwrap();
         let addr = bound.local_addr().unwrap();
         tokio::spawn(super::serve(bound, tx, TOKEN.into()));
