@@ -77,6 +77,8 @@ pub struct CaptureCfg {
     /// Per-field size cap (bytes of serialized content) applied to prompt
     /// text, assistant text, tool input/output. 0 = unlimited.
     pub max_field_bytes: usize,
+    /// What a string that exceeds `max_field_bytes` is reduced to.
+    pub truncate_mode: TruncateMode,
 }
 impl Default for CaptureCfg {
     fn default() -> Self {
@@ -86,8 +88,28 @@ impl Default for CaptureCfg {
             tool_outputs: true,
             assistant_messages: true,
             max_field_bytes: 65536,
+            truncate_mode: TruncateMode::default(),
         }
     }
+}
+
+/// Which end of an oversized string is worth keeping.
+///
+/// There is no right answer, which is why it is a setting. A command's
+/// intent is at the front; a diff's outcome and a stack trace's cause are at
+/// the back, so `head` alone can truncate away the only part anyone would
+/// read. `drop` is for deployments that would rather store a placeholder than
+/// risk a fragment of a large file in the SIEM.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TruncateMode {
+    /// Keep the beginning. The historical behaviour, and the default.
+    #[default]
+    Head,
+    /// Keep both ends, three quarters at the front.
+    HeadTail,
+    /// Keep neither: the field becomes a marker.
+    Drop,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -393,6 +415,32 @@ mod tests {
         assert!(cfg.capture.tool_outputs);
         assert!(cfg.capture.assistant_messages);
         assert_eq!(cfg.capture.max_field_bytes, 65536);
+        assert_eq!(
+            cfg.capture.truncate_mode,
+            TruncateMode::Head,
+            "the default must stay the historical behaviour"
+        );
+    }
+
+    /// The mode is written in a config file, in snake_case, or it is a knob
+    /// nobody can reach.
+    #[test]
+    fn truncate_mode_is_spelled_the_way_the_docs_spell_it() {
+        for (text, want) in [
+            ("head", TruncateMode::Head),
+            ("head_tail", TruncateMode::HeadTail),
+            ("drop", TruncateMode::Drop),
+        ] {
+            let cfg: Config =
+                toml::from_str(&format!("[capture]\ntruncate_mode = \"{text}\"\n")).unwrap();
+            assert_eq!(cfg.capture.truncate_mode, want, "for {text:?}");
+        }
+        // And a typo is a rejected layer, not a silent change of behaviour:
+        // `load` logs and drops the file, leaving the defaults in place.
+        assert!(
+            toml::from_str::<Config>("[capture]\ntruncate_mode = \"tail\"\n").is_err(),
+            "an unknown mode was accepted"
+        );
     }
 
     #[test]

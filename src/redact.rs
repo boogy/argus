@@ -1,5 +1,5 @@
 use crate::config::RedactionCfg;
-use crate::event::{Event, EventKind};
+use crate::event::Event;
 use regex::{Regex, RegexSet};
 use std::borrow::Cow;
 
@@ -116,152 +116,15 @@ impl Redactor {
         }
     }
 
-    fn scrub_json(&self, v: &mut serde_json::Value) {
-        match v {
-            serde_json::Value::String(s) => self.scrub_in_place(s),
-            serde_json::Value::Array(a) => a.iter_mut().for_each(|x| self.scrub_json(x)),
-            serde_json::Value::Object(o) => o.values_mut().for_each(|x| self.scrub_json(x)),
-            _ => {}
-        }
-    }
-
     pub fn scrub_event(&self, mut e: Event) -> Event {
         if !self.enabled {
             return e;
         }
-        // Every variant and every field is named — no `..`, no `_ =>`. This is
-        // the point of the match: a new secret-bearing field added to
-        // `EventKind` must not quietly ship unscrubbed to the SIEM, so it has
-        // to become a compile error here instead. Fields deliberately left
-        // alone are still listed, prefixed `_`, so skipping one is a decision
-        // on the record rather than an oversight.
-        match &mut e.kind {
-            EventKind::Prompt { text } | EventKind::AssistantMessage { text } => {
-                self.scrub_in_place(text)
-            }
-            // Both halves are prompt text and both can carry a secret — the
-            // rewritten one especially, since whatever a policy hook splices in
-            // is not something the user chose to type.
-            EventKind::PromptTransformed {
-                original,
-                transformed,
-            } => {
-                self.scrub_in_place(original);
-                self.scrub_in_place(transformed);
-            }
-            EventKind::ToolUse {
-                tool: _,
-                phase: _,
-                input,
-                output,
-                error,
-                // A duration and a cancelled-by-a-human flag: neither can
-                // carry a secret, so neither is scrubbed.
-                duration_ms: _,
-                interrupted: _,
-                files: _,
-                fqdns: _,
-            } => {
-                self.scrub_json(input);
-                self.scrub_json(output);
-                if let Some(err) = error {
-                    self.scrub_in_place(err);
-                }
-            }
-            // `name`/`agent_type` are tool identifiers, not user content.
-            EventKind::Skill { name: _, args } => {
-                if let Some(a) = args {
-                    self.scrub_in_place(a);
-                }
-            }
-            EventKind::Agent {
-                agent_type: _,
-                description,
-            } => {
-                if let Some(d) = description {
-                    self.scrub_in_place(d);
-                }
-            }
-            EventKind::Permission {
-                tool: _,
-                action: _,
-                input,
-            } => self.scrub_json(input),
-            EventKind::Notification {
-                message,
-                category: _,
-                title,
-            } => {
-                self.scrub_in_place(message);
-                if let Some(t) = title {
-                    self.scrub_in_place(t);
-                }
-            }
-            EventKind::Error {
-                message,
-                context: _,
-                // Scrubbed, unlike `context`, whose vocabulary the host tool
-                // enumerates. This one is whatever the throwing code called
-                // its error class, and code that builds a class name by
-                // interpolation puts the interpolated value here.
-                name,
-                // A boolean.
-                recoverable: _,
-            } => {
-                self.scrub_in_place(message);
-                if let Some(n) = name {
-                    self.scrub_in_place(n);
-                }
-            }
-            EventKind::Session { action: _, detail } => self.scrub_json(detail),
-            // Counts and a price. `finish` is the provider's own stop reason
-            // — a fixed vocabulary in every provider that documents one — but
-            // it is the only string here, and a provider is free to put an
-            // error string in it, so it goes through the scrubber anyway.
-            EventKind::Usage {
-                input_tokens: _,
-                output_tokens: _,
-                reasoning_tokens: _,
-                cache_read_tokens: _,
-                cache_write_tokens: _,
-                cost: _,
-                finish,
-            } => {
-                if let Some(f) = finish {
-                    self.scrub_in_place(f);
-                }
-            }
-            EventKind::Raw { payload } => self.scrub_json(payload),
-            // Everything but `instructions` is enumerated or a count. That
-            // one is free text the user typed, and it is typed at the moment
-            // they are deciding what the transcript should stop holding.
-            EventKind::Compact {
-                phase: _,
-                trigger: _,
-                tokens_before: _,
-                tokens_after: _,
-                instructions,
-            } => {
-                if let Some(i) = instructions {
-                    self.scrub_in_place(i);
-                }
-            }
-            // Enumerated, fixed-vocabulary fields: nothing user-authored.
-            EventKind::FileChange { path: _, action: _ }
-            | EventKind::Integrity {
-                status: _,
-                tool: _,
-                detail: _,
-            } => {}
-            // Argus writes all three of these itself; nothing here came from
-            // the host tool. `detail` is scrubbed anyway, since it is the one
-            // field a future reason could reasonably widen to carry a path.
-            EventKind::Loss {
-                reason: _,
-                count: _,
-                detail,
-            } => self.scrub_in_place(detail),
-        }
+        // The walk itself — which fields are user content and which are
+        // argus's own vocabulary — lives on `EventKind`, because truncation
+        // has to visit exactly the same set and two copies of that decision
+        // would drift apart in opposite directions.
+        crate::event::visit_strings(&mut e.kind, &mut |s| self.scrub_in_place(s));
         e
     }
 }

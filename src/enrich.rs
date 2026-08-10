@@ -12,20 +12,27 @@
 //! deliberately synchronous: it is CPU work and (from T18) file reads, not I/O
 //! the async runtime can interleave.
 
+use crate::config::CaptureCfg;
 use crate::event::Event;
 use crate::redact::Redactor;
 
-/// Redact one parsed batch.
+/// Redact one parsed batch, then cut it down to the configured field cap.
+///
+/// The order is the point. Adapters cap while parsing, but only to
+/// `max_field_bytes + `[`REDACTION_HEADROOM`](crate::adapters::REDACTION_HEADROOM),
+/// so a secret sitting across the boundary reaches the redactor whole instead
+/// of arriving as an unmatchable — and therefore unredacted — prefix. The
+/// final cut happens here, once nothing recognisable as a credential is left.
 ///
 /// Takes the whole batch rather than one event so that later additions with
 /// per-*event* budgets — file-content capture — have somewhere to enforce them
 /// that isn't a global.
-pub fn enrich(events: Vec<Event>, redactor: &Redactor) -> Vec<Event> {
+pub fn enrich(events: Vec<Event>, redactor: &Redactor, capture: &CaptureCfg) -> Vec<Event> {
     #[cfg(test)]
     slow_down();
     events
         .into_iter()
-        .map(|e| redactor.scrub_event(e))
+        .map(|e| crate::adapters::cap_event(redactor.scrub_event(e), capture))
         .collect()
 }
 
@@ -66,5 +73,116 @@ fn slow_down() {
     let micros = base.saturating_sub(SLOW_STEP_MICROS.load(Relaxed).saturating_mul(nth));
     if micros > 0 {
         std::thread::sleep(std::time::Duration::from_micros(micros));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{RedactionCfg, TruncateMode};
+    use crate::event::{Envelope, EventKind};
+
+    fn capture(max: usize, mode: TruncateMode) -> CaptureCfg {
+        CaptureCfg {
+            max_field_bytes: max,
+            truncate_mode: mode,
+            ..CaptureCfg::default()
+        }
+    }
+
+    fn prompt_through_pipeline(text: &str, capture: &CaptureCfg) -> String {
+        let envelope = Envelope {
+            source: "claude-code".into(),
+            received_at: chrono::Utc::now(),
+            truncated: false,
+            dropped: 0,
+            event: None,
+            payload: serde_json::json!({
+                "hook_event_name": "UserPromptSubmit",
+                "prompt": text,
+            }),
+        };
+        let events = crate::adapters::parse(envelope, capture);
+        let redactor = Redactor::new(&RedactionCfg::default());
+        let out = enrich(events, &redactor, capture);
+        match &out[0].kind {
+            EventKind::Prompt { text } => text.clone(),
+            other => panic!("not a prompt: {other:?}"),
+        }
+    }
+
+    /// The ordering hazard this stage exists to close. Capping during parsing
+    /// and redacting afterwards cuts a token that straddles the boundary in
+    /// half, and half a token matches nothing — so the prefix of a live
+    /// credential is stored, looking like ordinary text.
+    #[test]
+    fn a_secret_across_the_cap_boundary_is_redacted_not_left_as_a_prefix() {
+        let max = 200;
+        let secret = format!("ghp_{}", "A".repeat(36));
+        // Starts eight bytes before the cap and runs well past it.
+        let text = format!("{}{secret} trailing", "x".repeat(max - 8));
+
+        let out = prompt_through_pipeline(&text, &capture(max, TruncateMode::Head));
+        assert!(
+            !out.contains("ghp_"),
+            "a fragment of the token survived the cap: {out}"
+        );
+        assert!(
+            !out.contains("AAAAAAAAAA"),
+            "the token's body survived without its prefix: {out}"
+        );
+        // A secret that straddles the cap necessarily starts within a few bytes
+        // of it, so the marker that replaces it straddles the cap too and loses
+        // its own tail. That is cosmetic — a cut marker is not a credential —
+        // and it is still the proof that the redactor ran first: capping first
+        // would leave `ghp_AAAA…` here and no marker at all.
+        assert!(
+            out.contains("[REDACT"),
+            "the token was cut away rather than redacted, so a token that fitted \
+             entirely inside the headroom would have leaked: {out}"
+        );
+    }
+
+    /// The cap still has to be a cap. Headroom is slack for the redactor, not
+    /// a bigger limit.
+    #[test]
+    fn the_final_cap_is_the_configured_one() {
+        let out = prompt_through_pipeline(&"x".repeat(50_000), &capture(200, TruncateMode::Head));
+        assert!(
+            out.starts_with("xxx") && out.ends_with("…[truncated]"),
+            "not capped in head mode: {}",
+            &out[..40.min(out.len())]
+        );
+        assert!(
+            out.len() < 200 + 32,
+            "the parse-time headroom reached the buffer: {} bytes",
+            out.len()
+        );
+    }
+
+    /// `head` alone truncates away the outcome of a diff and the cause of a
+    /// stack trace, which is why the mode exists — and why it has to survive
+    /// the parse-time cap that runs before it.
+    #[test]
+    fn head_tail_keeps_the_end_of_a_long_field() {
+        let text = format!("BEGIN{}END", "-".repeat(50_000));
+        let out = prompt_through_pipeline(&text, &capture(200, TruncateMode::HeadTail));
+        assert!(out.starts_with("BEGIN"), "lost the head: {out}");
+        assert!(
+            out.ends_with("END"),
+            "lost the tail the mode is named for: {out}"
+        );
+        assert!(out.len() < 200 + 32, "{} bytes", out.len());
+
+        let dropped = prompt_through_pipeline(&text, &capture(200, TruncateMode::Drop));
+        assert_eq!(dropped, "[truncated]");
+    }
+
+    /// Redaction and truncation walk the same fields, so a mode that keeps
+    /// nothing must not be a way to skip the scrubber either.
+    #[test]
+    fn a_short_field_is_left_exactly_alone() {
+        let out = prompt_through_pipeline("hello world", &capture(200, TruncateMode::HeadTail));
+        assert_eq!(out, "hello world");
     }
 }

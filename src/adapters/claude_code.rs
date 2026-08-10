@@ -743,8 +743,14 @@ mod tests {
             panic!()
         };
         let stdout = output["stdout"].as_str().expect("stdout survives the cap");
-        assert!(stdout.ends_with("…[truncated]"), "not capped: {stdout}");
-        assert!(stdout.len() < 128, "cap not applied: {}", stdout.len());
+        assert!(stdout.contains("…[truncated]…"), "not capped: {stdout}");
+        // Parsing caps to `max + REDACTION_HEADROOM`; `enrich` cuts it to `max`
+        // once the redactor has had whole tokens to look at.
+        assert!(
+            stdout.len() < 64 + adapters::REDACTION_HEADROOM + 32,
+            "cap not applied: {}",
+            stdout.len()
+        );
         assert_eq!(
             input["command"], "ls",
             "an oversized output cost the input that produced it"

@@ -206,6 +206,7 @@ impl Stages {
         &self,
         events: Vec<Event>,
         redactor: Arc<Redactor>,
+        capture: config::CaptureCfg,
         origin: Option<std::path::PathBuf>,
     ) {
         let Ok(permit) = self.workers.clone().acquire_owned().await else {
@@ -214,7 +215,7 @@ impl Stages {
         let (done_tx, done) = tokio::sync::oneshot::channel();
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            let _ = done_tx.send(crate::enrich::enrich(events, &redactor));
+            let _ = done_tx.send(crate::enrich::enrich(events, &redactor, &capture));
         });
         let _ = self.write_tx.send(Pending { done, origin }).await;
     }
@@ -263,7 +264,12 @@ impl StageA {
         self.buffer.set_limits(&self.pipeline.buffer);
         let events = adapters::parse(envelope, &self.pipeline.capture);
         self.stages
-            .submit(events, self.pipeline.redactor.clone(), origin)
+            .submit(
+                events,
+                self.pipeline.redactor.clone(),
+                self.pipeline.capture.clone(),
+                origin,
+            )
             .await;
     }
 }

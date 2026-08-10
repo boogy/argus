@@ -1760,6 +1760,38 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
   that look identical from the outside: a ceiling that never fires, and one that
   fires on everything.
 
+- [x] **T17b** — cap after redaction, with a configurable mode.
+  Dependency: T17a.
+  Files: `src/config.rs`, `src/adapters/mod.rs`, `src/event.rs`, `src/redact.rs`,
+  `src/enrich.rs`, `src/daemon.rs`
+
+  Adapters capped while parsing and the redactor ran afterwards, so a secret
+  lying across the cap boundary was cut in half — and half a token matches no
+  pattern, so what reached the buffer was a fragment of a live credential that
+  looked like ordinary text. Parsing now caps to `max_field_bytes +
+  REDACTION_HEADROOM` (512 bytes, comfortably past the longest pattern here),
+  the redactor sees whole tokens, and the *final* cut happens in `enrich` once
+  nothing recognisable as a credential is left.
+
+  The parse-time cap keeps both ends whatever the configured mode is: the final
+  cap cannot invent bytes an earlier head-only cut already threw away, so a
+  `head_tail` deployment would otherwise show a "tail" taken from the middle of
+  the field. Threading the mode through every adapter call site instead would
+  have touched five more files for no gain.
+
+  `truncate_mode` is new config — `head` (default, the historical behaviour),
+  `head_tail`, `drop` — and is asserted to parse from TOML in the spelling the
+  docs use, because a knob nothing deserialises is a lie.
+
+  The 90-line exhaustive `EventKind` match moved out of `redact.rs` into
+  `event::visit_strings`, so redaction and truncation share one walk. Which
+  fields are user content is now decided once: a field capped but not scrubbed
+  is a leak, one scrubbed but not capped is unbounded, and a new variant is a
+  compile error for both. The mutation that skips the `Prompt` arm fails a
+  redaction test *and* two truncation tests — that is the guarantee.
+
+  Nine mutations, all biting on the first run.
+
 - [ ] **T18** — File-content capture. Dependency: T17.
   Files: `src/enrich.rs`, `src/config.rs`, `src/event.rs`, `src/redact.rs`, `src/export.rs`, `Cargo.toml`
 

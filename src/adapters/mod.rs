@@ -74,15 +74,86 @@ pub fn extract_patch_files(patch: &str) -> Vec<String> {
         .collect()
 }
 
+/// Slack the parse-time cap leaves the redactor.
+///
+/// Adapters cap while parsing and the redactor runs afterwards, so a secret
+/// lying across the cap boundary used to be cut in half — and half a token no
+/// longer matches the pattern that would have removed it, so what survived was
+/// a fragment of a live credential nobody could see was one. Parsing therefore
+/// caps to `max + this`, the redactor sees whole tokens, and [`cap_mode`]
+/// trims the rest away afterwards. Bounded work either way: 512 bytes is far
+/// more than the longest pattern here can match.
+pub const REDACTION_HEADROOM: usize = 512;
+
+fn working(max: usize) -> usize {
+    if max == 0 {
+        0
+    } else {
+        max.saturating_add(REDACTION_HEADROOM)
+    }
+}
+
+/// The parse-time cap: a working ceiling, not the final one.
+///
+/// It keeps both ends regardless of the configured mode, because the final cap
+/// cannot invent bytes that this one has already thrown away — a `head_tail`
+/// deployment whose parse-time cap kept only the head would show a "tail" taken
+/// from the middle of the field.
 pub fn cap_text(s: &str, max: usize) -> String {
+    cap_mode(s, working(max), crate::config::TruncateMode::HeadTail)
+}
+
+/// The final cap, applied after redaction.
+pub fn cap_mode(s: &str, max: usize, mode: crate::config::TruncateMode) -> String {
+    use crate::config::TruncateMode as M;
     if max == 0 || s.len() <= max {
         return s.to_string();
     }
-    let mut end = max;
+    match mode {
+        M::Drop => "[truncated]".to_string(),
+        M::Head => format!("{}…[truncated]", head(s, max)),
+        M::HeadTail => {
+            let h = max * 3 / 4;
+            format!("{}…[truncated]…{}", head(s, h), tail(s, max - h))
+        }
+    }
+}
+
+/// The first `n` bytes, rounded down to a character boundary.
+fn head(s: &str, n: usize) -> &str {
+    let mut end = n.min(s.len());
     while !s.is_char_boundary(end) {
         end -= 1;
     }
-    format!("{}…[truncated]", &s[..end])
+    &s[..end]
+}
+
+/// The last `n` bytes, rounded up to a character boundary.
+fn tail(s: &str, n: usize) -> &str {
+    let mut start = s.len().saturating_sub(n);
+    while !s.is_char_boundary(start) {
+        start += 1;
+    }
+    &s[start..]
+}
+
+/// Apply the final cap to every user-authored string in an event.
+///
+/// Runs after redaction, on the enrichment stage — see [`REDACTION_HEADROOM`]
+/// for why the order matters. It visits exactly the fields the redactor does,
+/// through the same walk, so a field that is capped is one that was scrubbed
+/// first and a new field cannot pick up one without the other.
+pub fn cap_event(mut e: Event, capture: &CaptureCfg) -> Event {
+    let (max, mode) = (capture.max_field_bytes, capture.truncate_mode);
+    if max == 0 {
+        return e;
+    }
+    crate::event::visit_strings(&mut e.kind, &mut |s| {
+        if s.len() > max {
+            *s = cap_mode(s, max, mode);
+        }
+    });
+    e
 }
 
 /// How much larger than one field's cap a whole structure may be before it is
@@ -236,17 +307,90 @@ mod tests {
     #[test]
     fn cap_helpers_truncate() {
         assert_eq!(cap_text("short", 100), "short");
-        let long = "x".repeat(200);
+        let long = "x".repeat(10_000);
         let capped = cap_text(&long, 50);
-        assert!(capped.len() < 200 && capped.ends_with("…[truncated]"));
+        assert!(
+            capped.len() < 700 && capped.contains("…[truncated]…"),
+            "the parse-time cap did not bound the field: {} bytes",
+            capped.len()
+        );
         assert_eq!(cap_text(&long, 0), long, "0 disables the cap");
-        let big = serde_json::json!({"blob": "y".repeat(200)});
+        let big = serde_json::json!({"blob": "y".repeat(10_000)});
         let v = cap_value(big.clone(), 50);
         assert!(
-            v["blob"].as_str().unwrap().ends_with("…[truncated]"),
+            v["blob"].as_str().unwrap().len() < 700,
             "the oversized leaf was not capped: {v}"
         );
         assert_eq!(cap_value(big.clone(), 0), big);
+    }
+
+    /// The parse-time cap is a working ceiling: it leaves the redactor room to
+    /// match a token lying across the final boundary. Without the slack, the
+    /// redactor sees a fragment, nothing matches, and the fragment ships.
+    #[test]
+    fn the_parse_time_cap_leaves_the_redactor_headroom() {
+        let capped = cap_text(&"x".repeat(10_000), 64);
+        assert!(
+            capped.len() > 64 + 400,
+            "no headroom left for the redactor: {} bytes",
+            capped.len()
+        );
+        assert!(
+            capped.len() < 64 + REDACTION_HEADROOM + 32,
+            "the headroom is unbounded work, not slack: {} bytes",
+            capped.len()
+        );
+    }
+
+    /// A `head_tail` deployment cannot show a tail the parse-time cap already
+    /// threw away, so that cap keeps both ends whatever the configured mode is.
+    #[test]
+    fn the_parse_time_cap_keeps_both_ends() {
+        let s = format!("{}{}", "a".repeat(10_000), "OMEGA");
+        let capped = cap_text(&s, 64);
+        assert!(capped.starts_with("aaa"));
+        assert!(
+            capped.ends_with("OMEGA"),
+            "the true tail was discarded before the final cap could keep it"
+        );
+    }
+
+    #[test]
+    fn each_mode_keeps_what_it_says_it_keeps() {
+        use crate::config::TruncateMode as M;
+        let s = format!("HEAD{}TAIL", "-".repeat(1_000));
+        let head = cap_mode(&s, 64, M::Head);
+        assert!(head.starts_with("HEAD") && head.ends_with("…[truncated]"));
+        assert!(head.len() < 96, "{} bytes", head.len());
+
+        let both = cap_mode(&s, 64, M::HeadTail);
+        assert!(
+            both.starts_with("HEAD") && both.ends_with("TAIL"),
+            "head_tail lost an end: {both}"
+        );
+        assert!(both.len() < 96, "{} bytes", both.len());
+
+        assert_eq!(cap_mode(&s, 64, M::Drop), "[truncated]");
+        assert_eq!(
+            cap_mode("short", 64, M::Drop),
+            "short",
+            "a field under the cap is untouched"
+        );
+    }
+
+    /// Cutting a string at a byte offset inside a character panics; a payload
+    /// full of emoji or CJK is ordinary, not adversarial.
+    #[test]
+    fn capping_lands_on_character_boundaries() {
+        let s = "é".repeat(500);
+        for mode in [
+            crate::config::TruncateMode::Head,
+            crate::config::TruncateMode::HeadTail,
+        ] {
+            let out = cap_mode(&s, 65, mode);
+            assert!(out.len() < 128, "{mode:?}: {} bytes", out.len());
+            assert!(out.contains('é'), "{mode:?} kept nothing readable");
+        }
     }
 
     /// The record of a large write has to say *what* was written. Dropping the
@@ -268,9 +412,9 @@ mod tests {
         assert_eq!(v["line"], 12);
         assert_eq!(v["flags"], serde_json::json!(["a", "b"]));
         let content = v["content"].as_str().unwrap();
-        assert!(content.starts_with("zzz") && content.ends_with("…[truncated]"));
+        assert!(content.starts_with("zzz") && content.contains("…[truncated]…"));
         assert!(
-            content.len() < 128,
+            content.len() < 64 + REDACTION_HEADROOM + 32,
             "leaf cap not applied: {}",
             content.len()
         );

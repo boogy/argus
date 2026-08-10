@@ -278,6 +278,156 @@ impl Event {
     }
 }
 
+/// Visit every string in an event that came from outside argus.
+///
+/// Every variant and every field is named — no `..`, no `_ =>`. This is the
+/// point of the match: a new field on `EventKind` that carries text from the
+/// host tool must not quietly ship to the SIEM unscrubbed and uncapped, so it
+/// has to become a compile error here instead. Fields deliberately left alone
+/// are still listed, prefixed `_`, so skipping one is a decision on the record
+/// rather than an oversight.
+///
+/// Redaction and truncation share this walk rather than each keeping their own
+/// copy of it, so the two can never disagree about which fields are user
+/// content — a field capped but not scrubbed is a leak, and one scrubbed but
+/// not capped is unbounded.
+pub fn visit_strings(kind: &mut EventKind, f: &mut impl FnMut(&mut String)) {
+    match kind {
+        EventKind::Prompt { text } | EventKind::AssistantMessage { text } => f(text),
+        // Both halves are prompt text and both can carry a secret — the
+        // rewritten one especially, since whatever a policy hook splices in is
+        // not something the user chose to type.
+        EventKind::PromptTransformed {
+            original,
+            transformed,
+        } => {
+            f(original);
+            f(transformed);
+        }
+        EventKind::ToolUse {
+            tool: _,
+            phase: _,
+            input,
+            output,
+            error,
+            // A duration and a cancelled-by-a-human flag: neither can carry a
+            // secret, so neither is visited.
+            duration_ms: _,
+            interrupted: _,
+            files: _,
+            fqdns: _,
+        } => {
+            visit_json_strings(input, f);
+            visit_json_strings(output, f);
+            if let Some(err) = error {
+                f(err);
+            }
+        }
+        // `name`/`agent_type` are tool identifiers, not user content.
+        EventKind::Skill { name: _, args } => {
+            if let Some(a) = args {
+                f(a);
+            }
+        }
+        EventKind::Agent {
+            agent_type: _,
+            description,
+        } => {
+            if let Some(d) = description {
+                f(d);
+            }
+        }
+        EventKind::Permission {
+            tool: _,
+            action: _,
+            input,
+        } => visit_json_strings(input, f),
+        EventKind::Notification {
+            message,
+            category: _,
+            title,
+        } => {
+            f(message);
+            if let Some(t) = title {
+                f(t);
+            }
+        }
+        EventKind::Error {
+            message,
+            context: _,
+            // Visited, unlike `context`, whose vocabulary the host tool
+            // enumerates. This one is whatever the throwing code called its
+            // error class, and code that builds a class name by interpolation
+            // puts the interpolated value here.
+            name,
+            // A boolean.
+            recoverable: _,
+        } => {
+            f(message);
+            if let Some(n) = name {
+                f(n);
+            }
+        }
+        EventKind::Session { action: _, detail } => visit_json_strings(detail, f),
+        // Counts and a price. `finish` is the provider's own stop reason — a
+        // fixed vocabulary in every provider that documents one — but it is
+        // the only string here, and a provider is free to put an error string
+        // in it, so it is visited anyway.
+        EventKind::Usage {
+            input_tokens: _,
+            output_tokens: _,
+            reasoning_tokens: _,
+            cache_read_tokens: _,
+            cache_write_tokens: _,
+            cost: _,
+            finish,
+        } => {
+            if let Some(fin) = finish {
+                f(fin);
+            }
+        }
+        EventKind::Raw { payload } => visit_json_strings(payload, f),
+        // Everything but `instructions` is enumerated or a count. That one is
+        // free text the user typed, and it is typed at the moment they are
+        // deciding what the transcript should stop holding.
+        EventKind::Compact {
+            phase: _,
+            trigger: _,
+            tokens_before: _,
+            tokens_after: _,
+            instructions,
+        } => {
+            if let Some(i) = instructions {
+                f(i);
+            }
+        }
+        // Enumerated, fixed-vocabulary fields: nothing user-authored.
+        EventKind::FileChange { path: _, action: _ }
+        | EventKind::Integrity {
+            status: _,
+            tool: _,
+            detail: _,
+        } => {}
+        // Argus writes all three of these itself; nothing here came from the
+        // host tool. `detail` is visited anyway, since it is the one field a
+        // future reason could reasonably widen to carry a path.
+        EventKind::Loss {
+            reason: _,
+            count: _,
+            detail,
+        } => f(detail),
+    }
+}
+
+fn visit_json_strings(v: &mut serde_json::Value, f: &mut impl FnMut(&mut String)) {
+    match v {
+        serde_json::Value::String(s) => f(s),
+        serde_json::Value::Array(a) => a.iter_mut().for_each(|x| visit_json_strings(x, f)),
+        serde_json::Value::Object(o) => o.values_mut().for_each(|x| visit_json_strings(x, f)),
+        _ => {}
+    }
+}
+
 /// Who and where this process is. Neither answer can change while the process
 /// runs, and resolving the host costs a *process spawn*, so it is resolved
 /// once and reused. Before this, a busy session paid a `fork`+`exec` for every
