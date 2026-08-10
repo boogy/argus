@@ -928,6 +928,106 @@ mod tests {
         assert!(!f.ok && f.detail.contains("not valid TOML"), "{f:?}");
     }
 
+    use serde_json::json;
+
+    /// Every hook entry in `~/.claude/settings.json` present and correct, and
+    /// not one of them executed. Verified against the shipped `cli.js`, whose
+    /// hook resolution falls back to the machine-wide layer's hooks in three
+    /// separate cases and to nothing at all in a fourth.
+    #[test]
+    fn check_detects_claude_code_kill_switches() {
+        let home = fake_home();
+        fake_bin(home.path());
+        std::fs::create_dir_all(home.path().join(".claude")).unwrap();
+        let root = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var(crate::harness::SYSTEM_ROOT_ENV, root.path()) };
+        let rel = crate::harness::HARNESSES
+            .iter()
+            .find(|h| h.id() == "claude-code")
+            .unwrap()
+            .managed_dirs()
+            .iter()
+            .find(|m| m.platform == crate::detect::Platform::host())
+            .unwrap()
+            .rel;
+        let managed_dir = root.path().join(rel);
+        std::fs::create_dir_all(managed_dir.join("managed-settings.d")).unwrap();
+        run(false).unwrap();
+
+        let finding = |home: &std::path::Path| {
+            crate::integrity::check(home)
+                .into_iter()
+                .find(|f| f.tool == "claude-code")
+                .unwrap()
+        };
+        // The baseline has to be healthy or the cases below prove nothing.
+        assert!(finding(home.path()).ok, "{:?}", finding(home.path()));
+
+        let user = home.path().join(".claude/settings.json");
+        let managed = managed_dir.join("managed-settings.json");
+        let dropin = managed_dir.join("managed-settings.d/policy.json");
+        let cases: [(&std::path::Path, serde_json::Value, &str); 5] = [
+            (&user, json!({"disableAllHooks": true}), "disableAllHooks"),
+            (&managed, json!({"disableAllHooks": true}), "managed or not"),
+            (
+                &managed,
+                json!({"allowManagedHooksOnly": true}),
+                "allowManagedHooksOnly = true",
+            ),
+            (
+                &managed,
+                json!({"strictPluginOnlyCustomization": ["hooks"]}),
+                "strictPluginOnlyCustomization covers hooks",
+            ),
+            // A switch hidden in a drop-in counts exactly as much as one in
+            // the file itself — Claude Code reads the directory too.
+            (
+                &dropin,
+                json!({"allowManagedHooksOnly": true}),
+                "allowManagedHooksOnly = true",
+            ),
+        ];
+        for (path, patch, needle) in cases {
+            let mut doc: serde_json::Value = std::fs::read_to_string(path)
+                .ok()
+                .and_then(|t| serde_json::from_str(&t).ok())
+                .unwrap_or_else(|| json!({}));
+            let before = doc.clone();
+            for (k, v) in patch.as_object().unwrap() {
+                doc[k] = v.clone();
+            }
+            std::fs::write(path, doc.to_string()).unwrap();
+            let f = finding(home.path());
+            assert!(
+                !f.ok && f.detail.contains(needle),
+                "{} / {patch} -> {f:?}",
+                path.display()
+            );
+            std::fs::write(path, before.to_string()).unwrap();
+        }
+        // And restored, so the sweep above cannot have passed by leaving the
+        // host permanently broken behind it.
+        std::fs::remove_file(&dropin).ok();
+        assert!(finding(home.path()).ok);
+
+        // The one restriction that is *not* a finding: argus wired into the
+        // managed layer is unaffected by a rule that keeps only managed hooks.
+        // Reporting it would fire on every host `install --managed` has run on.
+        crate::install::run_managed(false).unwrap();
+        let mut doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&managed).unwrap()).unwrap();
+        assert_eq!(doc["allowManagedHooksOnly"], json!(true));
+        assert!(finding(home.path()).ok, "{:?}", finding(home.path()));
+
+        // Unless the layer is turned off outright, which stops even itself.
+        doc["disableAllHooks"] = json!(true);
+        std::fs::write(&managed, doc.to_string()).unwrap();
+        let f = finding(home.path());
+        assert!(!f.ok && f.detail.contains("managed or not"), "{f:?}");
+
+        unsafe { std::env::remove_var(crate::harness::SYSTEM_ROOT_ENV) };
+    }
+
     /// Edit argus's own Copilot hooks file and return the copilot finding.
     /// Every case starts from a healthy install, so a finding that flips can
     /// only have flipped because of the edit.

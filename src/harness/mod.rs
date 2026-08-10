@@ -366,8 +366,9 @@ impl Detection {
 /// A harness-specific setting that silently disables capture (e.g. Codex's
 /// `[features] hooks = false`). Check-only: reported, never written.
 ///
-/// Codex and Copilot report these; Claude Code and opencode document no
-/// equivalent setting.
+/// Claude Code, Codex and Copilot report these. opencode has no equivalent
+/// setting; pi.dev's extensions are loaded by presence, so removing one is the
+/// only way to disable it and there is nothing silent to detect.
 pub struct KillSwitch {
     pub name: &'static str,
     pub detail: String,

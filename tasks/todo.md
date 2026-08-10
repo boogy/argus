@@ -1514,6 +1514,42 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
   missing — only `Scope::Managed` may pin anything, swept over every shipped
   harness so a new one cannot introduce it either.
 
+- [x] **T15c** — the Claude Code kill switches argus could not see.
+  Dependency: T15b.
+  Files: `src/harness/claude_code.rs`, `src/harness/mod.rs`, `src/install.rs`
+
+  `KillSwitch`'s own comment said Claude Code documents no equivalent setting.
+  It documents four, and the shipped `cli.js` resolves hooks like this:
+
+  ```text
+  policy.disableAllHooks                      -> {}            // nothing runs
+  policy.allowManagedHooksOnly                -> policy.hooks  // only managed
+  policy.strictPluginOnlyCustomization(hooks) -> policy.hooks  // only managed
+  merged.disableAllHooks                      -> policy.hooks  // only managed
+  otherwise                                   -> merged.hooks
+  ```
+
+  Three of the four restrict execution to the machine-wide layer and only the
+  first stops that layer too. `strictPluginOnlyCustomization` appears in no
+  plan or doc — it is either `true` or a list of the customizations it covers,
+  and only the list containing `hooks` reaches ours.
+
+  The reads are therefore in two places: `~/.claude/settings.json` for the
+  merged `disableAllHooks`, and the machine-wide file *plus*
+  `managed-settings.d/*.json` for the other three, since Claude Code reads the
+  drop-in directory and a switch hidden there counts exactly as much.
+
+  The one restriction deliberately *not* reported is a restriction argus
+  survives: where argus's own entries are in the managed file, a rule keeping
+  only managed hooks changes nothing about its capture. Reporting it would
+  fire on every host `install --managed` has been run on, which is the same
+  false-confidence failure as reporting "wired" about a dead host, in reverse.
+  Hence the `managed_wired` test — and hence `disableAllHooks` staying fatal
+  regardless, because that one stops the managed layer too.
+
+  Six mutations, all bite, including the `managed_wired` skip and the drop-in
+  directory scan.
+
 - [ ] **T16** — Pipeline restructure (A/B/C stages). Dependency: T7.
   Files: `src/daemon.rs`, new `src/enrich.rs`, `src/ipc.rs`
 

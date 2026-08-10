@@ -1,5 +1,6 @@
 use super::{
-    Artifact, ConfigDir, Detection, Harness, HookEvent, HookShape, ManagedDir, Probes, Scope,
+    Artifact, ConfigDir, Detection, Harness, HookEvent, HookShape, KillSwitch, ManagedDir, Probes,
+    Scope,
 };
 use crate::config::CaptureCfg;
 use crate::detect::{BinaryProbe, Platform};
@@ -147,6 +148,121 @@ impl Harness for ClaudeCode {
                 pinned: pinned_settings(),
             }],
         }
+    }
+
+    /// Settings that leave every hook entry intact and still stop argus's from
+    /// running — the case where `check` would otherwise report "wired" about a
+    /// host capturing nothing, which is worse than reporting nothing at all.
+    ///
+    /// Read out of the shipped `cli.js`, whose hook resolution is, in full:
+    ///
+    /// ```text
+    /// policy.disableAllHooks             -> {}                 // nothing runs
+    /// policy.allowManagedHooksOnly       -> policy.hooks       // only managed
+    /// policy.strictPluginOnlyCustomization("hooks")
+    ///                                    -> policy.hooks       // only managed
+    /// merged.disableAllHooks             -> policy.hooks       // only managed
+    /// otherwise                          -> merged.hooks
+    /// ```
+    ///
+    /// So three of the four restrict execution to the managed layer, and only
+    /// the first stops that layer too. Where argus is *in* the managed layer
+    /// its capture is untouched, and saying otherwise would be a false alarm
+    /// on every machine `install --managed` has been run on — hence the
+    /// `managed_wired` test rather than an unconditional report.
+    fn kill_switches(&self, d: &Detection) -> Vec<KillSwitch> {
+        let mut out = Vec::new();
+        let read = |p: &std::path::Path| -> Option<serde_json::Value> {
+            serde_json::from_str(&std::fs::read_to_string(p).ok()?).ok()
+        };
+
+        // The user layer. `disableAllHooks` here does not disable the managed
+        // layer, but argus's own entry lives in the user file, so for a
+        // user-scope install it is fatal all the same.
+        if let Some(doc) = read(&d.config_home.join("settings.json"))
+            && doc.get("disableAllHooks") == Some(&serde_json::Value::Bool(true))
+        {
+            out.push(KillSwitch {
+                name: "hooks disabled",
+                detail: format!(
+                    "disableAllHooks = true in {} — no hook outside the machine-wide layer runs",
+                    d.config_home.join("settings.json").display()
+                ),
+            });
+        }
+
+        // The managed layer, which outranks everything the user can write.
+        // `managed-settings.d/*.json` is read beside the file and carries the
+        // same keys, so a switch hidden in a drop-in counts too.
+        let platform = crate::detect::Platform::host();
+        let root = super::system_root(platform);
+        let Some(dir) = MANAGED_DIRS
+            .iter()
+            .find(|m| m.platform == platform)
+            .map(|m| root.path.join(m.rel))
+        else {
+            return out;
+        };
+        let mut files = vec![dir.join("managed-settings.json")];
+        if let Ok(entries) = std::fs::read_dir(dir.join("managed-settings.d")) {
+            files.extend(
+                entries
+                    .flatten()
+                    .map(|e| e.path())
+                    .filter(|p| p.extension().is_some_and(|x| x == "json")),
+            );
+        }
+        for path in files {
+            let Some(doc) = read(&path) else { continue };
+            let yes = |k: &str| doc.get(k) == Some(&serde_json::Value::Bool(true));
+            // Whether *our* hooks survive the restriction. `hooks` here is the
+            // managed file's own, which is what the three restricting branches
+            // fall back to.
+            let managed_wired = doc
+                .get("hooks")
+                .and_then(serde_json::Value::as_object)
+                .is_some_and(|h| {
+                    h.values()
+                        .filter_map(serde_json::Value::as_array)
+                        .flatten()
+                        .any(|e| super::is_ours(e, "claude-code"))
+                });
+            if yes("disableAllHooks") {
+                out.push(KillSwitch {
+                    name: "hooks disabled",
+                    detail: format!(
+                        "disableAllHooks = true in {} — no hook runs at all, managed or not",
+                        path.display()
+                    ),
+                });
+            }
+            if managed_wired {
+                continue;
+            }
+            // `strictPluginOnlyCustomization` is either `true` or a list of
+            // the customizations it covers; only the list containing "hooks"
+            // reaches ours.
+            let strict = doc.get("strictPluginOnlyCustomization");
+            let strict_hooks = strict == Some(&serde_json::Value::Bool(true))
+                || strict
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|a| a.iter().any(|v| v.as_str() == Some("hooks")));
+            for (on, key) in [
+                (yes("allowManagedHooksOnly"), "allowManagedHooksOnly = true"),
+                (strict_hooks, "strictPluginOnlyCustomization covers hooks"),
+            ] {
+                if on {
+                    out.push(KillSwitch {
+                        name: "user hooks ignored",
+                        detail: format!(
+                            "{key} in {} — only hooks in the machine-wide layer run,                              and argus is not one of them",
+                            path.display()
+                        ),
+                    });
+                }
+            }
+        }
+        out
     }
 
     fn parse(&self, env: &Envelope, cfg: &CaptureCfg) -> Vec<Event> {
