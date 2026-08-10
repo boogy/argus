@@ -1594,6 +1594,31 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
   Seven mutations, all bite, including the ordering and both `only_if_absent`
   choices.
 
+- [x] **T15e** — the Codex kill switches argus could not see. Dependency: T15d.
+  Files: `src/harness/codex.rs`, `src/install.rs`
+
+  The reads only ever opened `~/.codex`. Codex's machine-wide layer outranks
+  the user layer, so `allow_managed_hooks_only` or `[features] hooks = false`
+  set there is the value that actually decides — and was invisible.
+
+  Both directories are now swept, and T15d created the false alarm this has to
+  avoid: argus writes `allow_managed_hooks_only = true` itself, so reporting it
+  unconditionally would fire on every host `install --managed` has run on, with
+  argus's own pin reported as argus's own kill switch. It is therefore reported
+  only where argus is *not* in the machine-wide hooks directory — the same
+  `managed_wired` test as Claude Code (T15c), and applied to the user file too,
+  since the question is whether argus's hooks are managed, not who set the flag.
+
+  `[features] hooks = false` gets no such escape: it stops every hook on the
+  machine, managed or not.
+
+  Six mutations, all bite. A seventh — passing the wrong `source` to `is_ours`
+  — was **discarded rather than accepted as surviving**: `is_ours` matches on
+  the marker key argus writes, so `source` only affects legacy entries and the
+  mutation was semantically equivalent. Replaced with one that asserts the
+  suppression is *conditional* (assume argus is always the managed hook, and a
+  genuinely blinded host reads as healthy), which does bite.
+
 - [ ] **T16** — Pipeline restructure (A/B/C stages). Dependency: T7.
   Files: `src/daemon.rs`, new `src/enrich.rs`, `src/ipc.rs`
 

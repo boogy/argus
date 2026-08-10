@@ -309,10 +309,49 @@ impl Harness for Codex {
     ///
     /// Verified against <https://learn.chatgpt.com/docs/hooks> (Codex is not
     /// installed on the machine this was written on).
+    /// Settings that leave every hook entry in place and still stop it running.
+    ///
+    /// Both of argus's config directories are read, not just the user's. The
+    /// machine-wide layer (T15d) outranks the user layer, so a switch set there
+    /// is the one that decides — and it is invisible from `~/.codex`, which is
+    /// the only place this used to look.
+    ///
+    /// `allow_managed_hooks_only` is reported only where argus is *not* in the
+    /// machine-wide hooks directory. Where it is, keeping managed hooks and
+    /// discarding the rest changes nothing about argus's capture, and saying
+    /// otherwise would fire on every host `install --managed` has been run on
+    /// — argus's own pin reported as argus's own kill switch. Same reasoning,
+    /// and the same shape, as Claude Code's `managed_wired` test.
+    ///
+    /// `[features] hooks = false` has no such escape: it stops every hook on
+    /// the machine, managed or not.
     fn kill_switches(&self, d: &Detection) -> Vec<KillSwitch> {
         let mut out = Vec::new();
-        for file in ["config.toml", "requirements.toml"] {
-            let path = d.config_home.join(file);
+        let platform = crate::detect::Platform::host();
+        let managed = MANAGED_DIRS
+            .iter()
+            .find(|m| m.platform == platform)
+            .map(|m| super::system_root(platform).path.join(m.rel));
+
+        let managed_wired = managed.as_ref().is_some_and(|dir| {
+            std::fs::read_to_string(dir.join("hooks").join("hooks.json"))
+                .ok()
+                .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+                .and_then(|v| v.get("hooks").cloned())
+                .and_then(|h| h.as_object().cloned())
+                .is_some_and(|h| {
+                    h.values()
+                        .filter_map(serde_json::Value::as_array)
+                        .flatten()
+                        .any(|e| super::is_ours(e, "codex"))
+                })
+        });
+
+        let dirs = std::iter::once(d.config_home.clone()).chain(managed);
+        for (dir, file) in
+            dirs.flat_map(|dir| ["config.toml", "requirements.toml"].map(|f| (dir.clone(), f)))
+        {
+            let path = dir.join(file);
             let Ok(text) = std::fs::read_to_string(&path) else {
                 continue;
             };
@@ -348,13 +387,14 @@ impl Harness for Codex {
                     });
                 }
             }
-            // argus installs a *user* hook. This setting keeps only
-            // administrator-managed hooks, so ours is discovered, listed, and
-            // never executed.
-            if doc
-                .get("allow_managed_hooks_only")
-                .and_then(toml::Value::as_bool)
-                == Some(true)
+            // This setting keeps only administrator-managed hooks. Where
+            // argus's hook is a *user* hook, that means it is discovered,
+            // listed, and never executed.
+            if !managed_wired
+                && doc
+                    .get("allow_managed_hooks_only")
+                    .and_then(toml::Value::as_bool)
+                    == Some(true)
             {
                 out.push(KillSwitch {
                     name: "user hooks ignored",

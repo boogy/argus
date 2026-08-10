@@ -1028,6 +1028,106 @@ mod tests {
         unsafe { std::env::remove_var(crate::harness::SYSTEM_ROOT_ENV) };
     }
 
+    /// Codex's kill switches live in two directories, not one. The machine-wide
+    /// layer outranks the user's, so a switch set there is the one that
+    /// decides — and nothing used to look outside `~/.codex`.
+    #[test]
+    fn check_detects_codex_kill_switches_in_the_machine_wide_layer() {
+        let home = fake_home();
+        fake_bin(home.path());
+        let root = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var(crate::harness::SYSTEM_ROOT_ENV, root.path()) };
+        let rel = crate::harness::HARNESSES
+            .iter()
+            .find(|h| h.id() == "codex")
+            .unwrap()
+            .managed_dirs()
+            .iter()
+            .find(|m| m.platform == crate::detect::Platform::host())
+            .unwrap()
+            .rel;
+        let managed_dir = root.path().join(rel);
+        std::fs::create_dir_all(&managed_dir).unwrap();
+        run(false).unwrap();
+
+        let finding = |home: &std::path::Path| {
+            crate::integrity::check(home)
+                .into_iter()
+                .find(|f| f.tool == "codex")
+                .unwrap()
+        };
+        assert!(finding(home.path()).ok, "{:?}", finding(home.path()));
+
+        let user_req = home.path().join(".codex/requirements.toml");
+        let sys_cfg = managed_dir.join("config.toml");
+        let sys_req = managed_dir.join("requirements.toml");
+        let cases: [(&std::path::Path, &str, &str); 4] = [
+            (
+                &user_req,
+                "allow_managed_hooks_only = true\n",
+                "only administrator-managed",
+            ),
+            (
+                &sys_req,
+                "allow_managed_hooks_only = true\n",
+                "only administrator-managed",
+            ),
+            // Machine-wide, and fatal however the hook was installed.
+            (&sys_cfg, "[features]\nhooks = false\n", "wired or not"),
+            // The deprecated spelling still works, so it still counts.
+            (
+                &sys_cfg,
+                "[features]\ncodex_hooks = false\n",
+                "wired or not",
+            ),
+        ];
+        for (path, body, needle) in cases {
+            let before = std::fs::read_to_string(path).ok();
+            std::fs::write(path, body).unwrap();
+            let f = finding(home.path());
+            assert!(
+                !f.ok && f.detail.contains(needle),
+                "{} / {body:?} -> {f:?}",
+                path.display()
+            );
+            match &before {
+                Some(t) => std::fs::write(path, t).unwrap(),
+                None => std::fs::remove_file(path).unwrap(),
+            }
+        }
+        assert!(finding(home.path()).ok, "{:?}", finding(home.path()));
+
+        // The restriction argus survives: once its hooks are the machine-wide
+        // ones, keeping only machine-wide hooks changes nothing about capture,
+        // and reporting it would fire on every host `install --managed` ran on.
+        crate::install::run_managed(false).unwrap();
+        assert!(
+            std::fs::read_to_string(&sys_req)
+                .unwrap()
+                .contains("allow_managed_hooks_only"),
+            "the pin argus itself writes"
+        );
+        assert!(finding(home.path()).ok, "{:?}", finding(home.path()));
+        // Including when the *user* file is the one carrying it: the question
+        // is whether argus's hooks are managed, not who set the flag.
+        std::fs::write(&user_req, "allow_managed_hooks_only = true\n").unwrap();
+        assert!(finding(home.path()).ok, "{:?}", finding(home.path()));
+        std::fs::remove_file(&user_req).unwrap();
+
+        // But turning the feature off stops the managed hooks too.
+        std::fs::write(
+            managed_dir.join("requirements.toml"),
+            "allow_managed_hooks_only = true\n",
+        )
+        .unwrap();
+        let cfg = std::fs::read_to_string(&sys_cfg).unwrap();
+        std::fs::write(&sys_cfg, format!("{cfg}\n[features]\nhooks = false\n")).unwrap();
+        let f = finding(home.path());
+        assert!(!f.ok && f.detail.contains("wired or not"), "{f:?}");
+
+        unsafe { std::env::remove_var(crate::harness::SYSTEM_ROOT_ENV) };
+    }
+
     /// Edit argus's own Copilot hooks file and return the copilot finding.
     /// Every case starts from a healthy install, so a finding that flips can
     /// only have flipped because of the edit.
