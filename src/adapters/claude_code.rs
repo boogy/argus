@@ -739,10 +739,16 @@ mod tests {
             ),
             &cfg,
         );
-        let EventKind::ToolUse { output, .. } = &events[0].kind else {
+        let EventKind::ToolUse { input, output, .. } = &events[0].kind else {
             panic!()
         };
-        assert_eq!(output["_truncated"], true);
+        let stdout = output["stdout"].as_str().expect("stdout survives the cap");
+        assert!(stdout.ends_with("…[truncated]"), "not capped: {stdout}");
+        assert!(stdout.len() < 128, "cap not applied: {}", stdout.len());
+        assert_eq!(
+            input["command"], "ls",
+            "an oversized output cost the input that produced it"
+        );
     }
 
     #[test]

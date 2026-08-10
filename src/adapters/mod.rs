@@ -85,15 +85,60 @@ pub fn cap_text(s: &str, max: usize) -> String {
     format!("{}…[truncated]", &s[..end])
 }
 
+/// How much larger than one field's cap a whole structure may be before it is
+/// dropped outright.
+///
+/// Capping each string separately bounds the *strings*, not their number: a
+/// payload of ten thousand short ones is still ten thousand. This is the
+/// backstop for that shape, and it is deliberately loose — at the default cap
+/// it is a megabyte — because reaching it destroys the event, and an ordinary
+/// tool call with a dozen populated fields must never come close.
+const STRUCTURE_CEILING: usize = 16;
+
+/// Deepest nesting that is walked rather than dropped.
+///
+/// `serde_json` refuses to parse past 128 levels, so nothing arriving over the
+/// socket can exceed this; it exists because `cap_leaves` recurses, and a
+/// stack overflow is not an error the daemon can report.
+const MAX_DEPTH: usize = 32;
+
+/// Cap every string inside `v`, keeping the structure around them.
+///
+/// This used to replace the whole value with `{"_truncated": …}` the moment its
+/// serialized form went one byte over, which meant a `Write` of a large file
+/// cost the `file_path` too — the record said something big was written and not
+/// what, which is the one detail an investigation needs. Capping the leaves
+/// keeps every key and every short field, and truncates only what is actually
+/// oversized.
 pub fn cap_value(v: Value, max: usize) -> Value {
     if max == 0 {
         return v;
     }
-    let n = serde_json::to_string(&v).map(|s| s.len()).unwrap_or(0);
-    if n <= max {
-        v
-    } else {
-        serde_json::json!({"_truncated": true, "_bytes": n})
+    let capped = cap_leaves(v, max, 0);
+    let n = serde_json::to_string(&capped).map(|s| s.len()).unwrap_or(0);
+    if n > max.saturating_mul(STRUCTURE_CEILING) {
+        return serde_json::json!({"_truncated": true, "_bytes": n});
+    }
+    capped
+}
+
+fn cap_leaves(v: Value, max: usize, depth: usize) -> Value {
+    match v {
+        Value::String(s) => Value::String(cap_text(&s, max)),
+        Value::Array(_) | Value::Object(_) if depth >= MAX_DEPTH => {
+            serde_json::json!({"_truncated": true, "_reason": "depth"})
+        }
+        Value::Array(a) => Value::Array(
+            a.into_iter()
+                .map(|x| cap_leaves(x, max, depth + 1))
+                .collect(),
+        ),
+        Value::Object(o) => Value::Object(
+            o.into_iter()
+                .map(|(k, x)| (k, cap_leaves(x, max, depth + 1)))
+                .collect(),
+        ),
+        other => other,
     }
 }
 
@@ -197,8 +242,76 @@ mod tests {
         assert_eq!(cap_text(&long, 0), long, "0 disables the cap");
         let big = serde_json::json!({"blob": "y".repeat(200)});
         let v = cap_value(big.clone(), 50);
-        assert_eq!(v["_truncated"], true);
+        assert!(
+            v["blob"].as_str().unwrap().ends_with("…[truncated]"),
+            "the oversized leaf was not capped: {v}"
+        );
         assert_eq!(cap_value(big.clone(), 0), big);
+    }
+
+    /// The record of a large write has to say *what* was written. Dropping the
+    /// whole input left "something big happened here" and nothing else — the
+    /// file path, the tool, the surrounding keys, all gone for the sake of one
+    /// oversized field.
+    #[test]
+    fn only_the_oversized_leaf_of_a_structure_is_truncated() {
+        let v = cap_value(
+            serde_json::json!({
+                "file_path": "/repo/src/main.rs",
+                "content": "z".repeat(1_000_000),
+                "line": 12,
+                "flags": ["a", "b"],
+            }),
+            64,
+        );
+        assert_eq!(v["file_path"], "/repo/src/main.rs");
+        assert_eq!(v["line"], 12);
+        assert_eq!(v["flags"], serde_json::json!(["a", "b"]));
+        let content = v["content"].as_str().unwrap();
+        assert!(content.starts_with("zzz") && content.ends_with("…[truncated]"));
+        assert!(
+            content.len() < 128,
+            "leaf cap not applied: {}",
+            content.len()
+        );
+    }
+
+    /// Per-leaf capping bounds the strings, not how many there are. Without a
+    /// ceiling on the whole structure, a payload of a hundred thousand short
+    /// strings passes every individual check and lands in the buffer entire.
+    #[test]
+    fn a_structure_of_many_small_strings_still_hits_a_ceiling() {
+        let many: Vec<Value> = (0..5_000).map(|i| Value::String(format!("s{i}"))).collect();
+        let v = cap_value(Value::Array(many), 64);
+        assert_eq!(
+            v["_truncated"], true,
+            "a structure far past the ceiling was kept whole"
+        );
+
+        // And the ceiling is loose enough that an ordinary multi-field input
+        // is not caught by it.
+        let ordinary = serde_json::json!({
+            "file_path": "/repo/src/main.rs",
+            "old_string": "a".repeat(60),
+            "new_string": "b".repeat(60),
+        });
+        assert_eq!(cap_value(ordinary.clone(), 64), ordinary);
+    }
+
+    /// `cap_leaves` recurses, so depth is a stack bound, not a size bound.
+    #[test]
+    fn nesting_deeper_than_the_walk_is_dropped_not_followed() {
+        let mut v = Value::String("leaf".into());
+        for _ in 0..64 {
+            v = Value::Array(vec![v]);
+        }
+        let capped = cap_value(v, 64);
+        let mut cur = &capped;
+        for _ in 0..MAX_DEPTH {
+            cur = &cur[0];
+        }
+        assert_eq!(cur["_truncated"], true);
+        assert_eq!(cur["_reason"], "depth");
     }
 
     #[test]

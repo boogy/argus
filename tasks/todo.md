@@ -1732,6 +1732,34 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
 - [ ] **T17** — Truncation rework. Dependency: T16.
   Files: `src/adapters/mod.rs`, `src/config.rs`, `src/redact.rs`
 
+  Split into T17a (recursive per-leaf capping) and T17b (`truncate_mode` and
+  the cap → redact → cap ordering), per the sizing rule: they are two separate
+  behavioural changes, and the second one moves *where* capping happens.
+
+- [x] **T17a** — cap each string leaf instead of the whole value.
+  Dependency: T16b.
+  Files: `src/adapters/mod.rs`, `src/adapters/claude_code.rs`
+
+  `cap_value` was all-or-nothing: one byte over `max_field_bytes` and the whole
+  tool input became `{"_truncated": true, "_bytes": n}`. A 1 MB `Write` therefore
+  recorded that something large was written and *not what file* — the one detail
+  an investigation actually needs. It now walks the value and caps each string
+  leaf with the existing `cap_text`, so the keys, the paths and every ordinary
+  field survive and only the oversized string is cut.
+
+  Two bounds keep the recursion honest. Per-leaf capping bounds the strings but
+  not how many there are, so a whole structure over `16 ×` the field cap is still
+  dropped outright (a megabyte at defaults — loose enough that an ordinary
+  multi-field input never reaches it, which is itself asserted, because a ceiling
+  that fires on normal input is the old bug with more steps). And the walk stops
+  at depth 32: `serde_json` will not parse past 128 levels, so nothing over the
+  socket can reach it, but a stack overflow is not a failure the daemon can
+  report.
+
+  Six mutations, all biting on the first run — including the two failure modes
+  that look identical from the outside: a ceiling that never fires, and one that
+  fires on everything.
+
 - [ ] **T18** — File-content capture. Dependency: T17.
   Files: `src/enrich.rs`, `src/config.rs`, `src/event.rs`, `src/redact.rs`, `src/export.rs`, `Cargo.toml`
 
