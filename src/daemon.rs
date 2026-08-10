@@ -79,52 +79,42 @@ pub async fn run() -> Result<()> {
         buffer.clone(),
     ));
 
+    // Stages B and C. Stage A is this function's own loop.
+    let (stages, writer) = Stages::spawn(buffer.clone(), stage_b_workers(), WRITE_QUEUE);
+
     // Pipeline: parse -> redact -> buffer. Both derived pieces are rebuilt
     // only when the fingerprint says the config behind them changed.
-    let mut pipeline = Pipeline::build(&shared_cfg);
+    let mut stage_a = StageA {
+        pipeline: Pipeline::build(&shared_cfg),
+        cfg: shared_cfg.clone(),
+        buffer: buffer.clone(),
+        stages,
+    };
 
-    // Shared by both select arms so a drained-on-shutdown envelope goes
-    // through the exact same parse -> redact -> buffer pipeline as one
-    // received during normal operation.
     // Spool replay: envelopes written while the daemon was down, or while the
     // shim could not reach it inside its deadline. It runs on this loop rather
     // than on a task of its own because a spool file may only be deleted once
-    // its events are in the buffer, and the buffer is here. First tick fires
-    // immediately, so a backlog starts draining at startup.
+    // its events are in the buffer, and the deletion is now Stage C's to do —
+    // the origin path travels with the batch. First tick fires immediately, so
+    // a backlog starts draining at startup.
     let mut spool_tick = tokio::time::interval(std::time::Duration::from_secs(5));
-
-    let mut process = |envelope: Envelope| -> bool {
-        pipeline.refresh(&shared_cfg);
-        // Two relaxed stores; the caps a reload changed take effect on the very
-        // next write rather than at the next daemon restart. An operator who
-        // raises a cap because the buffer is overflowing is not in a position
-        // to be told to restart the thing that is losing their events.
-        buffer.set_limits(&pipeline.buffer);
-        let events: Vec<_> = adapters::parse(envelope, &pipeline.capture)
-            .into_iter()
-            .map(|e| pipeline.redactor.scrub_event(e))
-            .collect();
-        // One payload commonly becomes several events; write them together.
-        // The bool is what makes delete-after-commit possible: only a caller
-        // that knows the transaction committed may destroy its source.
-        match buffer.push_batch(&events) {
-            Ok(()) => true,
-            Err(e) => {
-                tracing::error!("buffer push failed: {e}");
-                false
-            }
-        }
-    };
 
     loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
                 tracing::info!("shutdown signal received, draining queued envelopes and flushing final batch");
-                // Drain whatever is already queued in the channel so it
+                // Drain in stage order — A, then B, then C — because each
+                // stage's work only exists once the one before it has handed
+                // it over. Draining C first would flush an empty writer while
+                // a worker still held the last batch.
+                //
+                // Stage A: whatever is already queued in the channel, so it
                 // isn't silently dropped on shutdown.
                 while let Some(envelope) = rx.try_recv() {
-                    process(envelope);
+                    stage_a.accept(envelope, None).await;
                 }
+                // Stages B and C.
+                drain(stage_a, writer).await;
                 // Stop the export loop before the final flush so the two
                 // can't race and double-export the same batch (harmless
                 // under at-least-once, but noisy).
@@ -134,14 +124,148 @@ pub async fn run() -> Result<()> {
             }
             maybe_envelope = rx.recv() => {
                 let Some(envelope) = maybe_envelope else { break };
-                process(envelope);
+                stage_a.accept(envelope, None).await;
             }
             _ = spool_tick.tick() => {
-                replay_spool(&mut process);
+                replay_spool(&mut stage_a).await;
             }
         }
     }
     Ok(())
+}
+
+/// Shut the pipeline down in stage order: A, then B, then C.
+///
+/// Dropping Stage A closes the queue into Stage C, and the writer task returns
+/// once it has drained what is already in it — including the batches still
+/// being enriched, since each one is awaited in submission order. Awaiting the
+/// writer is the whole of stage C's drain: without it the process exits while
+/// the last batches are still in flight, which is precisely the shutdown that
+/// loses the events an operator most wanted to see.
+async fn drain(stage_a: StageA, writer: tokio::task::JoinHandle<()>) {
+    drop(stage_a);
+    let _ = writer.await;
+}
+
+/// How many envelopes may be under enrichment at once.
+///
+/// Small on purpose. Stage B is CPU work on the blocking pool, and the point
+/// of the bound is that a burst waits in the ingress queue — where it is
+/// counted and byte-capped — instead of fanning out into an unbounded pile of
+/// blocking tasks each holding a decoded payload.
+fn stage_b_workers() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get().clamp(2, 8))
+        .unwrap_or(4)
+}
+
+/// How many enriched batches may queue ahead of the single writer.
+const WRITE_QUEUE: usize = 256;
+
+/// A batch on its way to the buffer, and what may be deleted once it lands.
+struct Pending {
+    /// Resolved by the Stage B worker. Awaiting these in the order they were
+    /// submitted is what keeps a parallel stage from reordering events.
+    done: tokio::sync::oneshot::Receiver<Vec<Event>>,
+    /// The spool file this batch came from, if any. Deleted only after the
+    /// transaction commits: committing first can duplicate an event if the
+    /// process dies in the window, and a duplicate is the failure that leaves
+    /// evidence.
+    origin: Option<std::path::PathBuf>,
+}
+
+/// Handle on Stage B (parallel enrichment) and Stage C (the single writer).
+struct Stages {
+    workers: Arc<tokio::sync::Semaphore>,
+    write_tx: tokio::sync::mpsc::Sender<Pending>,
+}
+
+impl Stages {
+    fn spawn(
+        buffer: Arc<Buffer>,
+        workers: usize,
+        queue: usize,
+    ) -> (Stages, tokio::task::JoinHandle<()>) {
+        let (write_tx, write_rx) = tokio::sync::mpsc::channel(queue);
+        let handle = tokio::spawn(write_loop(buffer, write_rx));
+        (
+            Stages {
+                workers: Arc::new(tokio::sync::Semaphore::new(workers)),
+                write_tx,
+            },
+            handle,
+        )
+    }
+
+    /// Hand a parsed batch to Stage B and reserve its place in Stage C's
+    /// queue. Returns once the batch has been *accepted*, not once it has
+    /// landed — but it does not return while the pipeline is full, which is
+    /// the whole mechanism: the caller stops draining the ingress queue, the
+    /// shim's send deadline fires, and the payload goes to the spool.
+    async fn submit(
+        &self,
+        events: Vec<Event>,
+        redactor: Arc<Redactor>,
+        origin: Option<std::path::PathBuf>,
+    ) {
+        let Ok(permit) = self.workers.clone().acquire_owned().await else {
+            return;
+        };
+        let (done_tx, done) = tokio::sync::oneshot::channel();
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            let _ = done_tx.send(crate::enrich::enrich(events, &redactor));
+        });
+        let _ = self.write_tx.send(Pending { done, origin }).await;
+    }
+}
+
+/// Stage C. The only writer, so the SQLite transaction is never contended,
+/// and the only place a spool file is destroyed.
+async fn write_loop(buffer: Arc<Buffer>, mut rx: tokio::sync::mpsc::Receiver<Pending>) {
+    while let Some(Pending { done, origin }) = rx.recv().await {
+        // An `Err` here is a Stage B worker that panicked. Its batch is gone
+        // either way; what matters is that the spool file is not, so a replay
+        // gets another chance at it.
+        let Ok(events) = done.await else {
+            tracing::error!("an enrichment worker died; its batch was not written");
+            continue;
+        };
+        // One payload commonly becomes several events; write them together.
+        match buffer.push_batch(&events) {
+            Ok(()) => {
+                if let Some(path) = origin {
+                    spool::discard(&path);
+                }
+            }
+            Err(e) => tracing::error!("buffer push failed: {e}"),
+        }
+    }
+}
+
+/// Stage A: parse, and hand off. Deliberately holds no lock and touches no
+/// disk, because it is the one stage that cannot be run in parallel with
+/// itself — everything it does is on the path of every envelope.
+struct StageA {
+    pipeline: Pipeline,
+    cfg: Arc<RwLock<config::Config>>,
+    buffer: Arc<Buffer>,
+    stages: Stages,
+}
+
+impl StageA {
+    async fn accept(&mut self, envelope: Envelope, origin: Option<std::path::PathBuf>) {
+        self.pipeline.refresh(&self.cfg);
+        // Two relaxed stores; the caps a reload changed take effect on the very
+        // next write rather than at the next daemon restart. An operator who
+        // raises a cap because the buffer is overflowing is not in a position
+        // to be told to restart the thing that is losing their events.
+        self.buffer.set_limits(&self.pipeline.buffer);
+        let events = adapters::parse(envelope, &self.pipeline.capture);
+        self.stages
+            .submit(events, self.pipeline.redactor.clone(), origin)
+            .await;
+    }
 }
 
 /// Export task: every `flush_interval_secs` (or sooner while backing off from
@@ -260,13 +384,15 @@ fn is_gap_record(events: &[Event]) -> bool {
 /// destroyed the one copy that existed. Committing first can duplicate an
 /// event if the process dies in the window; the pipeline is at-least-once
 /// already, and a duplicate is the failure that leaves evidence.
-fn replay_spool(process: &mut impl FnMut(Envelope) -> bool) -> usize {
+///
+/// The commit is no longer visible from here — it happens in Stage C, several
+/// stages downstream — so the path travels with the batch instead, and Stage C
+/// unlinks it. The rule is unchanged; only who enforces it moved.
+async fn replay_spool(stage_a: &mut StageA) -> usize {
     let mut replayed = 0;
     for (path, envelope) in spool::take(spool::DRAIN_BATCH) {
-        if process(envelope) {
-            spool::discard(&path);
-            replayed += 1;
-        }
+        stage_a.accept(envelope, Some(path)).await;
+        replayed += 1;
     }
     replayed
 }
@@ -303,7 +429,7 @@ async fn final_flush(buffer: &Buffer, cfg: &Arc<RwLock<config::Config>>) {
 /// lot) to read one field. The regexes were already cached; the capture
 /// settings were not, and paid a full clone per event to read five booleans.
 struct Pipeline {
-    redactor: Redactor,
+    redactor: Arc<Redactor>,
     capture: config::CaptureCfg,
     buffer: config::BufferCfg,
     fingerprint: String,
@@ -313,7 +439,7 @@ impl Pipeline {
     fn build(cfg: &Arc<RwLock<config::Config>>) -> Self {
         let (redactor, capture, buffer) = with_cfg(cfg, |c| {
             (
-                Redactor::new(&c.redaction),
+                Arc::new(Redactor::new(&c.redaction)),
                 c.capture.clone(),
                 c.buffer.clone(),
             )
@@ -415,16 +541,8 @@ mod tests {
         );
     }
 
-    /// The spool is the thing that makes a daemon outage free, and deleting a
-    /// file before its contents are committed made it the one place where a
-    /// crash cost an event outright.
-    #[test]
-    fn a_spool_file_outlives_the_replay_that_reads_it() {
-        let dir = tempfile::tempdir().unwrap();
-        unsafe {
-            std::env::set_var("ARGUS_DATA_DIR", dir.path());
-        }
-        let env = |n: u32| Envelope {
+    fn envelope(n: u32) -> Envelope {
+        Envelope {
             source: "claude-code".into(),
             received_at: chrono::Utc::now(),
             truncated: false,
@@ -434,33 +552,222 @@ mod tests {
                 "hook_event_name": "UserPromptSubmit",
                 "prompt": format!("p{n}"),
             }),
-        };
+        }
+    }
+
+    /// Stage A wired to a real Stage B and C, with bounds a test can reach.
+    fn stages_for(
+        buffer: &Arc<Buffer>,
+        workers: usize,
+        queue: usize,
+    ) -> (StageA, tokio::task::JoinHandle<()>) {
+        let cfg = shared();
+        let (stages, writer) = Stages::spawn(buffer.clone(), workers, queue);
+        (
+            StageA {
+                pipeline: Pipeline::build(&cfg),
+                cfg,
+                buffer: buffer.clone(),
+                stages,
+            },
+            writer,
+        )
+    }
+
+    fn prompts_in_buffer(buffer: &Buffer) -> Vec<String> {
+        buffer
+            .peek_batch(usize::MAX, u64::MAX)
+            .unwrap()
+            .into_iter()
+            .filter_map(|(_, e)| match e.kind {
+                EventKind::Prompt { text } => Some(text),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The spool is the thing that makes a daemon outage free, and deleting a
+    /// file before its contents are committed made it the one place where a
+    /// crash cost an event outright.
+    ///
+    /// The commit is no longer visible from the replay loop — it happens in
+    /// Stage C — so this asserts the rule where it now lives: a batch that
+    /// never reached the buffer must leave its spool file behind, and one that
+    /// did must not.
+    #[tokio::test]
+    async fn a_spool_file_outlives_the_replay_that_reads_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let buffer = Arc::new(buffer_in(dir.path()));
         for i in 0..3 {
-            spool::append(&env(i)).unwrap();
+            spool::append(&envelope(i)).unwrap();
         }
 
-        // A replay that cannot commit must leave every file exactly where it
-        // found it — this is the kill-mid-drain case, minus the kill.
-        assert_eq!(replay_spool(&mut |_| false), 0);
+        // A batch that never reaches the buffer — here because its enrichment
+        // worker died — must leave every file exactly where it found it. This
+        // is the kill-mid-drain case, minus the kill.
+        let orphan = spool::take(usize::MAX)[0].0.clone();
+        let (write_tx, write_rx) = tokio::sync::mpsc::channel(4);
+        let writer = tokio::spawn(write_loop(buffer.clone(), write_rx));
+        let (done_tx, done) = tokio::sync::oneshot::channel::<Vec<Event>>();
+        drop(done_tx);
+        write_tx
+            .send(Pending {
+                done,
+                origin: Some(orphan),
+            })
+            .await
+            .unwrap();
+        drop(write_tx);
+        writer.await.unwrap();
         assert_eq!(
             spool::take(usize::MAX).len(),
             3,
-            "a failed commit destroyed the only copy of the events"
+            "a batch that was never committed destroyed the only copy of the events"
         );
 
-        // And a replay that does commit may only delete once it has.
-        let mut seen = 0;
-        let replayed = replay_spool(&mut |_| {
-            assert_eq!(
-                spool::take(usize::MAX).len(),
-                3 - seen,
-                "the file was deleted before its envelope was committed"
-            );
-            seen += 1;
-            true
-        });
-        assert_eq!(replayed, 3);
-        assert!(spool::take(usize::MAX).is_empty());
+        // And a replay that does commit may only delete once it has: the
+        // files are still there the moment `replay_spool` returns, because
+        // nothing has been written yet.
+        let (mut stage_a, writer) = stages_for(&buffer, 2, 8);
+        assert_eq!(replay_spool(&mut stage_a).await, 3);
+        drain(stage_a, writer).await;
+        assert!(
+            spool::take(usize::MAX).is_empty(),
+            "committed envelopes left their spool files behind, so they replay forever"
+        );
+        assert_eq!(prompts_in_buffer(&buffer), ["p0", "p1", "p2"]);
+    }
+
+    /// Backpressure, not loss. When Stage B cannot keep up, Stage A has to
+    /// wait — which stops it draining the ingress queue, which is what makes
+    /// the shim's send deadline fire and spool the payload. Every one of those
+    /// steps is a delay; none of them is a discarded event.
+    #[tokio::test]
+    async fn a_slow_stage_b_backpressures_rather_than_dropping_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let buffer = Arc::new(buffer_in(dir.path()));
+        // One worker, a one-deep queue: the pipeline is full after the second
+        // batch and every submission after that has to wait for a real one to
+        // finish.
+        let (mut stage_a, writer) = stages_for(&buffer, 1, 1);
+        crate::enrich::set_delay(20_000, 0);
+
+        let started = std::time::Instant::now();
+        for i in 0..8 {
+            stage_a.accept(envelope(i), None).await;
+        }
+        let submitting = started.elapsed();
+        crate::enrich::set_delay(0, 0);
+
+        drain(stage_a, writer).await;
+
+        assert!(
+            submitting >= std::time::Duration::from_millis(100),
+            "submission took {submitting:?}: Stage A did not wait for a full pipeline, so              the queue ahead of it is unbounded after all"
+        );
+        assert_eq!(
+            prompts_in_buffer(&buffer),
+            ["p0", "p1", "p2", "p3", "p4", "p5", "p6", "p7"],
+            "events were dropped rather than delayed"
+        );
+    }
+
+    /// Two different bounds sit on either side of Stage B: how many batches may
+    /// be enriched at once, and how many finished ones may queue ahead of the
+    /// writer. A test that only slows the enrichers cannot tell them apart —
+    /// the worker semaphore blocks first and the queue is never reached.
+    ///
+    /// So park Stage C on a batch that never finishes enriching. Nothing is
+    /// waiting on an enricher after that, and the only thing left that can make
+    /// Stage A wait is the depth of the queue in front of the writer.
+    #[tokio::test]
+    async fn a_full_write_queue_blocks_stage_a_as_well() {
+        let dir = tempfile::tempdir().unwrap();
+        let buffer = Arc::new(buffer_in(dir.path()));
+        // Eight enrichers for four batches: Stage B has a permit to spare for
+        // every submission this test makes.
+        let (mut stage_a, _writer) = stages_for(&buffer, 8, 1);
+
+        let (never, done) = tokio::sync::oneshot::channel::<Vec<Event>>();
+        stage_a
+            .stages
+            .write_tx
+            .send(Pending { done, origin: None })
+            .await
+            .unwrap();
+        // Give Stage C the chance to take it and park.
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        let submitting = tokio::time::timeout(std::time::Duration::from_millis(250), async {
+            for i in 0..4 {
+                stage_a.accept(envelope(i), None).await;
+            }
+        })
+        .await;
+        assert!(
+            submitting.is_err(),
+            "four batches queued ahead of a stalled writer without waiting: the queue \
+             between Stage B and Stage C grows without bound"
+        );
+        drop(never);
+    }
+
+    /// Redaction is the entire reason Stage B exists as a stage. Moving it off
+    /// the single consumer is only safe if it still happens, and the stage
+    /// boundary is exactly where a refactor can drop it silently: everything
+    /// downstream keeps working, and the buffer quietly fills with secrets.
+    #[tokio::test]
+    async fn the_pipeline_redacts_before_anything_reaches_the_buffer() {
+        let dir = tempfile::tempdir().unwrap();
+        let buffer = Arc::new(buffer_in(dir.path()));
+        let (mut stage_a, writer) = stages_for(&buffer, 2, 8);
+
+        let mut secret = envelope(0);
+        secret.payload["prompt"] =
+            serde_json::json!("use sk-ant-api03-AbCd1234567890abcdef1234 for this");
+        stage_a.accept(secret, None).await;
+        drain(stage_a, writer).await;
+
+        let prompts = prompts_in_buffer(&buffer);
+        assert_eq!(prompts.len(), 1, "the batch never landed: {prompts:?}");
+        assert!(
+            !prompts[0].contains("sk-ant-api03"),
+            "an unredacted key reached the buffer: {}",
+            prompts[0]
+        );
+        assert!(
+            prompts[0].contains("[REDACTED:anthropic-key]"),
+            "the prompt lost its key without being redacted: {}",
+            prompts[0]
+        );
+    }
+
+    /// Stage B runs several batches at once; the buffer must still see them in
+    /// the order they arrived. Ordering is most of what a security trail is
+    /// for — "the file was read, then the request went out" and the reverse
+    /// are different incidents.
+    ///
+    /// The throttle decays, so batch 0 is the slowest and batch 7 the
+    /// fastest: a Stage C that wrote batches as they *finished* would produce
+    /// exactly the reverse of this.
+    #[tokio::test]
+    async fn parallel_enrichment_does_not_reorder_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let buffer = Arc::new(buffer_in(dir.path()));
+        let (mut stage_a, writer) = stages_for(&buffer, 8, 64);
+        crate::enrich::set_delay(40_000, 5_000);
+
+        for i in 0..8 {
+            stage_a.accept(envelope(i), None).await;
+        }
+        crate::enrich::set_delay(0, 0);
+        drain(stage_a, writer).await;
+
+        assert_eq!(
+            prompts_in_buffer(&buffer),
+            ["p0", "p1", "p2", "p3", "p4", "p5", "p6", "p7"],
+            "a parallel Stage B reordered the trail"
+        );
     }
 
     /// End to end: the overflow has to reach the queue that gets exported,

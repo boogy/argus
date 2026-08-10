@@ -3,6 +3,7 @@ pub mod buffer;
 pub mod config;
 pub mod daemon;
 pub mod detect;
+pub mod enrich;
 pub mod event;
 pub mod export;
 pub mod harness;

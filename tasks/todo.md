@@ -1689,6 +1689,46 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
   `a_full_row_bound_blocks_rather_than_dropping` (one row, a generous byte
   budget, so only the row count can bind), and the mutation bites.
 
+- [x] **T16b** — split the daemon pipeline into three stages.
+  Dependency: T16a.
+  Files: new `src/enrich.rs`, `src/daemon.rs`, `src/lib.rs`
+
+  One task did everything between the socket and SQLite: parse, redact, write.
+  Redaction — a dozen compiled regexes over every string in every event — was
+  the slowest step and the one step that could not be scaled, because it shared
+  a thread with the write that has to be serialised anyway.
+
+  Now Stage A (parse, no lock, no disk) hands a batch to Stage B (`enrich`, on
+  the blocking pool, `available_parallelism().clamp(2, 8)` at a time) and Stage
+  C (`write_loop`, the only writer and the only place a spool file is
+  destroyed).
+
+  The hard part is that a parallel stage must not reorder the trail — "the file
+  was read, then the request went out" and its reverse are different incidents.
+  Stage A creates a `oneshot` per batch and puts the *receiver* in Stage C's
+  FIFO queue at submission time; Stage C awaits them in that order. Parallelism
+  is bounded by a semaphore, ordering by the queue, and the two are independent.
+  The test throttle *decays* (batch 0 slowest) precisely so this is falsifiable:
+  under a flat delay a completion-ordered pipeline would look perfectly ordered.
+
+  Delete-after-commit survived the move. The commit is no longer visible from
+  `replay_spool`, so the spool path travels with the batch as `Pending::origin`
+  and Stage C unlinks it inside the `Ok(())` arm alone. A dead worker leaves the
+  file, so the batch replays. Shutdown drains in stage order through one
+  extracted `drain()` that the ctrl-c path and all four pipeline tests call, so
+  a missing `writer.await` fails tests rather than only production.
+
+  Seven mutations. Two **survived the first run** and were investigated, not
+  shrugged off. The write-queue depth had no test of its own: the backpressure
+  test slows the enrichers, so the worker semaphore always blocked first and the
+  queue was never reached — `a_full_write_queue_blocks_stage_a_as_well` parks
+  Stage C on a batch that never finishes enriching, leaving the queue as the only
+  bound that can bind. And nothing asserted Stage B still *redacts*: with
+  `scrub_event` removed every test passed and the buffer quietly filled with
+  secrets, which is exactly the refactor a stage boundary invites.
+  `the_pipeline_redacts_before_anything_reaches_the_buffer` closes it. All seven
+  bite now.
+
 - [ ] **T17** — Truncation rework. Dependency: T16.
   Files: `src/adapters/mod.rs`, `src/config.rs`, `src/redact.rs`
 
