@@ -31,6 +31,47 @@ pub fn run_project(root: &std::path::Path, dry_run: bool) -> Result<()> {
     crate::harness::install_project(root, dry_run)
 }
 
+/// Wire the machine rather than this user: administrator-owned settings under
+/// the system root, which ordinary users cannot edit away.
+///
+/// Nothing here consults [`home`]. The command runs under `sudo`, so
+/// `dirs::home_dir()` is *root's* home — deriving any path from the invoking
+/// user would wire `/root` and monitor nobody. The harness layer enforces that
+/// centrally: every artifact must land under the system root or the install is
+/// refused.
+pub fn run_managed(dry_run: bool) -> Result<()> {
+    let platform = crate::detect::Platform::host();
+    let root = crate::harness::system_root(platform);
+    // A dry run writes nothing, so requiring privilege to *preview* the plan
+    // would only stop an admin checking what they are about to do. It still
+    // says so, because "the preview worked" must not read as "the install
+    // will".
+    if root.real {
+        if dry_run {
+            if !crate::harness::is_admin() {
+                eprintln!(
+                    "warning: not running as an administrator — this plan would fail to write"
+                );
+            }
+        } else {
+            crate::harness::require_admin()?;
+        }
+    }
+    crate::harness::install_managed(&root.path, platform, dry_run)
+}
+
+/// Reverse `run_managed`.
+pub fn uninstall_managed() -> Result<()> {
+    let platform = crate::detect::Platform::host();
+    let root = crate::harness::system_root(platform);
+    if root.real {
+        crate::harness::require_admin()?;
+    }
+    crate::harness::uninstall_managed(&root.path, platform)?;
+    println!("argus unwired from the machine-wide layer");
+    Ok(())
+}
+
 /// Reverse `run_project`.
 pub fn uninstall_project(root: &std::path::Path) -> Result<()> {
     crate::harness::uninstall_project(root)?;

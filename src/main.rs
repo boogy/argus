@@ -35,12 +35,22 @@ enum Cmd {
         /// binary still has to be on `PATH` wherever the repository is cloned.
         #[arg(long, value_name = "DIR")]
         project: Option<std::path::PathBuf>,
+        /// Wire the whole machine instead of the current user: settings in an
+        /// administrator-owned root ordinary users cannot edit away. Needs
+        /// root/Administrator. Note that this wires *tools*, not users — the
+        /// argus binary must be executable by every account, and each account
+        /// needs its own daemon (socket, OTLP port and buffer are per-user).
+        #[arg(long, conflicts_with = "project")]
+        managed: bool,
     },
     /// Remove argus wiring from tools.
     Uninstall {
         /// Unwire this repository instead of the current user.
         #[arg(long, value_name = "DIR")]
         project: Option<std::path::PathBuf>,
+        /// Unwire the machine-wide layer. Needs root/Administrator.
+        #[arg(long, conflicts_with = "project")]
+        managed: bool,
     },
     /// Show daemon/config status.
     Status,
@@ -74,6 +84,11 @@ enum Cmd {
         /// repository nothing wired is silent, not broken.
         #[arg(long, value_name = "DIR")]
         project: Option<std::path::PathBuf>,
+        /// Also verify the machine-wide layer. Unlike `--project`, a missing
+        /// managed artifact is BROKEN: passing this asserts the layer should
+        /// be there. Reading it needs no privilege.
+        #[arg(long)]
+        managed: bool,
     },
 }
 
@@ -90,13 +105,19 @@ fn main() -> Result<()> {
         Cmd::Daemon => {
             tokio::runtime::Runtime::new()?.block_on(argus::daemon::run())?;
         }
-        Cmd::Install { dry_run, project } => match project {
-            Some(root) => argus::install::run_project(&root, dry_run)?,
-            None => argus::install::run(dry_run)?,
+        Cmd::Install {
+            dry_run,
+            project,
+            managed,
+        } => match (project, managed) {
+            (Some(root), _) => argus::install::run_project(&root, dry_run)?,
+            (None, true) => argus::install::run_managed(dry_run)?,
+            (None, false) => argus::install::run(dry_run)?,
         },
-        Cmd::Uninstall { project } => match project {
-            Some(root) => argus::install::uninstall_project(&root)?,
-            None => argus::install::uninstall()?,
+        Cmd::Uninstall { project, managed } => match (project, managed) {
+            (Some(root), _) => argus::install::uninstall_project(&root)?,
+            (None, true) => argus::install::uninstall_managed()?,
+            (None, false) => argus::install::uninstall()?,
         },
         Cmd::Status => print_status()?,
         Cmd::RecordFixtures { from, into } => {
@@ -111,6 +132,7 @@ fn main() -> Result<()> {
             config,
             remote_url,
             project,
+            managed,
         } => {
             // No flag = check everything.
             let (do_hooks, do_config) = if !hooks && !config {
@@ -125,6 +147,7 @@ fn main() -> Result<()> {
                     do_config,
                     remote_url.as_deref(),
                     project.as_deref(),
+                    managed,
                 ) {
                     0
                 } else {

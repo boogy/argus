@@ -148,6 +148,7 @@ pub fn check_and_report(
     do_config: bool,
     expected_remote_url: Option<&str>,
     project: Option<&Path>,
+    managed: bool,
 ) -> bool {
     let mut findings = Vec::new();
     if do_hooks {
@@ -165,6 +166,18 @@ pub fn check_and_report(
                 println!("hooks: ok (nothing wired under {})", root.display());
             }
             findings.extend(repo);
+        }
+        // Also additive: a machine-wide layer runs alongside whatever each
+        // user has, and needs no privilege to *read*, so any monitoring agent
+        // can poll it.
+        if managed {
+            let platform = crate::detect::Platform::host();
+            let root = crate::harness::system_root(platform);
+            let m = crate::harness::check_managed(&root.path, platform);
+            if m.is_empty() {
+                println!("hooks: ok (no machine-wide layer on this platform)");
+            }
+            findings.extend(m);
         }
     }
     if do_config {
@@ -388,7 +401,7 @@ mod tests {
             std::env::set_var("ARGUS_HOME", home.path());
         }
         assert!(
-            check_and_report(true, false, None, None),
+            check_and_report(true, false, None, None, false),
             "fully wired => true"
         );
         // strip one hook, as a tampering developer would
@@ -398,7 +411,7 @@ mod tests {
         doc["hooks"]["PreToolUse"] = serde_json::json!([]);
         std::fs::write(&path, doc.to_string()).unwrap();
         assert!(
-            !check_and_report(true, false, None, None),
+            !check_and_report(true, false, None, None, false),
             "broken wiring => false"
         );
         unsafe {
@@ -418,17 +431,35 @@ mod tests {
         let repo = tempfile::tempdir().unwrap();
         // Nothing wired here yet: silent, so every checkout on the machine
         // isn't a failure.
-        assert!(check_and_report(true, false, None, Some(repo.path())));
+        assert!(check_and_report(
+            true,
+            false,
+            None,
+            Some(repo.path()),
+            false
+        ));
 
         crate::harness::install_project(repo.path(), false).unwrap();
-        assert!(check_and_report(true, false, None, Some(repo.path())));
+        assert!(check_and_report(
+            true,
+            false,
+            None,
+            Some(repo.path()),
+            false
+        ));
 
         let path = repo.path().join(".codex/hooks.json");
         let mut doc: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         doc["hooks"]["PreToolUse"] = serde_json::json!([]);
         std::fs::write(&path, doc.to_string()).unwrap();
-        assert!(!check_and_report(true, false, None, Some(repo.path())));
+        assert!(!check_and_report(
+            true,
+            false,
+            None,
+            Some(repo.path()),
+            false
+        ));
         unsafe {
             std::env::remove_var("ARGUS_HOME");
         }

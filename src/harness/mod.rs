@@ -234,6 +234,61 @@ impl ConfigDir {
     }
 }
 
+/// A machine-wide config directory: administrator-owned, resolved against the
+/// *system* root rather than against anybody's home directory.
+///
+/// Being a separate type from [`ConfigDir`] is the whole point. `argus install
+/// --managed` runs under `sudo`, so `dirs::home_dir()` is `/root` — a managed
+/// location that went through [`Env::home`] would quietly wire the
+/// administrator's own account and monitor nobody.
+#[derive(Debug, Clone, Copy)]
+pub struct ManagedDir {
+    /// Path relative to the system root, forward-slashed
+    /// (`etc/claude-code`, `Program Files/ClaudeCode`).
+    pub rel: &'static str,
+    /// Unlike [`ConfigDir::platform`] there is no all-platforms option: every
+    /// documented managed layer sits somewhere different on each OS, so a
+    /// missing entry means "this tool has no managed layer here" rather than
+    /// "the same path works everywhere".
+    pub platform: Platform,
+}
+
+/// Environment override for the machine-wide root, so the round-trip tests
+/// exercise the real relative paths against a temp directory.
+///
+/// It redirects a write; it never grants the right to perform one.
+/// [`crate::install::run_managed`] demands administrator rights only when the
+/// root is the real one, which is the only place they mean anything — and a
+/// user who can set this variable could equally well write the directory it
+/// points at.
+pub const SYSTEM_ROOT_ENV: &str = "ARGUS_SYSTEM_ROOT";
+
+/// Where the managed layer is rooted, and whether that is the real machine.
+pub struct SystemRoot {
+    pub path: PathBuf,
+    /// `false` when [`SYSTEM_ROOT_ENV`] redirected it at a test directory.
+    pub real: bool,
+}
+
+/// Resolve [`SystemRoot`] for a platform. Takes the platform rather than
+/// reading `cfg!`, so the Windows layout is exercised by the suite on Linux
+/// and macOS too — the same rule [`crate::detect`] follows.
+pub fn system_root(platform: Platform) -> SystemRoot {
+    match std::env::var_os(SYSTEM_ROOT_ENV) {
+        Some(v) if !v.is_empty() => SystemRoot {
+            path: PathBuf::from(v),
+            real: false,
+        },
+        _ => SystemRoot {
+            path: PathBuf::from(match platform {
+                Platform::Windows => "C:\\",
+                Platform::Linux | Platform::MacOS => "/",
+            }),
+            real: true,
+        },
+    }
+}
+
 /// Declarative detection inputs. Each is one independent way to conclude the
 /// tool is present; see [`crate::detect`] for how they combine.
 pub struct Probes {
@@ -311,6 +366,12 @@ pub trait Harness: Sync {
     fn id(&self) -> &'static str;
     fn display_name(&self) -> &'static str;
     fn probes(&self) -> Probes;
+    /// Machine-wide locations this tool reads, one per platform it has one on.
+    /// Empty — the default — means the tool documents no managed layer, and
+    /// [`install_managed`] then never asks it for `Scope::Managed` artifacts.
+    fn managed_dirs(&self) -> &'static [ManagedDir] {
+        &[]
+    }
     fn artifacts(&self, d: &Detection, scope: Scope) -> Vec<Artifact>;
     fn kill_switches(&self, _d: &Detection) -> Vec<KillSwitch> {
         Vec::new()
@@ -663,6 +724,231 @@ pub fn check_project(root: &Path) -> Vec<Finding> {
         });
     }
     out
+}
+
+// ---------------------------------------------------------------------------
+// The machine-wide layer
+// ---------------------------------------------------------------------------
+
+/// Where a harness keeps its administrator-owned config on this platform, or
+/// `None` when it has none there.
+///
+/// Detection has no part in it, for the same reason it has none in
+/// [`project_detection`]: an admin wires a fleet image before anybody has run
+/// the tool on it. What replaces detection is the declaration — a harness that
+/// names no [`ManagedDir`] for this platform is never asked for
+/// `Scope::Managed` artifacts at all, so it cannot answer with the user-scope
+/// paths it would otherwise return.
+fn managed_detection(h: &dyn Harness, root: &Path, platform: Platform) -> Option<Detection> {
+    let rel = h
+        .managed_dirs()
+        .iter()
+        .find(|m| m.platform == platform)?
+        .rel;
+    Some(Detection {
+        id: h.id(),
+        signals: Vec::new(),
+        config_home: root.join(rel),
+        binary: None,
+    })
+}
+
+/// The backstop behind [`managed_detection`]: `Some(why)` when an artifact
+/// would land outside the machine-wide layer.
+///
+/// A harness that grows a managed location but forgets to branch on
+/// `Scope::Managed` falls through to its *user* artifacts, and under `sudo`
+/// those are paths in `/root` — wiring the administrator's own account and
+/// monitoring nobody. Enforced centrally rather than trusted to each harness,
+/// so getting it wrong is a refusal instead of a silent misinstall.
+fn escapes_managed_root(root: &Path, a: &Artifact) -> Option<String> {
+    let p = artifact_path(a);
+    (!p.starts_with(root)).then(|| {
+        format!(
+            "{} is outside the machine-wide layer under {}",
+            p.display(),
+            root.display()
+        )
+    })
+}
+
+/// Wire the whole machine: settings in a root ordinary users cannot write, so
+/// capture survives a user editing their own config.
+///
+/// This is one half of a managed deployment. The other half is not a file:
+/// the argus binary has to be readable and executable by every account the
+/// hooks fire under, and — because the socket, the OTLP port and the buffer
+/// are all per-user (T8) — each of those accounts needs its own running
+/// daemon. A managed layer alone wires every user to a binary they can run and
+/// a daemon that is not there.
+pub fn install_managed(root: &Path, platform: Platform, dry_run: bool) -> Result<()> {
+    install_managed_in(HARNESSES, root, platform, dry_run)
+}
+
+fn install_managed_in(
+    harnesses: &[&dyn Harness],
+    root: &Path,
+    platform: Platform,
+    dry_run: bool,
+) -> Result<()> {
+    let mut wired = 0;
+    for h in harnesses {
+        let Some(d) = managed_detection(*h, root, platform) else {
+            continue;
+        };
+        let artifacts = h.artifacts(&d, Scope::Managed);
+        // Checked for the whole harness before a single one is applied: a
+        // refusal half-way through would leave the machine in a state neither
+        // install nor uninstall describes.
+        for a in &artifacts {
+            if let Some(why) = escapes_managed_root(root, a) {
+                anyhow::bail!("{}: refusing to write it — {why}", h.id());
+            }
+        }
+        for a in &artifacts {
+            apply(a, h.display_name(), dry_run)?;
+            wired += 1;
+        }
+    }
+    if wired == 0 {
+        println!("no tool supports machine-wide wiring on {platform:?} yet");
+    }
+    Ok(())
+}
+
+/// Exact inverse of [`install_managed`].
+pub fn uninstall_managed(root: &Path, platform: Platform) -> Result<()> {
+    uninstall_managed_in(HARNESSES, root, platform)
+}
+
+fn uninstall_managed_in(harnesses: &[&dyn Harness], root: &Path, platform: Platform) -> Result<()> {
+    for h in harnesses {
+        let Some(d) = managed_detection(*h, root, platform) else {
+            continue;
+        };
+        let artifacts = h.artifacts(&d, Scope::Managed);
+        // The containment rule binds uninstall harder than install: reverting
+        // an `OwnedFile` deletes it, so a harness answering with a user-scope
+        // path here would have argus remove a file it never wrote.
+        for a in &artifacts {
+            if let Some(why) = escapes_managed_root(root, a) {
+                anyhow::bail!("{}: refusing to touch it — {why}", h.id());
+            }
+        }
+        for a in &artifacts {
+            revert(a)?;
+        }
+    }
+    Ok(())
+}
+
+/// [`check`] for the machine-wide layer.
+///
+/// Where [`check_project`] stays silent about a repository nothing wired, an
+/// absent managed artifact is BROKEN: passing `--managed` is the operator
+/// asserting the layer should be there, and a removed file is exactly the
+/// tampering this check exists to catch. Harnesses with no managed layer on
+/// this platform are still silent — they are not missing anything.
+pub fn check_managed(root: &Path, platform: Platform) -> Vec<Finding> {
+    check_managed_in(HARNESSES, root, platform)
+}
+
+fn check_managed_in(harnesses: &[&dyn Harness], root: &Path, platform: Platform) -> Vec<Finding> {
+    let mut out = Vec::new();
+    for h in harnesses {
+        let Some(d) = managed_detection(*h, root, platform) else {
+            continue;
+        };
+        let artifacts = h.artifacts(&d, Scope::Managed);
+        if artifacts.is_empty() {
+            continue;
+        }
+        let mut problems: Vec<String> = artifacts
+            .iter()
+            .filter_map(|a| escapes_managed_root(root, a))
+            .collect();
+        problems.extend(artifacts.iter().filter_map(|a| verify(a).err()));
+        out.push(Finding {
+            tool: format!("{} (managed)", h.id()),
+            ok: problems.is_empty(),
+            detail: if problems.is_empty() {
+                "wired".into()
+            } else {
+                problems.join("; ")
+            },
+        });
+    }
+    out
+}
+
+/// Can this process write the machine-wide root?
+pub fn is_admin() -> bool {
+    #[cfg(unix)]
+    {
+        // SAFETY: `geteuid` takes no arguments, cannot fail, and touches no
+        // memory this process owns.
+        unsafe { libc::geteuid() == 0 }
+    }
+    #[cfg(windows)]
+    {
+        use std::ptr;
+        use windows_sys::Win32::Security::{
+            AllocateAndInitializeSid, CheckTokenMembership, FreeSid, PSID, SECURITY_NT_AUTHORITY,
+            SID_IDENTIFIER_AUTHORITY,
+        };
+
+        // `SECURITY_BUILTIN_DOMAIN_RID` and `DOMAIN_ALIAS_RID_ADMINS`. Spelled
+        // out rather than imported: windows-sys keeps them behind
+        // `Win32_System_SystemServices`, a feature that would pull thousands of
+        // unrelated definitions in for two stable documented integers.
+        const BUILTIN_DOMAIN_RID: u32 = 32;
+        const ADMINS_ALIAS_RID: u32 = 544;
+
+        let authority: SID_IDENTIFIER_AUTHORITY = SECURITY_NT_AUTHORITY;
+        let mut sid: PSID = ptr::null_mut();
+        // SAFETY: `authority` outlives the call and `sid` is a valid
+        // out-pointer, read only after a success return.
+        let built = unsafe {
+            AllocateAndInitializeSid(
+                &authority,
+                2,
+                BUILTIN_DOMAIN_RID,
+                ADMINS_ALIAS_RID,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                &mut sid,
+            )
+        };
+        if built == 0 {
+            return false;
+        }
+        let mut member = 0;
+        // SAFETY: a null token handle asks about the calling thread's own
+        // effective token, which is what "am I elevated" means here; `sid` is
+        // the SID just allocated.
+        let ok = unsafe { CheckTokenMembership(ptr::null_mut(), sid, &mut member) } != 0;
+        // SAFETY: `FreeSid` is the documented release for what
+        // `AllocateAndInitializeSid` returned, and nothing borrows it now.
+        unsafe { FreeSid(sid) };
+        ok && member != 0
+    }
+}
+
+/// Fail before the first write rather than part-way through with an `EACCES`
+/// from whichever file happened to come first — a partial managed install is
+/// worse than none, because `check` would then report some of it wired.
+pub fn require_admin() -> Result<()> {
+    if is_admin() {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "the machine-wide layer is administrator-owned: re-run as `sudo argus …`, \
+         or on Windows from an elevated prompt"
+    )
 }
 
 fn artifact_path(a: &Artifact) -> &Path {
@@ -1180,6 +1466,193 @@ fn dispatch(envelope: Envelope, capture: &CaptureCfg) -> Vec<Event> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A harness that exists only to be driven through the managed layer.
+    ///
+    /// `escape` reproduces the exact bug the layer is built to survive: a
+    /// harness that grows a [`ManagedDir`] but never learns to branch on
+    /// `Scope::Managed`, so it answers with the *user* path it always returned
+    /// — which under `sudo` is a path in root's home.
+    struct ManagedStub {
+        dir: &'static [ManagedDir],
+        escape: Option<PathBuf>,
+    }
+
+    impl Harness for ManagedStub {
+        fn id(&self) -> &'static str {
+            "stub"
+        }
+        fn display_name(&self) -> &'static str {
+            "Stub"
+        }
+        fn probes(&self) -> Probes {
+            Probes {
+                config_dirs: &[],
+                binaries: &[],
+                npm_packages: &[],
+                brew_formulae: &[],
+            }
+        }
+        fn managed_dirs(&self) -> &'static [ManagedDir] {
+            self.dir
+        }
+        fn artifacts(&self, d: &Detection, _scope: Scope) -> Vec<Artifact> {
+            let path = self
+                .escape
+                .clone()
+                .unwrap_or_else(|| d.config_home.join("settings.json"));
+            vec![Artifact::JsonHooks {
+                path,
+                events: STUB_EVENTS,
+                shape: HookShape::CommandArray,
+                source: "stub",
+            }]
+        }
+        fn parse(&self, _env: &Envelope, _cfg: &CaptureCfg) -> Vec<Event> {
+            Vec::new()
+        }
+    }
+
+    const STUB_EVENTS: &[HookEvent] = &[HookEvent::new("SessionStart", false)];
+
+    /// Only on Linux, so the platform filter has something to get wrong.
+    const LINUX_ONLY: &[ManagedDir] = &[ManagedDir {
+        rel: "etc/stub",
+        platform: Platform::Linux,
+    }];
+
+    /// The full operator cycle against a fake system root, on the one platform
+    /// the stub claims — and the silence owed to the two it does not.
+    ///
+    /// The last leg is the property `check --managed` is bought for: unlike a
+    /// repository, where nothing wired is nothing to say, a *removed* managed
+    /// file is a finding. Someone who deletes it is who this is looking for.
+    #[test]
+    fn a_managed_layer_installs_checks_and_uninstalls_under_the_system_root() {
+        let root = tempfile::tempdir().unwrap();
+        let bin = tempfile::tempdir().unwrap();
+        let exe = fake_binary(bin.path(), "argus");
+        unsafe { std::env::set_var(BIN_ENV, &exe) };
+        let stub = ManagedStub {
+            dir: LINUX_ONLY,
+            escape: None,
+        };
+        let hs: &[&dyn Harness] = &[&stub];
+        let settings = root.path().join("etc/stub/settings.json");
+
+        install_managed_in(hs, root.path(), Platform::Linux, false).unwrap();
+        assert!(settings.exists(), "managed settings not written");
+        let checked = check_managed_in(hs, root.path(), Platform::Linux);
+        assert_eq!(checked.len(), 1);
+        assert!(checked[0].ok, "freshly installed: {:?}", checked[0]);
+
+        // A platform the harness declares nothing for is not "broken", it is
+        // absent — and must not have been written either.
+        for p in [Platform::MacOS, Platform::Windows] {
+            assert!(
+                check_managed_in(hs, root.path(), p).is_empty(),
+                "{p:?} reported a layer the stub never declared"
+            );
+            install_managed_in(hs, root.path(), p, false).unwrap();
+        }
+        assert_eq!(
+            std::fs::read_dir(root.path()).unwrap().count(),
+            1,
+            "a platform with no managed dir still wrote something"
+        );
+
+        std::fs::remove_file(&settings).unwrap();
+        let after = check_managed_in(hs, root.path(), Platform::Linux);
+        assert_eq!(after.len(), 1);
+        assert!(!after[0].ok, "a removed managed file must be BROKEN");
+
+        install_managed_in(hs, root.path(), Platform::Linux, false).unwrap();
+        uninstall_managed_in(hs, root.path(), Platform::Linux).unwrap();
+        let text = std::fs::read_to_string(&settings).unwrap();
+        assert!(
+            !text.contains("argus"),
+            "uninstall left our wiring behind: {text}"
+        );
+        unsafe { std::env::remove_var(BIN_ENV) };
+    }
+
+    /// The one that matters under `sudo`: a harness answering with a path in
+    /// the invoking user's home is refused, not written. Without this, `sudo
+    /// argus install --managed` wires `/root` and monitors nobody.
+    #[test]
+    fn a_managed_install_refuses_to_write_outside_the_system_root() {
+        let root = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let escape = home.path().join(".claude/settings.json");
+        let stub = ManagedStub {
+            dir: LINUX_ONLY,
+            escape: Some(escape.clone()),
+        };
+        let hs: &[&dyn Harness] = &[&stub];
+
+        let err = install_managed_in(hs, root.path(), Platform::Linux, false)
+            .expect_err("wrote a user-scope path under --managed");
+        assert!(err.to_string().contains("outside the machine-wide layer"));
+        assert!(!escape.exists(), "refused, yet the file was written anyway");
+
+        // Uninstall is refused on the same grounds, and for a sharper reason:
+        // reverting deletes, so obeying would remove a file argus never wrote.
+        std::fs::create_dir_all(escape.parent().unwrap()).unwrap();
+        std::fs::write(&escape, "{\"hooks\":{}}").unwrap();
+        uninstall_managed_in(hs, root.path(), Platform::Linux)
+            .expect_err("reverted a user-scope path under --managed");
+        assert!(escape.exists());
+
+        let reported = check_managed_in(hs, root.path(), Platform::Linux);
+        assert_eq!(reported.len(), 1);
+        assert!(!reported[0].ok);
+        assert!(
+            reported[0]
+                .detail
+                .contains("outside the machine-wide layer")
+        );
+    }
+
+    /// Every harness argus actually ships, swept across every platform: nothing
+    /// it declares for the managed layer may resolve outside the system root.
+    /// Vacuous until a harness declares its first [`ManagedDir`], which is
+    /// precisely when it starts earning its place.
+    #[test]
+    fn no_shipped_harness_can_place_a_managed_artifact_outside_the_root() {
+        let root = tempfile::tempdir().unwrap();
+        for p in Platform::ALL {
+            for h in HARNESSES {
+                let Some(d) = managed_detection(*h, root.path(), *p) else {
+                    continue;
+                };
+                for a in h.artifacts(&d, Scope::Managed) {
+                    assert!(
+                        escapes_managed_root(root.path(), &a).is_none(),
+                        "{} on {p:?} escapes: {}",
+                        h.id(),
+                        artifact_path(&a).display()
+                    );
+                }
+            }
+        }
+    }
+
+    /// The override redirects a write and says so. `real` is what gates the
+    /// privilege demand, so a test root must never look like the real machine
+    /// — and the real machine must never look like a test root.
+    #[test]
+    fn the_system_root_override_is_marked_as_not_the_real_machine() {
+        let dir = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var(SYSTEM_ROOT_ENV, dir.path()) };
+        let r = system_root(Platform::Linux);
+        assert_eq!(r.path, dir.path());
+        assert!(!r.real);
+
+        unsafe { std::env::remove_var(SYSTEM_ROOT_ENV) };
+        assert!(system_root(Platform::Linux).real);
+        assert_eq!(system_root(Platform::Linux).path, PathBuf::from("/"));
+        assert_eq!(system_root(Platform::Windows).path, PathBuf::from("C:\\"));
+    }
 
     /// A truncated payload still parses — it is the *tail* that is missing, so
     /// the leading fields an adapter reads are usually intact and the event

@@ -1398,6 +1398,81 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
 - [ ] **T15** — `install --managed`. Dependency: T10, T11, T12, T13, T14.
   Files: `src/harness/*` (`Scope::Managed` arms), `src/install.rs`, `src/integrity.rs`, `src/main.rs`
 
+  Split under the ~6-file rule: T15a the scope itself, T15b Claude Code,
+  T15c Codex, T15d the docs.
+
+- [x] **T15a** — the managed scope, with no harness claiming it yet.
+  Dependency: T14b.
+  Files: `src/harness/mod.rs`, `src/install.rs`, `src/integrity.rs`, `src/main.rs`
+
+  `--managed` on `install`, `uninstall` and `check`, and the machinery three
+  layers of guard keep pointed at the machine rather than at whoever ran
+  `sudo`. No harness declares a `ManagedDir` yet, so the flag currently wires
+  nothing and says so — T15b and T15c fill it in without touching this.
+
+  The failure being engineered out is specific: the admin runs as root, so
+  `dirs::home_dir()` is *root's* home, and all five harnesses guard only
+  `Scope::Project` — under `Scope::Managed` they fall through to their user
+  artifact. A `sudo argus install --managed` written naively wires `/root` and
+  monitors nobody, while reporting success. Hence:
+
+  1. `ManagedDir { rel, platform }` is resolved against a system root, never
+     through `Env::home`, and `platform` is required rather than optional —
+     every documented managed layer sits somewhere different per OS, so a
+     missing entry means "no layer here", not "the same path works".
+  2. `managed_detection` returns `None` for a harness that declares nothing,
+     so `artifacts(_, Scope::Managed)` is never *called* on the four that
+     would answer with a user path.
+  3. `escapes_managed_root` is the backstop: any artifact outside the root is
+     refused for the whole harness before a single one is applied. Uninstall
+     refuses on the same grounds and for a sharper reason — reverting an
+     `OwnedFile` deletes it, so obeying would remove a file argus never wrote.
+
+  `ARGUS_SYSTEM_ROOT` redirects the root so the round-trip tests use the real
+  relative paths against a temp dir; it grants no privilege, and `require_admin`
+  is gated on `SystemRoot::real` rather than on the variable being unset.
+  `is_admin` is `geteuid()` on unix and `CheckTokenMembership` against the
+  built-in Administrators alias on Windows (its two RIDs are spelled out rather
+  than dragging in `Win32_System_SystemServices` for two stable integers).
+  `--dry-run` deliberately does *not* demand privilege — requiring root to
+  preview a plan only stops an admin checking what they are about to do — but
+  warns, so "the preview worked" cannot read as "the install will".
+
+  `check --managed` inverts `check_project`'s rule: a repository nothing wired
+  is silent, but a *missing* managed artifact is BROKEN, because passing the
+  flag is the operator asserting the layer should be there. That is what makes
+  the exit code 2 when someone deletes the file.
+
+  Five mutations, all bite: the containment guard neutered; `ManagedDir`
+  ignoring the platform it is declared for; a missing managed file made silent
+  the way a project's is; uninstall's refusal dropped; and the test root
+  reporting itself as the real machine (which would have made every run demand
+  root). The refusal test drives a stub harness reproducing the exact bug —
+  a `ManagedDir` declared, `Scope::Managed` unhandled — and asserts both the
+  error and that the user-scope file was not written.
+
+  Ground truth for T15b/T15c, read out of the shipped binaries rather than the
+  plan's prose, since three details differ from it:
+  - Claude Code carries `/Library/Application Support/ClaudeCode`,
+    `C:\Program Files\ClaudeCode` and `/etc/claude-code` in one table, plus
+    `managed-settings.d/`. `allowManagedHooksOnly`, verbatim: "When true (and
+    set in managed settings), only hooks from managed settings run. User,
+    project, and local hooks are ignored." So it is only safe once argus's own
+    entries are in `managed-settings.json` — and it deliberately stops the
+    user's other hooks, which T15d must document.
+  - Claude Code also has `disableAllHooks`, which argus does not detect and
+    `KillSwitch`'s comment currently denies exists. Policy settings win, so
+    pinning `disableAllHooks: false` is its analogue of Codex's pinned feature.
+  - Codex's `requirements.toml` is not what the plan describes:
+    `allow_managed_hooks_only` is top-level, features are pinned through
+    `feature_requirements` (there is no `[features]` table there), and managed
+    hooks are not inline — `[hooks] managed_dir` / `windows_managed_dir` point
+    at a directory the hook file lives in. Layers: `/etc/codex/config.toml`,
+    `/etc/codex/requirements.toml`, `/etc/codex/managed_config.toml` (legacy);
+    on Windows resolved through `SHGetKnownFolderPath(FOLDERID_ProgramData)`
+    with `OpenAI`/`Codex` as the subpath. Its `HookEventsToml` variants match
+    `codex::EVENTS` exactly, so the hooks schema needs no change.
+
 - [ ] **T16** — Pipeline restructure (A/B/C stages). Dependency: T7.
   Files: `src/daemon.rs`, new `src/enrich.rs`, `src/ipc.rs`
 
