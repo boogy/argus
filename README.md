@@ -15,6 +15,18 @@ cargo install --path .          # or grab a release binary
 argus install             # detects installed tools, wires hooks/plugins/config
 ```
 
+There are three install scopes, and they are independent — a machine can carry
+all three at once:
+
+| Command                          | Writes into                                   | Who can remove it            |
+| -------------------------------- | --------------------------------------------- | ---------------------------- |
+| `argus install`                  | this user's config (`~/.claude`, `~/.codex`, …) | the user                     |
+| `argus install --project <dir>`  | a repository (`<dir>/.codex/hooks.json`)        | anyone who can push          |
+| `argus install --managed`        | an administrator-owned system root              | root/Administrator only      |
+
+`--dry-run` prints the plan, and the detection signals behind it, without
+writing anything.
+
 Point the daemon at your collector — edit `<data-dir>/config.toml`:
 
 ```toml
@@ -387,6 +399,120 @@ extra_patterns = ["ACME-[0-9]{6}"]
   opencode plugin is loaded from the user's config directory, not contributed by
   a repository.
 
+## Machine-wide wiring (`--managed`)
+
+`argus install --managed` writes into the administrator-owned layer each tool
+reads *above* the user's own config. That layer is the only wiring an ordinary
+account cannot edit away, which is the whole point: a user-scope install is a
+file in the user's home directory, and anyone who can be captured by it can also
+delete it.
+
+It needs root/Administrator. `--dry-run` does not — it writes nothing — but it
+says so on stderr when the real install would fail, because "the preview worked"
+must not read as "the install will".
+
+| Tool        | macOS                                          | Linux              | Windows                          |
+| ----------- | ---------------------------------------------- | ------------------ | -------------------------------- |
+| Claude Code | `/Library/Application Support/ClaudeCode/`      | `/etc/claude-code/`| `C:\Program Files\ClaudeCode\`   |
+| Codex       | `/etc/codex/`                                   | `/etc/codex/`      | `C:\ProgramData\OpenAI\Codex\`   |
+
+Both were read out of the shipped binaries rather than from documentation, which
+is how the two surprises here were found: macOS Codex uses `/etc/codex` like
+Linux and has no `Library/Application Support` location, and the same Codex
+setting is spelled `managed_dir` on unix and `windows_managed_dir` on Windows,
+with the binary treating both-at-once as a conflict.
+
+**Claude Code** gets one file, `managed-settings.json`: argus's hook entries plus
+two pinned settings.
+
+- `disableAllHooks = false` — the switch that would otherwise turn every hook off
+  from a file the user owns. Pinning it is what actually protects capture.
+- `allowManagedHooksOnly = true` — restricts execution to hooks in *this* file.
+  argus's are in it, so its capture is unaffected. **The user's own hooks stop
+  running.** That is a real cost and a deliberate one: it is what an
+  administrator deploying this layer is asking for, and `check --managed` reports
+  it flipped back rather than letting the posture drift.
+
+Claude Code also honours `managed-settings.d/*.json` beside that file, a Windows
+registry policy under `HKLM\SOFTWARE\Policies\ClaudeCode`, and the macOS MDM
+domain `com.anthropic.claudecode`. argus reads the drop-in directory (a kill
+switch hidden there counts) but writes only the file: an MDM that can set a
+policy key does not need argus to set it, and a registry value argus wrote would
+be invisible to the file-based `check`.
+
+**Codex** gets three files, and the order they are written in matters:
+
+1. `hooks/hooks.json` — argus's entries, inside the managed hooks directory.
+2. `config.toml` — `[hooks] managed_dir` (or `windows_managed_dir`) pointing at
+   that directory. Written **only if absent**: a `managed_dir` already set is an
+   administrator's own hooks directory, and breaking hooks argus knows nothing
+   about is worse than reporting the conflict, which is what `check --managed`
+   then does.
+3. `requirements.toml` — `allow_managed_hooks_only = true`. Codex's layer
+   precedence puts the system `config.toml` below MDM and enterprise-managed
+   config, so enforcement has to live in `requirements.toml`; this is the one
+   value argus overwrites, and re-running the install is the documented repair
+   for finding it flipped.
+
+(3) tells Codex to run managed hooks *and nothing else*, so writing it before (1)
+exists would leave the machine running no hooks at all — for the length of an
+install, not an instant. Hence the order, which is asserted by a test.
+
+Deliberately not written into Codex's managed layer: `notify` and `[otel]`, which
+carry this install's receiver token and per-user OTLP port — a machine-wide file
+is world-readable, so that would hand every account on the host a credential in
+exchange for wiring that can only be right for one of them. Also not written is a
+`feature_requirements` pin: the field exists but its inner schema is not readable
+from the shipped binaries, and a `requirements.toml` Codex rejects for an unknown
+field is a config-load failure for *every* user on the machine. That gap is
+covered from the other side — `check` reports `[features] hooks = false` wherever
+someone sets it, machine-wide layer included.
+
+Copilot CLI, opencode and pi have no machine-wide layer wired: Copilot's hook
+file is already a per-user path with no administrator equivalent, and the
+opencode and pi extensions are loaded from the user's config directory.
+
+`argus check --managed` verifies the layer and exits `2` if anything is missing
+or flipped. Unlike `--project`, a *missing* managed artifact is BROKEN rather
+than silent — passing the flag asserts the layer should be there. Reading it
+needs no privilege, so an MDM compliance script can run it as the logged-in user.
+
+### The multi-user consequence
+
+`--managed` wires **tools, not users**, and everything on the receiving end of a
+hook is per-user. Two things follow, and neither is optional:
+
+- **The `argus` binary must be executable by every account on the machine.** The
+  hook command is a path baked into a file every user reads; installed somewhere
+  only root can execute, every hook on the machine fails.
+- **Each account needs its own running daemon.** The socket (`0600` in a `0700`
+  directory), the Codex OTLP port (derived from the data directory, deliberately
+  not fixed) and the SQLite buffer are all per-user by construction — that is
+  what stops one account's Codex posting prompts into another's audit trail. One
+  machine-wide hook plus one daemon means every other account spools to disk and
+  exports nothing.
+
+The daemon autospawns from the first hook invocation, so in practice this is
+satisfied as soon as each user runs an agent once — but a fleet rollout that
+assumes a single daemon covers the host will be wrong about every account but
+one.
+
+## Environment variables
+
+Mostly for tests and for running argus somewhere other than a real home
+directory; none are needed for an ordinary install.
+
+| Variable             | Effect                                                                                       |
+| -------------------- | -------------------------------------------------------------------------------------------- |
+| `ARGUS_DATA_DIR`     | Override the data directory (buffer, spool, socket, config, Codex token).                     |
+| `ARGUS_HOME`         | Override the home directory `install`/`uninstall`/`check` resolve tool config against.        |
+| `ARGUS_SOCKET`       | Exact socket path (or Windows pipe name) instead of one derived from the data directory.      |
+| `ARGUS_BIN`          | Path baked into the hook commands `install` writes, instead of the running binary's.          |
+| `ARGUS_BIN_DIRS`     | Replace the directories detection searches for tool binaries.                                 |
+| `ARGUS_SYSTEM_ROOT`  | Treat this directory as the system root for `--managed`. Marked "not the real machine", so the privilege check is skipped and the round-trip tests can sweep all three platforms. |
+| `ARGUS_NO_AUTOSPAWN` | Stop the hook shim starting a daemon; it spools instead.                                      |
+| `ARGUS_RECORD_DIR`   | Dump every envelope **raw, before redaction**, for writing adapters. Off unless set; see [Privacy and redaction](#privacy-and-redaction). |
+
 ## Troubleshooting
 
 - `argus status` — prints the resolved data dir, effective config
@@ -432,21 +558,57 @@ extra_patterns = ["ACME-[0-9]{6}"]
 
     Wiring that is intact is not the same as wiring that runs, so `check` also
     reads the settings that leave every entry in place and stop it firing.
-    Codex: `[features] hooks = false` (and its deprecated `codex_hooks` alias)
-    and `allow_managed_hooks_only = true`, which keeps only
-    administrator-managed hooks and so discards ours — read from both
-    `config.toml` and the administrator-supplied `requirements.toml`, and a
-    file of either name that no longer parses is itself a finding, because
-    Codex cannot read it either. Copilot: `disableAllHooks: true` at the top of
-    argus's own `~/.copilot/hooks/argus.json`, plus the same
-    does-it-still-parse test, since marker text survives trailing garbage that
-    makes the document unloadable. Every one of these passes the wiring checks
-    above — that is what makes them worth a separate read. Two limits worth
-    stating: `disableAllHooks` in a *repository* `settings.json` skips every
-    hook from every source for sessions in that repository, which no
-    machine-level check can see; and a `disableAllHooks` in someone else's
-    hooks file is file-scoped, disables their hooks rather than ours, and is
-    deliberately not reported.
+    Every one of these passes the wiring checks above — that is what makes them
+    worth a separate read.
+
+    **Claude Code** resolves hooks through four such settings, read out of the
+    shipped `cli.js` rather than from documentation:
+
+    | Setting                                  | Effect                       |
+    | ---------------------------------------- | ---------------------------- |
+    | `disableAllHooks` (machine-wide layer)   | nothing runs, managed or not |
+    | `disableAllHooks` (user `settings.json`) | only machine-wide hooks run  |
+    | `allowManagedHooksOnly`                  | only machine-wide hooks run  |
+    | `strictPluginOnlyCustomization`          | only machine-wide hooks run  |
+
+    Three of the four restrict execution to the machine-wide layer and only the
+    first stops that layer too. `strictPluginOnlyCustomization` appears in no
+    documentation — it is either `true` or a list of the customizations it
+    covers, and only the list containing `hooks` reaches ours. All four are read
+    from the machine-wide file *and* from `managed-settings.d/*.json` beside it,
+    since a switch hidden in a drop-in counts exactly as much.
+
+    The three "only machine-wide hooks run" rows are reported only where argus
+    is *not* itself in that layer. Where it is (after `install --managed`), a
+    rule keeping only managed hooks changes nothing about its capture, and
+    reporting it would fire on every host the managed install has run on —
+    argus's own pin reported as argus's own kill switch.
+
+    **Codex**: `[features] hooks = false` (and its deprecated `codex_hooks`
+    alias) and `allow_managed_hooks_only = true`, which keeps only
+    administrator-managed hooks. Both are read from `config.toml` and
+    `requirements.toml` in **both** the user directory and the machine-wide
+    layer, which outranks it — a switch set there is the one that decides. A
+    file of either name that no longer parses is itself a finding, because Codex
+    cannot read it either. `allow_managed_hooks_only` gets the same
+    argus-is-the-managed-hook suppression as Claude Code, applied to the user
+    file too, since the question is whether argus's hooks are managed and not
+    who set the flag. `[features] hooks = false` gets no such escape: it stops
+    every hook on the machine.
+
+    **Copilot**: `disableAllHooks: true` at the top of argus's own
+    `~/.copilot/hooks/argus.json`, plus the same does-it-still-parse test, since
+    marker text survives trailing garbage that makes the document unloadable.
+
+    **opencode and pi** have no equivalent setting. pi's extensions are loaded
+    by presence, so removing one is the only way to disable it — and there is
+    nothing silent to detect, because the wiring check already sees it gone.
+
+    Two limits worth stating: `disableAllHooks` in a *repository*
+    `settings.json` skips every hook from every source for sessions in that
+    repository, which no machine-level check can see; and a `disableAllHooks` in
+    someone else's hooks file is file-scoped, disables their hooks rather than
+    ours, and is deliberately not reported.
   - **config** — a remote policy (`[remote].url`) is loaded and effective, and
     the effective config matches it. Fails if the host isn't policy-managed, the
     policy never loaded (no/invalid cache → running on local/defaults), or a
@@ -458,6 +620,11 @@ extra_patterns = ["ACME-[0-9]{6}"]
     the check fails if `remote.url` was **removed or repointed** to another
     policy server — otherwise the check trusts whatever URL the local config
     declares. Example: `argus check --remote-url https://config.internal/argus.toml`
+
+  Two more scopes can be added to any of the above: `--project <dir>` for a
+  repository's wiring (missing is silent), and `--managed` for the
+  administrator-owned layer (missing is BROKEN — see
+  [Machine-wide wiring](#machine-wide-wiring---managed)).
 - **Offline / collector unreachable**: events keep flowing into the SQLite
   buffer (`<data-dir>/events.db`) instead of being dropped; `buffered events`
   in `status` grows. Once the collector is reachable again, the export loop's

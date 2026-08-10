@@ -44,12 +44,43 @@ logic:
   before its first launch. Everything detection reads from the outside world —
   including the platform — arrives through `detect::Env`, so a Windows layout
   is unit-testable from macOS; never reach for `cfg!` here.
-- `artifacts()` — the files argus writes. `OwnedFile` for a file with our own
-  name (overwritten on install, deleted on uninstall); `JsonHooks` to merge
-  entries into a shared hooks JSON; `TomlEdit` for key-level edits into shared
-  TOML. Generic `install`/`uninstall`/`check` drive all three, and every
+- `artifacts(d, scope)` — the files argus writes. `OwnedFile` for a file with
+  our own name (overwritten on install, deleted on uninstall); `JsonHooks` to
+  merge entries into a shared hooks JSON; `TomlEdit` for key-level edits into
+  shared TOML. Generic `install`/`uninstall`/`check` drive all three, and every
   `JsonHooks` entry is stamped `"_argus": true` so uninstall removes exactly
   what we added.
+
+  `scope` is `User`, `Project`, or `Managed(Platform)`, and the arms are
+  genuinely different files rather than subsets of each other. Return an empty
+  `Vec` for a scope the tool has no layer for — that is not an error, it is how
+  `install --project` stays silent about tools a repository cannot carry.
+  `Managed` carries the platform because a machine-wide install is the one case
+  where argus writes artifacts for a platform it may not be running on (the
+  round-trip tests sweep all three), and because the layers genuinely differ:
+  Codex spells one setting `managed_dir` on unix and `windows_managed_dir` on
+  Windows. Under `Managed`, `d.config_home` is the *system* directory — never a
+  home directory. The command runs under `sudo`, so anything derived from the
+  invoking user would resolve to root's home and monitor nobody; the harness
+  layer enforces this centrally by refusing any artifact that lands outside the
+  system root.
+
+  `JsonHooks` also carries `pinned`: top-level settings set (not merged) beside
+  the hooks, for the machine-wide scope only — a test asserts no other scope
+  pins anything, since a pin in a user file would silently disable the user's
+  own hooks in their own config.
+- `managed_dirs()` — the system directories for `Scope::Managed`, one per
+  platform, relative to the system root. Defaults to empty, which means the tool
+  has no machine-wide layer and `--managed` skips it.
+- `kill_switches(d)` — settings that leave every hook entry in place, correct
+  and ours, and still stop it running. Reporting "wired" about a tool capturing
+  nothing is worse than reporting nothing, because someone believes it. Read
+  these from the shipped binary, not from documentation: every one argus checks
+  today was found that way, and two of them are documented nowhere. If argus's
+  own machine-wide install *sets* one of these (Claude Code's
+  `allowManagedHooksOnly`, Codex's `allow_managed_hooks_only`), suppress the
+  finding where argus is itself in the managed layer — otherwise the check fires
+  on every host `install --managed` has run on.
 - `parse()` — delegate to the adapter from step 1.
 
 Never build a hook command with `format!("{exe} …")`: call `hook_command`,
@@ -72,6 +103,16 @@ so give it something falsifiable per artifact:
 - `TomlEdit` — set `argv_tail` when the value is an argv array starting with
   the argus binary, and `check` compares the trailing arguments element-wise
   and resolves element 0. Otherwise `ours_markers` is used as a substring test.
+  Set `must_carry` when being *ours* is not enough and the value has to match
+  **this** install: `ours_markers` deliberately still recognises what older
+  argus versions wrote, so uninstall cleans up after them — but a config
+  pointing at a port nothing listens on, or presenting a token the receiver
+  refuses, captures nothing, and matching a legacy marker would report that as
+  wired. `check` uses `must_carry` instead whenever it is non-empty.
+  `only_if_absent` decides what happens when a value is already there: leave an
+  administrator's or user's own content alone and let `check` report the
+  conflict, or overwrite because the value is argus's own pin and re-running the
+  install is the documented repair.
 
 Anything left unverified is silently permanent: before this, a `TomlEdit` was
 never checked at all, so a half-installed Codex reported healthy forever.

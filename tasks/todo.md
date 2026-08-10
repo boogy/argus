@@ -1619,6 +1619,35 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
   suppression is *conditional* (assume argus is always the managed hook, and a
   genuinely blinded host reads as healthy), which does bite.
 
+- [x] **T15f** — document the machine-wide layer and everything around it.
+  Dependency: T15e.
+  Files: `README.md`, `docs/adding-a-tool.md`
+
+  `--managed` shipped across T15a–T15e without a word of user-facing
+  documentation, and the three install scopes had never been shown side by side.
+  README gains: the scope table in Quick start, a **Machine-wide wiring**
+  section (per-platform paths, what each tool's layer contains and why, what is
+  deliberately not written, `check --managed` semantics), an **Environment
+  variables** table, and a rewritten kill-switch section covering Claude Code's
+  four settings, Codex's now-two-directory read, and the
+  argus-is-the-managed-hook suppression both share.
+
+  The multi-user consequence gets its own subsection, because it is the part a
+  fleet rollout gets wrong: `--managed` wires *tools*, not users, so the binary
+  has to be executable by every account and every account needs its own daemon
+  — the socket, the Codex OTLP port and the buffer are all per-user by
+  construction, which is exactly what stops one account's Codex writing into
+  another's audit trail.
+
+  `docs/adding-a-tool.md` was written before `Scope` existed. It now documents
+  `artifacts(d, scope)` and the `Managed(Platform)` arm (including that
+  `d.config_home` is the system directory, never a home directory, because the
+  command runs under `sudo`), `pinned`, `managed_dirs()`, `kill_switches()` with
+  the suppression rule, and `must_carry`/`only_if_absent` on `TomlEdit`.
+
+  `docs/telemetry-gaps.md` is deliberately untouched: the gaps it lists are what
+  T16–T18 close, so it is annotated after them, in T19.
+
 - [ ] **T16** — Pipeline restructure (A/B/C stages). Dependency: T7.
   Files: `src/daemon.rs`, new `src/enrich.rs`, `src/ipc.rs`
 
