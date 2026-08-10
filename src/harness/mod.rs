@@ -179,6 +179,17 @@ pub enum Artifact {
         shape: HookShape,
         /// `--source` value for the hook command.
         source: &'static str,
+        /// Top-level settings argus pins in this file, beside the hooks.
+        ///
+        /// Only the machine-wide layer uses them, and only for settings that
+        /// decide whether hooks run at all: an entry wired perfectly into a
+        /// file that also says `disableAllHooks` is wiring that captures
+        /// nothing. `check` requires each to still hold exactly, so flipping
+        /// one is a finding rather than a silent capture outage.
+        ///
+        /// A `Vec` rather than a `&'static [..]` because `serde_json::Value`
+        /// cannot be constructed in a `const`.
+        pinned: Vec<(&'static str, Value)>,
     },
     /// Whole file argus owns outright; overwrite on install, delete on uninstall.
     OwnedFile {
@@ -966,6 +977,7 @@ fn apply(artifact: &Artifact, display: &str, dry_run: bool) -> Result<()> {
             events,
             shape,
             source,
+            pinned,
         } => {
             let mut doc = read_json_object(path);
             let hooks = object_entry(&mut doc, "hooks");
@@ -992,6 +1004,12 @@ fn apply(artifact: &Artifact, display: &str, dry_run: bool) -> Result<()> {
                     Some(ours) => *ours = want,
                     None => arr.push(want),
                 }
+            }
+            // Set, not merged: these exist to hold one value, and an
+            // administrator who wants a different one wants argus not to
+            // write this file.
+            for (key, value) in pinned {
+                doc[*key] = value.clone();
             }
             if dry_run {
                 println!("[dry-run] would update {}", path.display());
@@ -1074,6 +1092,7 @@ fn revert(artifact: &Artifact) -> Result<()> {
             path,
             events,
             source,
+            pinned,
             ..
         } => {
             let Ok(text) = std::fs::read_to_string(path) else {
@@ -1105,6 +1124,16 @@ fn revert(artifact: &Artifact) -> Result<()> {
                 let empty = hooks.is_empty();
                 if empty {
                     doc.as_object_mut().map(|o| o.remove("hooks"));
+                }
+            }
+            // Only while the value is still the one argus wrote. An
+            // administrator who has since set it themselves has taken it over,
+            // and uninstalling argus is not a reason to change their policy.
+            if let Some(obj) = doc.as_object_mut() {
+                for (key, value) in pinned {
+                    if obj.get(*key) == Some(value) {
+                        obj.remove(*key);
+                    }
                 }
             }
             write_json(path, &doc)?;
@@ -1197,11 +1226,26 @@ fn verify(artifact: &Artifact) -> std::result::Result<(), String> {
             events,
             source,
             shape,
+            pinned,
         } => {
             let Ok(text) = std::fs::read_to_string(path) else {
                 return Err(format!("{} unreadable", path.display()));
             };
             let doc: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+            // Ahead of the hooks, because it decides whether they mean
+            // anything: a file whose every entry is intact and which also says
+            // `disableAllHooks` is a host reporting "wired" while capturing
+            // nothing.
+            for (key, value) in pinned {
+                let found = doc.get(*key).unwrap_or(&Value::Null);
+                if found != value {
+                    return Err(format!(
+                        "{}: {key} is {found}, must be {value} — \
+                         hooks do not run as written otherwise",
+                        path.display()
+                    ));
+                }
+            }
             let hooks = &doc["hooks"];
             // Every expected event must still carry an argus entry, so
             // stripping one event's wiring is caught, not just wiping the file.
@@ -1506,6 +1550,7 @@ mod tests {
                 events: STUB_EVENTS,
                 shape: HookShape::CommandArray,
                 source: "stub",
+                pinned: Vec::new(),
             }]
         }
         fn parse(&self, _env: &Envelope, _cfg: &CaptureCfg) -> Vec<Event> {
@@ -1652,6 +1697,175 @@ mod tests {
         assert!(system_root(Platform::Linux).real);
         assert_eq!(system_root(Platform::Linux).path, PathBuf::from("/"));
         assert_eq!(system_root(Platform::Windows).path, PathBuf::from("C:\\"));
+    }
+
+    /// Claude Code's real managed layer, driven end to end against a fake
+    /// system root on each of the three platforms it documents one for.
+    ///
+    /// The paths are the shipped binary's own, so this is also the test that
+    /// notices if one is ever mistyped: a `managed-settings.json` written a
+    /// directory off is a file Claude Code never reads.
+    #[test]
+    fn claude_codes_managed_layer_round_trips_on_every_platform() {
+        let bin = tempfile::tempdir().unwrap();
+        let exe = fake_binary(bin.path(), "argus");
+        unsafe { std::env::set_var(BIN_ENV, &exe) };
+        let hs: &[&dyn Harness] = &[&crate::harness::claude_code::ClaudeCode];
+
+        for (p, rel) in [
+            (Platform::MacOS, "Library/Application Support/ClaudeCode"),
+            (Platform::Linux, "etc/claude-code"),
+            (Platform::Windows, "Program Files/ClaudeCode"),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let file = root.path().join(rel).join("managed-settings.json");
+
+            install_managed_in(hs, root.path(), p, false).unwrap();
+            assert!(file.exists(), "{p:?}: nothing at {}", file.display());
+            let doc: Value =
+                serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+            assert_eq!(doc["disableAllHooks"], json!(false), "{p:?}");
+            assert_eq!(doc["allowManagedHooksOnly"], json!(true), "{p:?}");
+            assert!(doc["hooks"]["SessionStart"].is_array(), "{p:?}");
+
+            let checked = check_managed_in(hs, root.path(), p);
+            assert_eq!(checked.len(), 1);
+            assert!(checked[0].ok, "{p:?}: {:?}", checked[0]);
+            assert_eq!(checked[0].tool, "claude-code (managed)");
+
+            // The user layer must stay where it always was: a managed install
+            // writes `managed-settings.json` and nothing beside it.
+            assert!(
+                !root.path().join(rel).join("settings.json").exists(),
+                "{p:?}: a managed install wrote the user file too"
+            );
+
+            uninstall_managed_in(hs, root.path(), p).unwrap();
+            let text = std::fs::read_to_string(&file).unwrap();
+            assert!(!text.contains("argus"), "{p:?}: wiring left behind: {text}");
+            assert!(
+                !text.contains("allowManagedHooksOnly"),
+                "{p:?}: enforcement left behind: {text}"
+            );
+        }
+        unsafe { std::env::remove_var(BIN_ENV) };
+    }
+
+    /// The plan's own bar for `check --managed`: a flipped enforcement key is a
+    /// finding, not a shrug. Every entry can be byte-perfect and the file still
+    /// capture nothing, so this is checked ahead of the hooks and reported with
+    /// the value that is wrong.
+    #[test]
+    fn a_flipped_enforcement_key_makes_a_wired_managed_file_broken() {
+        let bin = tempfile::tempdir().unwrap();
+        let exe = fake_binary(bin.path(), "argus");
+        unsafe { std::env::set_var(BIN_ENV, &exe) };
+        let hs: &[&dyn Harness] = &[&crate::harness::claude_code::ClaudeCode];
+        let root = tempfile::tempdir().unwrap();
+        let file = root
+            .path()
+            .join("etc/claude-code")
+            .join("managed-settings.json");
+        install_managed_in(hs, root.path(), Platform::Linux, false).unwrap();
+
+        // Each of the three ways the pin stops holding: turned off, turned on,
+        // and quietly deleted — the last being what a hand-edit looks like.
+        for (key, bad) in [
+            ("disableAllHooks", Some(json!(true))),
+            ("allowManagedHooksOnly", Some(json!(false))),
+            ("disableAllHooks", None),
+        ] {
+            let mut doc: Value =
+                serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+            let obj = doc.as_object_mut().unwrap();
+            match &bad {
+                Some(v) => {
+                    obj.insert(key.into(), v.clone());
+                }
+                None => {
+                    obj.remove(key);
+                }
+            }
+            std::fs::write(&file, doc.to_string()).unwrap();
+
+            let f = check_managed_in(hs, root.path(), Platform::Linux);
+            assert_eq!(f.len(), 1);
+            assert!(!f[0].ok, "{key}={bad:?} was accepted as healthy");
+            assert!(
+                f[0].detail.contains(key) && f[0].detail.contains("must be"),
+                "{key}={bad:?}: unhelpful detail {:?}",
+                f[0].detail
+            );
+            // Re-running the install is the documented repair.
+            install_managed_in(hs, root.path(), Platform::Linux, false).unwrap();
+            assert!(check_managed_in(hs, root.path(), Platform::Linux)[0].ok);
+        }
+        unsafe { std::env::remove_var(BIN_ENV) };
+    }
+
+    /// Pinned settings are a machine-wide instrument and nothing else. The
+    /// same two keys written into a file the *user* owns would turn off the
+    /// user's own hooks in their own config — argus quietly seizing a policy
+    /// decision that was never its to make. Swept over every shipped harness
+    /// so a new one cannot introduce it either.
+    #[test]
+    fn only_the_machine_wide_scope_pins_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = Detection {
+            id: "x",
+            signals: Vec::new(),
+            config_home: dir.path().into(),
+            binary: None,
+        };
+        for h in HARNESSES {
+            for scope in [Scope::User, Scope::Project] {
+                for a in h.artifacts(&d, scope) {
+                    if let Artifact::JsonHooks { path, pinned, .. } = a {
+                        assert!(
+                            pinned.is_empty(),
+                            "{} pins {:?} at {scope:?} in {}",
+                            h.id(),
+                            pinned,
+                            path.display()
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Uninstalling argus is not a licence to rewrite an administrator's
+    /// policy. A pinned key they have since changed is theirs, and survives.
+    #[test]
+    fn uninstall_leaves_a_pinned_value_an_administrator_has_taken_over() {
+        let bin = tempfile::tempdir().unwrap();
+        let exe = fake_binary(bin.path(), "argus");
+        unsafe { std::env::set_var(BIN_ENV, &exe) };
+        let hs: &[&dyn Harness] = &[&crate::harness::claude_code::ClaudeCode];
+        let root = tempfile::tempdir().unwrap();
+        let file = root
+            .path()
+            .join("etc/claude-code")
+            .join("managed-settings.json");
+        install_managed_in(hs, root.path(), Platform::Linux, false).unwrap();
+
+        let mut doc: Value =
+            serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        doc["disableAllHooks"] = json!(true);
+        std::fs::write(&file, doc.to_string()).unwrap();
+
+        uninstall_managed_in(hs, root.path(), Platform::Linux).unwrap();
+        let after: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        assert_eq!(
+            after["disableAllHooks"],
+            json!(true),
+            "took back a setting argus no longer owned"
+        );
+        assert!(
+            after.get("allowManagedHooksOnly").is_none(),
+            "left behind a pin that was still ours: {after}"
+        );
+        unsafe { std::env::remove_var(BIN_ENV) };
     }
 
     /// A truncated payload still parses — it is the *tail* that is missing, so
@@ -1945,6 +2159,7 @@ mod tests {
             events: EVENTS,
             shape: HookShape::CommandArray,
             source: "claude-code",
+            pinned: Vec::new(),
         };
         assert_eq!(verify(&artifact), Ok(()), "healthy wiring must verify");
 

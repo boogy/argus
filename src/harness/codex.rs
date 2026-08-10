@@ -84,6 +84,7 @@ impl Harness for Codex {
                 events: EVENTS,
                 shape: HookShape::CommandArray,
                 source: "codex",
+                pinned: Vec::new(),
             }];
         }
         // Sourced from config so Codex's OTLP target and the daemon's actual
@@ -176,6 +177,7 @@ impl Harness for Codex {
                 events: EVENTS,
                 shape: HookShape::CommandArray,
                 source: "codex",
+                pinned: Vec::new(),
             },
         ]
     }

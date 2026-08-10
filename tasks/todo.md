@@ -1398,8 +1398,9 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
 - [ ] **T15** — `install --managed`. Dependency: T10, T11, T12, T13, T14.
   Files: `src/harness/*` (`Scope::Managed` arms), `src/install.rs`, `src/integrity.rs`, `src/main.rs`
 
-  Split under the ~6-file rule: T15a the scope itself, T15b Claude Code,
-  T15c Codex, T15d the docs.
+  Split under the ~6-file rule: T15a the scope itself, T15b Claude Code's
+  managed layer, T15c the kill switches argus does not yet detect, T15d Codex,
+  T15e the docs.
 
 - [x] **T15a** — the managed scope, with no harness claiming it yet.
   Dependency: T14b.
@@ -1472,6 +1473,46 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
     on Windows resolved through `SHGetKnownFolderPath(FOLDERID_ProgramData)`
     with `OpenAI`/`Codex` as the subpath. Its `HookEventsToml` variants match
     `codex::EVENTS` exactly, so the hooks schema needs no change.
+
+- [x] **T15b** — Claude Code's managed layer, and the settings that decide
+  whether hooks run at all. Dependency: T15a.
+  Files: `src/harness/mod.rs`, `src/harness/claude_code.rs`, `src/harness/codex.rs`
+
+  `MANAGED_DIRS` are the three paths read out of the shipped binary, and
+  `artifacts` becomes an exhaustive `match scope` rather than an
+  `if scope == Scope::Project` guard — the fall-through that T15a's third
+  guard exists to catch is now impossible to write here at all.
+
+  The new thing is `Artifact::JsonHooks::pinned`: top-level settings argus
+  holds beside the hooks, for the one case where a perfectly wired file still
+  captures nothing. Claude Code's settings precedence is
+  `user → project → local → flag → policy`, policy highest, so a value pinned
+  in `managed-settings.json` cannot be weakened from a file a user owns.
+
+  - `disableAllHooks: false` is the pin that protects capture. It is the
+    switch that would otherwise turn every hook off, and it is what makes the
+    managed layer worth anything.
+  - `allowManagedHooksOnly: true` does *not* protect argus — argus's entries
+    are in this file, so its capture is identical either way. What it does is
+    stop the user's own hooks. That is a real cost, taken deliberately: it is
+    what an administrator deploying a machine-wide layer is asking for, and
+    the plan's bar for `check --managed` ("exits 2 when … the enforcement key
+    flipped") only means something if the key is unconditional. Documented in
+    T15e, where an operator will actually read it.
+
+  The three verbs treat pins differently, and each difference is load-bearing:
+  `apply` *sets* rather than merges; `verify` checks them *before* the hooks,
+  since a flipped key makes every other result meaningless; `revert` removes a
+  pin only while its value is still the one argus wrote — an administrator who
+  has since changed it has taken it over, and uninstalling argus is not a
+  reason to rewrite their policy.
+
+  Seven mutations, all bite. The seventh did not, at first: giving the *user*
+  scope the same pins was invisible to every test, which is argus writing
+  `allowManagedHooksOnly` into `~/.claude/settings.json` and silently killing
+  the user's own hooks in their own config. Fixed by the invariant it was
+  missing — only `Scope::Managed` may pin anything, swept over every shipped
+  harness so a new one cannot introduce it either.
 
 - [ ] **T16** — Pipeline restructure (A/B/C stages). Dependency: T7.
   Files: `src/daemon.rs`, new `src/enrich.rs`, `src/ipc.rs`
