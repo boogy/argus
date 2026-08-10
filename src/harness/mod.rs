@@ -77,12 +77,17 @@ pub const HARNESSES: &[&dyn Harness] = &[
 /// committed to a repository is a token published to everyone who can clone
 /// it. Harnesses with nothing to put in a repository return no artifacts.
 ///
-/// T15 implements `Managed`. It is defined here now so the artifact-producing
-/// signature is stable and later work is additive.
+/// `Managed` carries the platform it is being resolved for, because a
+/// machine-wide install is the one case where argus writes artifacts for a
+/// platform it may not be running on: the round-trip tests sweep all three
+/// against a fake system root, and the layers genuinely differ per OS (Codex
+/// spells the same setting `managed_dir` on unix and `windows_managed_dir` on
+/// Windows, and setting both is an error). Nothing else can be told apart from
+/// the path alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scope {
     User,
-    Managed,
+    Managed(Platform),
     Project,
 }
 
@@ -808,7 +813,7 @@ fn install_managed_in(
         let Some(d) = managed_detection(*h, root, platform) else {
             continue;
         };
-        let artifacts = h.artifacts(&d, Scope::Managed);
+        let artifacts = h.artifacts(&d, Scope::Managed(platform));
         // Checked for the whole harness before a single one is applied: a
         // refusal half-way through would leave the machine in a state neither
         // install nor uninstall describes.
@@ -838,7 +843,7 @@ fn uninstall_managed_in(harnesses: &[&dyn Harness], root: &Path, platform: Platf
         let Some(d) = managed_detection(*h, root, platform) else {
             continue;
         };
-        let artifacts = h.artifacts(&d, Scope::Managed);
+        let artifacts = h.artifacts(&d, Scope::Managed(platform));
         // The containment rule binds uninstall harder than install: reverting
         // an `OwnedFile` deletes it, so a harness answering with a user-scope
         // path here would have argus remove a file it never wrote.
@@ -871,7 +876,7 @@ fn check_managed_in(harnesses: &[&dyn Harness], root: &Path, platform: Platform)
         let Some(d) = managed_detection(*h, root, platform) else {
             continue;
         };
-        let artifacts = h.artifacts(&d, Scope::Managed);
+        let artifacts = h.artifacts(&d, Scope::Managed(platform));
         if artifacts.is_empty() {
             continue;
         }
@@ -1671,7 +1676,7 @@ mod tests {
                 let Some(d) = managed_detection(*h, root.path(), *p) else {
                     continue;
                 };
-                for a in h.artifacts(&d, Scope::Managed) {
+                for a in h.artifacts(&d, Scope::Managed(*p)) {
                     assert!(
                         escapes_managed_root(root.path(), &a).is_none(),
                         "{} on {p:?} escapes: {}",
@@ -1800,6 +1805,125 @@ mod tests {
             // Re-running the install is the documented repair.
             install_managed_in(hs, root.path(), Platform::Linux, false).unwrap();
             assert!(check_managed_in(hs, root.path(), Platform::Linux)[0].ok);
+        }
+        unsafe { std::env::remove_var(BIN_ENV) };
+    }
+
+    /// Codex's machine-wide layer, whose shape differs from Claude Code's in
+    /// every way that matters: three files rather than one, the enforcement in
+    /// a *different* file from the hooks it enforces, and one setting spelled
+    /// differently on Windows.
+    ///
+    /// The ordering assertion is the substantive one. `allow_managed_hooks_only`
+    /// tells Codex to run managed hooks and nothing else, so a run that set it
+    /// before writing `hooks.json` would leave the machine executing no hooks
+    /// at all — the window being a whole install, not an instant.
+    #[test]
+    fn codexs_managed_layer_round_trips_on_every_platform() {
+        let bin = tempfile::tempdir().unwrap();
+        let exe = fake_binary(bin.path(), "argus");
+        unsafe { std::env::set_var(BIN_ENV, &exe) };
+        let hs: &[&dyn Harness] = &[&crate::harness::codex::Codex];
+
+        for (p, rel, key) in [
+            (Platform::MacOS, "etc/codex", "managed_dir"),
+            (Platform::Linux, "etc/codex", "managed_dir"),
+            (
+                Platform::Windows,
+                "ProgramData/OpenAI/Codex",
+                "windows_managed_dir",
+            ),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let base = root.path().join(rel);
+            let hooks = base.join("hooks/hooks.json");
+            let config = base.join("config.toml");
+            let requirements = base.join("requirements.toml");
+
+            // The hooks must exist before anything says "managed hooks only".
+            let order: Vec<PathBuf> = {
+                let d = managed_detection(hs[0], root.path(), p).unwrap();
+                hs[0]
+                    .artifacts(&d, Scope::Managed(p))
+                    .iter()
+                    .map(|a| artifact_path(a).to_path_buf())
+                    .collect()
+            };
+            assert_eq!(order[0], hooks, "{p:?}: hooks are not written first");
+            assert_eq!(order.last().unwrap(), &requirements, "{p:?}");
+
+            install_managed_in(hs, root.path(), p, false).unwrap();
+            let cfg = std::fs::read_to_string(&config).unwrap();
+            assert!(cfg.contains(key), "{p:?}: {key} missing from {cfg}");
+            assert!(
+                !cfg.contains(if key == "managed_dir" {
+                    "windows_managed_dir"
+                } else {
+                    "\nmanaged_dir"
+                }),
+                "{p:?}: both spellings written, which Codex reports as a conflict: {cfg}"
+            );
+            let req = std::fs::read_to_string(&requirements).unwrap();
+            assert!(req.contains("allow_managed_hooks_only"), "{p:?}: {req}");
+            // The per-user receiver token has no business in a machine-wide
+            // file, and neither does wiring that can only be right for one
+            // account.
+            assert!(!cfg.contains("otel") && !cfg.contains("notify"), "{p:?}");
+            assert!(hooks.exists(), "{p:?}: no hooks at {}", hooks.display());
+
+            let checked = check_managed_in(hs, root.path(), p);
+            assert_eq!(checked.len(), 1);
+            assert!(checked[0].ok, "{p:?}: {:?}", checked[0]);
+
+            // Each file on its own is enough to break the layer, and each has
+            // to say so — the hooks are useless unpointed-at, and the pointer
+            // is useless with nothing to point at.
+            for victim in [&hooks, &config, &requirements] {
+                let saved = std::fs::read_to_string(victim).unwrap();
+                std::fs::remove_file(victim).unwrap();
+                let f = check_managed_in(hs, root.path(), p);
+                assert!(
+                    !f[0].ok,
+                    "{p:?}: removing {} was accepted",
+                    victim.display()
+                );
+                std::fs::write(victim, saved).unwrap();
+            }
+            assert!(check_managed_in(hs, root.path(), p)[0].ok, "{p:?}");
+
+            // Flipping the enforcement flag leaves every file in place and
+            // every hook entry intact, and still has to read as broken.
+            std::fs::write(&requirements, "allow_managed_hooks_only = false\n").unwrap();
+            assert!(!check_managed_in(hs, root.path(), p)[0].ok, "{p:?}");
+            // Re-running the install is the repair, as it is for Claude Code's
+            // pinned settings.
+            install_managed_in(hs, root.path(), p, false).unwrap();
+            assert!(check_managed_in(hs, root.path(), p)[0].ok, "{p:?}");
+
+            // An administrator's own managed hooks directory is their content,
+            // not argus's to overwrite: it survives, and is reported instead.
+            std::fs::write(&config, format!("[hooks]\n{key} = \"/opt/theirs\"\n")).unwrap();
+            install_managed_in(hs, root.path(), p, false).unwrap();
+            let cfg = std::fs::read_to_string(&config).unwrap();
+            assert!(
+                cfg.contains("/opt/theirs"),
+                "{p:?}: clobbered their hooks: {cfg}"
+            );
+            assert!(!check_managed_in(hs, root.path(), p)[0].ok, "{p:?}: {cfg}");
+            std::fs::remove_file(&config).unwrap();
+            install_managed_in(hs, root.path(), p, false).unwrap();
+
+            uninstall_managed_in(hs, root.path(), p).unwrap();
+            assert!(
+                !std::fs::read_to_string(&config).unwrap().contains(key),
+                "{p:?}: the managed pointer outlived the hooks it pointed at"
+            );
+            assert!(
+                !std::fs::read_to_string(&requirements)
+                    .unwrap()
+                    .contains("allow_managed_hooks_only"),
+                "{p:?}: left Codex running managed hooks only, with none left"
+            );
         }
         unsafe { std::env::remove_var(BIN_ENV) };
     }

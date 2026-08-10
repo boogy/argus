@@ -140,7 +140,7 @@ impl Harness for ClaudeCode {
             // `d.config_home` is the machine-wide directory here, never a home
             // directory — see `harness::managed_detection`, which is the only
             // caller that passes this scope.
-            Scope::Managed => vec![Artifact::JsonHooks {
+            Scope::Managed(_) => vec![Artifact::JsonHooks {
                 path: d.config_home.join("managed-settings.json"),
                 events: EVENTS,
                 shape: HookShape::CommandArray,

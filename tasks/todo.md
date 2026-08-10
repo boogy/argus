@@ -1550,6 +1550,50 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
   Six mutations, all bite, including the `managed_wired` skip and the drop-in
   directory scan.
 
+- [x] **T15d** — Codex's machine-wide layer. Dependency: T15a.
+  Files: `src/harness/codex.rs`, `src/harness/mod.rs`
+
+  Three files, not one, and the enforcement lives in a different file from the
+  hooks it enforces. Read out of the shipped binaries (darwin and windows),
+  because the plan's prose covered none of it:
+
+  * `/etc/codex` on **both** macOS and Linux — there is no
+    `Library/Application Support/Codex` — and `ProgramData/OpenAI/Codex` on
+    Windows, from `FOLDERID_ProgramData`.
+  * Layer precedence is MDM, then managed config (system), then
+    enterprise-managed, then *user*, then project. The system `config.toml` is
+    the weakest layer, so the enforcement cannot live there:
+    `allow_managed_hooks_only` goes in `requirements.toml`.
+  * `ConfigRequirementsToml` has no `hooks` member, so `managed_dir` is a
+    `config.toml` field — and Windows spells it `windows_managed_dir`, with the
+    binary reporting the two as conflicting. Exactly one is written per
+    platform, which is why `Scope::Managed` now carries a `Platform`: macOS and
+    Linux share a path, so nothing else can tell them apart.
+
+  Order matters more than any single file: `allow_managed_hooks_only` tells
+  Codex to run managed hooks *and nothing else*, so writing it before
+  `hooks.json` exists would leave the machine running no hooks at all, for the
+  length of an install rather than an instant. Hooks are written first and the
+  test asserts it.
+
+  The two TOML edits differ deliberately. The `config.toml` pointer is
+  `only_if_absent` — a `managed_dir` already set is an administrator's own
+  hooks directory, and breaking hooks argus knows nothing about is worse than
+  reporting the conflict. The `requirements.toml` flag overwrites, because it
+  is argus's pin and re-running the install is the documented repair, as it is
+  for Claude Code's pinned settings.
+
+  Not written: `notify` and `[otel]`, which carry this install's receiver token
+  and would hand it to every account on a multi-user host in exchange for
+  wiring that can only be right for one of them; and `feature_requirements`,
+  whose inner schema is not readable from either binary — a `requirements.toml`
+  Codex rejects for an unknown field is a config-load failure for everyone on
+  the machine. That gap is covered from the detection side instead, by the
+  existing `[features] hooks = false` kill-switch read.
+
+  Seven mutations, all bite, including the ordering and both `only_if_absent`
+  choices.
+
 - [ ] **T16** — Pipeline restructure (A/B/C stages). Dependency: T7.
   Files: `src/daemon.rs`, new `src/enrich.rs`, `src/ipc.rs`
 
