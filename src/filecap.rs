@@ -347,6 +347,21 @@ fn payload_snapshot(
 ) -> FileSnapshot {
     let cfg = &capture.file_contents;
     let mut snap = blank(c, body.len() as u64, SnapshotSource::Payload);
+    // The ceiling covers the parse-time cap too: that one cut to
+    // `max_field_bytes` plus headroom, so anything longer than this was
+    // already a prefix and is flagged as one, and no digest of a prefix
+    // reaches the wire.
+    let ceiling = content_ceiling(capture);
+    // Ahead of every reason the body will not be shipped, because none of them
+    // is a reason to stop identifying the file. The disk path opens an excluded
+    // file purely to hash it; here the bytes are already in hand, so declining
+    // to hash bought nothing and cost the one field that correlates the same
+    // `.env` across forty sessions. Same for a body dropped as binary or for
+    // want of budget — what the digest describes is the file, not what this
+    // record managed to carry.
+    if cfg.hash && body.len() <= ceiling {
+        snap.sha256 = Some(sha256_hex(body.as_bytes()));
+    }
     // Policy first, then cost, then budget: an excluded file must report the
     // reason it was excluded even on an event that had run out of room, or a
     // deployment cannot tell a policy from a full record.
@@ -362,11 +377,6 @@ fn payload_snapshot(
         snap.skipped = Some(SkipReason::Budget);
         return snap;
     }
-    // The ceiling covers the parse-time cap too: that one cut to
-    // `max_field_bytes` plus headroom, so anything longer than this was
-    // already a prefix and is flagged as one, and no digest of a prefix
-    // reaches the wire.
-    let ceiling = content_ceiling(capture);
     let kept = if body.len() <= ceiling && body.len() <= *budget {
         body.to_string()
     } else {
@@ -386,9 +396,6 @@ fn payload_snapshot(
         snap.truncated = true;
         crate::adapters::cap_mode(body, room, capture.truncate_mode)
     };
-    if cfg.hash && !snap.truncated {
-        snap.sha256 = Some(sha256_hex(body.as_bytes()));
-    }
     *budget = budget.saturating_sub(kept.len());
     snap.content = Some(kept);
     snap
@@ -858,6 +865,34 @@ mod tests {
         assert_eq!(out[0].bytes, 23);
     }
 
+    /// The same `.env`, identified the same way, whichever path saw it. The
+    /// disk side opens an excluded file purely to hash it; this side already
+    /// holds the bytes, and used to throw the digest away — so the one field
+    /// that correlates a file across sessions was present or absent depending
+    /// on whether the tool happened to quote the content in its arguments.
+    #[test]
+    fn an_excluded_file_is_hashed_in_a_payload_too() {
+        let write = serde_json::json!({
+            "file_path": "/repo/.env",
+            "content": "AWS_SECRET_ACCESS_KEY=x",
+        });
+        let out = snaps("Write", write.clone(), &on(|_| {}));
+        assert_eq!(out[0].skipped, Some(SkipReason::Excluded));
+        assert_eq!(out[0].content, None, "an excluded file's body was shipped");
+        assert_eq!(
+            out[0].sha256.as_deref(),
+            Some(&sha256_hex(b"AWS_SECRET_ACCESS_KEY=x")[..]),
+            "the file the disk path identifies went unidentified here"
+        );
+
+        // And `hash = false` is still a deployment saying it wants no digests.
+        let mut c = on(|_| {});
+        c.file_contents.hash = false;
+        let unhashed = snaps("Write", write, &c);
+        assert_eq!(unhashed[0].skipped, Some(SkipReason::Excluded));
+        assert_eq!(unhashed[0].sha256, None, "a digest nobody asked for");
+    }
+
     #[test]
     fn a_binary_body_is_reported_and_not_shipped() {
         let out = snaps(
@@ -867,6 +902,9 @@ mod tests {
         );
         assert_eq!(out[0].skipped, Some(SkipReason::Binary));
         assert_eq!(out[0].content, None);
+        // Not shipping the bytes is not a reason to stop naming the file: the
+        // digest is over the whole content and identifies it either way.
+        assert!(out[0].sha256.is_some(), "a whole body went unidentified");
 
         let kept = snaps(
             "Write",
