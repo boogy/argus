@@ -1029,12 +1029,9 @@ fn apply(artifact: &Artifact, display: &str, dry_run: bool) -> Result<()> {
                 println!("[dry-run] would write {}", path.display());
                 return Ok(());
             }
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
             // Overwrite unconditionally: the file is versioned with the
             // binary, so a stale copy from an older install must be replaced.
-            std::fs::write(path, contents.as_ref())?;
+            write_atomic(path, contents.as_ref().as_bytes())?;
             println!("installed {display} at {}", path.display());
         }
         Artifact::TomlEdit { path, edits } => {
@@ -1053,10 +1050,7 @@ fn apply(artifact: &Artifact, display: &str, dry_run: bool) -> Result<()> {
                 println!("[dry-run] would update {}", path.display());
                 return Ok(());
             }
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            std::fs::write(path, doc.to_string())?;
+            write_atomic(path, doc.to_string().as_bytes())?;
             let keys: Vec<&str> = edits.iter().map(|e| e.key).collect();
             println!("wired {display} {} in {}", keys.join("+"), path.display());
         }
@@ -1163,7 +1157,7 @@ fn revert(artifact: &Artifact) -> Result<()> {
                     doc.remove(e.key);
                 }
             }
-            std::fs::write(path, doc.to_string())?;
+            write_atomic(path, doc.to_string().as_bytes())?;
         }
     }
     Ok(())
@@ -1426,10 +1420,35 @@ fn object_entry<'a>(doc: &'a mut Value, key: &str) -> &'a mut Value {
 }
 
 fn write_json(path: &Path, doc: &Value) -> Result<()> {
+    write_atomic(path, serde_json::to_string_pretty(doc)?.as_bytes())
+}
+
+/// Replace a file's contents in one step, via a sibling temporary and a rename.
+///
+/// Every caller here is editing a file argus does not own — `settings.json`,
+/// `config.toml`, the user's *agent's* configuration. `fs::write` truncates
+/// first and writes second, so a full disk or a killed install between the two
+/// leaves that file empty, and what breaks is the coding agent, not argus's
+/// wiring to it. The rename gives the file no intermediate state: a reader
+/// sees the old contents or the new ones.
+///
+/// The temporary is a sibling so the rename stays within one filesystem, and
+/// the existing file's mode is carried over — several of these are `0600` and
+/// silently widening them would be a worse bug than the one being fixed.
+fn write_atomic(path: &Path, contents: &[u8]) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(path, serde_json::to_string_pretty(doc)?)?;
+    let tmp = path.with_extension("argus-tmp");
+    std::fs::write(&tmp, contents)?;
+    #[cfg(unix)]
+    if let Ok(md) = std::fs::metadata(path) {
+        let _ = std::fs::set_permissions(&tmp, md.permissions());
+    }
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e.into());
+    }
     Ok(())
 }
 
@@ -1516,6 +1535,49 @@ fn dispatch(envelope: Envelope, capture: &CaptureCfg) -> Vec<Event> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// These files belong to the user's coding agent, not to argus. A
+    /// truncate-then-write leaves a window where `settings.json` is empty, and
+    /// a crash or a full disk inside it breaks the agent rather than argus.
+    ///
+    /// Asserted through a hard link, which is the only way to observe the
+    /// difference from outside: after an in-place write the link sees the new
+    /// bytes, because it is the same inode being rewritten. After a rename it
+    /// still sees the old ones, which is exactly the property that says the
+    /// original was never opened for truncation.
+    #[cfg(unix)]
+    #[test]
+    fn a_config_file_is_replaced_whole_never_truncated_in_place() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(&path, b"{\"theirs\": true}").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let witness = dir.path().join("witness");
+        std::fs::hard_link(&path, &witness).unwrap();
+
+        write_atomic(&path, b"{\"ours\": true}").unwrap();
+
+        assert_eq!(std::fs::read(&path).unwrap(), b"{\"ours\": true}");
+        assert_eq!(
+            std::fs::read(&witness).unwrap(),
+            b"{\"theirs\": true}",
+            "the original file was written through, so there was a moment when it \
+             held neither the old contents nor the new"
+        );
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "replacing the file widened its mode"
+        );
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name())
+            .filter(|n| n.to_string_lossy().contains("tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "temporary left behind: {leftovers:?}");
+    }
 
     /// A harness that exists only to be driven through the managed layer.
     ///
