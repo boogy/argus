@@ -182,8 +182,13 @@ mod tests {
     }
 
     /// Captured file content is the largest concentration of credentials
-    /// argus handles, and `docs/adding-a-tool.md` names this as the field an
-    /// author forgets. The `path` beside it deliberately survives untouched:
+    /// argus handles — a `.env` written through a `Write` is every secret in
+    /// the project in one field.
+    ///
+    /// The exhaustive destructure in `scrub_event` is what forces a *decision*
+    /// about a new field; it cannot force the right one, and "matched and left
+    /// alone" compiles exactly as well as "scrubbed". That is what this test
+    /// is for. The `path` beside the content deliberately survives untouched:
     /// it is an identifier every query joins on, not free text.
     #[test]
     fn captured_file_content_is_scrubbed() {
