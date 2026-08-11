@@ -82,6 +82,23 @@ fn record(e: &Event) -> Value {
     if let Some(c) = &e.cwd {
         attrs.push(attr("cwd", c));
     }
+    // Attributes rather than body, and one per identifier rather than a blob:
+    // "which events ran against account 123456789012" is a group-by, and the
+    // whole reason for capturing this is that it is the column an incident is
+    // pivoted on. Prefixed `cloud.` so the provider's own key (`aws.region`)
+    // cannot collide with a resource attribute a collector adds.
+    for (k, v) in &e.cloud_identity.attributes {
+        attrs.push(attr(&format!("cloud.{k}"), v));
+    }
+    if !e.cloud_identity.credentials.is_empty() {
+        // Names only; see `cloudid`. Joined because the count of variables is
+        // small and bounded by an environment, and a SIEM substring-matches
+        // this far more often than it enumerates it.
+        attrs.push(attr(
+            "cloud.credentials_present",
+            &e.cloud_identity.credentials.join(","),
+        ));
+    }
     let event_type = match &e.kind {
         EventKind::Prompt { .. } => "prompt",
         EventKind::PromptTransformed {
@@ -504,6 +521,78 @@ mod tests {
         // tool call in a fleet that has capture switched off is pure cost.
         assert_eq!(get("file.snapshots"), None);
         assert_eq!(get("file.sha256"), None);
+    }
+
+    /// "Which agent ran as prod-admin" has to be a group-by, not a body
+    /// search — that is the entire reason the identity is collected. And the
+    /// payload that carries it must never carry a secret with it.
+    #[test]
+    fn who_the_agent_was_is_indexable_and_what_it_held_is_not_readable() {
+        let secret = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
+        let mut e = Event::new(
+            "claude-code",
+            Some("s1".into()),
+            None,
+            EventKind::Session {
+                action: "start".into(),
+                detail: serde_json::Value::Null,
+            },
+        );
+        e.cloud_identity = crate::cloudid::from_vars([
+            ("AWS_ROLE_ARN", "arn:aws:iam::123456789012:role/prod-admin"),
+            ("AWS_REGION", "eu-west-1"),
+            ("AWS_SECRET_ACCESS_KEY", secret),
+            ("GITHUB_TOKEN", "ghp_reallysecret"),
+        ]);
+
+        let body = to_otlp_body(std::slice::from_ref(&e));
+        let attrs = body["resourceLogs"][0]["scopeLogs"][0]["logRecords"][0]["attributes"]
+            .as_array()
+            .unwrap()
+            .clone();
+        let get = |k: &str| {
+            attrs
+                .iter()
+                .find(|a| a["key"] == k)
+                .map(|a| a["value"]["stringValue"].as_str().unwrap().to_string())
+        };
+        assert_eq!(
+            get("cloud.aws.role_arn").as_deref(),
+            Some("arn:aws:iam::123456789012:role/prod-admin"),
+            "the role the agent had assumed is not queryable: {attrs:#?}"
+        );
+        assert_eq!(get("cloud.aws.region").as_deref(), Some("eu-west-1"));
+        assert_eq!(
+            get("cloud.credentials_present").as_deref(),
+            Some("AWS_SECRET_ACCESS_KEY,GITHUB_TOKEN"),
+            "what the session had in scope was dropped between daemon and wire"
+        );
+
+        let wire = body.to_string();
+        for leaked in [secret, "ghp_reallysecret"] {
+            assert!(
+                !wire.contains(leaked),
+                "a credential value was exported to the collector"
+            );
+        }
+    }
+
+    /// An agent on a laptop with no cloud environment is the common case, and
+    /// an attribute present on every row of a fleet that has none is pure cost.
+    #[test]
+    fn an_agent_holding_no_cloud_identity_says_nothing_about_one() {
+        let e = Event::new(
+            "claude-code",
+            None,
+            None,
+            EventKind::Session {
+                action: "start".into(),
+                detail: serde_json::Value::Null,
+            },
+        );
+        let body = to_otlp_body(std::slice::from_ref(&e));
+        let wire = body.to_string();
+        assert!(!wire.contains("cloud."), "{wire}");
     }
 
     /// Snapshots that reach the buffer but not the attributes are findable

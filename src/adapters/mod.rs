@@ -254,6 +254,7 @@ mod tests {
     #[test]
     fn registry_dispatches_and_unknown_source_is_raw() {
         let env = Envelope {
+            cloud_identity: Default::default(),
             source: "some-future-tool".into(),
             received_at: chrono::Utc::now(),
             truncated: false,

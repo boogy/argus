@@ -23,6 +23,23 @@ pub struct Envelope {
     /// already on its way to somebody who does.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub dropped: u64,
+    /// Which cloud identity the agent held when it fired this hook.
+    ///
+    /// Collected in the shim rather than the daemon, and it can only be
+    /// collected there: the shim is a child of the host agent and inherits its
+    /// environment, where the daemon's environment describes whoever started
+    /// the daemon. That also bounds the coverage — an envelope arriving from
+    /// the opencode plugin or the Codex OTLP receiver, neither of which runs
+    /// the shim, carries none.
+    ///
+    /// Defaulted rather than optional so an older spooled envelope, or one
+    /// from a plugin that never learned the field, deserializes as "nothing
+    /// known" instead of failing.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::cloudid::CloudIdentity::is_empty"
+    )]
+    pub cloud_identity: crate::cloudid::CloudIdentity,
     pub payload: serde_json::Value,
 }
 
@@ -82,6 +99,17 @@ pub struct Event {
     pub cwd: Option<String>,
     #[serde(default, skip_serializing_if = "Meta::is_empty")]
     pub meta: Meta,
+    /// Who the agent was to the outside world when this happened.
+    ///
+    /// Stamped in [`crate::harness::parse`] from the envelope rather than by
+    /// each adapter, for the same reason `ts` is: an adapter that forgot would
+    /// lose it silently, and the gap would look like an agent that simply held
+    /// no credentials.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::cloudid::CloudIdentity::is_empty"
+    )]
+    pub cloud_identity: crate::cloudid::CloudIdentity,
     #[serde(flatten)]
     pub kind: EventKind,
 }
@@ -353,6 +381,10 @@ impl Event {
             session_id,
             cwd,
             meta: Meta::default(),
+            // Not the `identity` above, which is this host and user. Filled in
+            // by `harness::parse` from the envelope, because only the shim
+            // that ran inside the agent could have seen it.
+            cloud_identity: crate::cloudid::CloudIdentity::default(),
             kind,
         }
     }
@@ -605,6 +637,7 @@ mod tests {
     #[test]
     fn envelope_roundtrips() {
         let env = Envelope {
+            cloud_identity: Default::default(),
             source: "opencode".into(),
             received_at: chrono::Utc::now(),
             truncated: false,

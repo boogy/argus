@@ -585,6 +585,7 @@ mod tests {
 
     fn envelope(n: u32) -> Envelope {
         Envelope {
+            cloud_identity: Default::default(),
             source: "claude-code".into(),
             received_at: chrono::Utc::now(),
             truncated: false,

@@ -19,6 +19,13 @@ process.env.ARGUS_SOCKET = sockPath;
 // rather than be spooled by a stand-in and counted as delivered.
 process.env.ARGUS_BIN = join(dir, "does-not-exist");
 
+// The identity the agent is holding. Read by the plugin itself rather than by
+// the shim, because the socket path never runs the shim — see `cloudIdentity`
+// in `plugins/shared/transport.ts`.
+process.env.AWS_ROLE_ARN = "arn:aws:iam::123456789012:role/prod-admin";
+process.env.AWS_SECRET_ACCESS_KEY = "wJalrXUtnFEMI";
+process.env.AWS_PROFILE = ""; // exported and blank: not an identity
+
 const received = [];
 const server = createServer((conn) => {
   let buf = "";
@@ -137,6 +144,19 @@ if (u) {
 
 for (const e of received) {
   if (e.source !== "opencode") problems.push(`${e.payload.event}: source ${e.source}`);
+  const id = e.cloud_identity;
+  if (id?.attributes?.["aws.role_arn"] !== "arn:aws:iam::123456789012:role/prod-admin") {
+    problems.push(`${e.payload.event}: cloud identity ${JSON.stringify(id)}`);
+  }
+  if (!id?.credentials?.includes("AWS_SECRET_ACCESS_KEY")) {
+    problems.push(`${e.payload.event}: credentials ${JSON.stringify(id?.credentials)}`);
+  }
+  if ("aws.profile" in (id?.attributes ?? {})) {
+    problems.push(`${e.payload.event}: an empty variable became an identity`);
+  }
+  if (JSON.stringify(e).includes("wJalrXUtnFEMI")) {
+    problems.push(`${e.payload.event}: a credential value reached the wire`);
+  }
   if (e.payload.cwd !== CWD) problems.push(`${e.payload.event}: cwd ${e.payload.cwd}`);
   // Every event but the pty knows its session. `session.created` reports it
   // only as `properties.info.id`, so that fallback has to stay.
@@ -161,5 +181,7 @@ if (problems.length) {
   console.error(JSON.stringify(received, null, 2));
   process.exit(1);
 }
-console.log(`ok: ${received.length} envelopes carry cwd, sessionID and callID`);
+console.log(
+  `ok: ${received.length} envelopes carry cwd, sessionID, callID and cloud identity`,
+);
 process.exit(0);

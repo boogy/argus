@@ -195,6 +195,7 @@ mod tests {
 
     fn env(source: &str, event: Option<&str>, payload: Value) -> Envelope {
         Envelope {
+            cloud_identity: Default::default(),
             source: source.into(),
             received_at: chrono::Utc::now(),
             truncated: false,

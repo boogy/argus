@@ -67,6 +67,13 @@ pub fn deliver(source: &str, event: Option<&str>, raw: &str, truncated: bool) {
     let payload =
         serde_json::from_str(raw).unwrap_or_else(|_| serde_json::Value::String(raw.to_string()));
     let envelope = Envelope {
+        // Read here because here is the only place it exists: this process was
+        // spawned by the host agent and holds the agent's environment, where
+        // the daemon holds whoever started the daemon. Collected
+        // unconditionally — the *capture* policy is applied in the daemon,
+        // alongside every other one, so a fleet turns this off centrally
+        // instead of reinstalling on every host to change what a shim reads.
+        cloud_identity: crate::cloudid::current(),
         source: source.to_string(),
         received_at: chrono::Utc::now(),
         event: event.map(String::from),
@@ -178,6 +185,7 @@ mod tests {
         }
 
         let envelope = Envelope {
+            cloud_identity: Default::default(),
             source: "claude-code".to_string(),
             received_at: chrono::Utc::now(),
             truncated: false,
@@ -198,6 +206,51 @@ mod tests {
             elapsed < std::time::Duration::from_secs(2),
             "send_with_deadline must return promptly, took {elapsed:?}"
         );
+    }
+
+    /// The shim is the only process that ever sees the agent's environment:
+    /// the daemon it hands off to was started from somewhere else entirely.
+    /// If the identity is not read here it cannot be recovered anywhere later,
+    /// so the read has to be on the envelope, not on a config read in the
+    /// daemon.
+    #[test]
+    fn the_agent_environment_is_read_where_it_exists_and_nowhere_else() {
+        let dir = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("ARGUS_DATA_DIR", dir.path());
+            std::env::set_var("ARGUS_SOCKET", dir.path().join("nope.sock"));
+            std::env::set_var("ARGUS_NO_AUTOSPAWN", "1");
+            std::env::set_var("AWS_ROLE_ARN", "arn:aws:iam::123456789012:role/prod-admin");
+            std::env::set_var("AWS_SECRET_ACCESS_KEY", "wJalrXUtnFEMI");
+        }
+        deliver(
+            "claude-code",
+            None,
+            r#"{"hook_event_name":"UserPromptSubmit","prompt":"hi"}"#,
+            false,
+        );
+        unsafe {
+            std::env::remove_var("AWS_ROLE_ARN");
+            std::env::remove_var("AWS_SECRET_ACCESS_KEY");
+        }
+
+        let drained = crate::spool::drain().unwrap();
+        let id = &drained[0].cloud_identity;
+        assert_eq!(
+            id.attributes.get("aws.role_arn").map(String::as_str),
+            Some("arn:aws:iam::123456789012:role/prod-admin"),
+            "the role the agent was holding never left the shim: {id:?}"
+        );
+        // Containment, not equality: this reads the *test runner's* real
+        // environment, which is a developer's or a CI machine's shell and may
+        // legitimately hold credentials of its own.
+        assert!(
+            id.credentials.iter().any(|c| c == "AWS_SECRET_ACCESS_KEY"),
+            "{id:?}"
+        );
+        // Down the same path the daemon would take it, and still name-only.
+        let spooled = serde_json::to_string(&drained[0]).unwrap();
+        assert!(!spooled.contains("wJalrXUtnFEMI"), "{spooled}");
     }
 
     #[test]

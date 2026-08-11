@@ -274,6 +274,14 @@ async fn handle_conn_inner(mut stream: tokio::net::TcpStream, tx: Ingress, token
     if ok && let Ok(v) = serde_json::from_slice::<Value>(&buf[headers_end..body_end]) {
         for record in flatten_otlp_records(&v) {
             tx.send(Envelope {
+                // Empty, and it cannot be otherwise: this arrived over HTTP
+                // from Codex's own process, so the only environment reachable
+                // here is the daemon's — whoever started the daemon, not the
+                // agent. Codex's `notify` events run the shim and do carry an
+                // identity; these are the same session seen from a channel
+                // that cannot. Filling it in from `std::env` here would label
+                // an agent's telemetry with a stranger's credentials.
+                cloud_identity: Default::default(),
                 source: "codex".into(),
                 received_at: chrono::Utc::now(),
                 truncated: false,
@@ -400,6 +408,7 @@ mod tests {
 
     fn env(payload: serde_json::Value) -> Envelope {
         Envelope {
+            cloud_identity: Default::default(),
             source: "codex".into(),
             received_at: chrono::Utc::now(),
             truncated: false,

@@ -122,6 +122,106 @@ function sendViaSpawn(source: string, payload: string): void {
   }
 }
 
+// Which cloud identity the host agent is holding. The Rust half of this lives
+// in `src/cloudid.rs` and the two lists are pinned to each other by
+// `the_plugin_reads_the_same_environment_the_shim_does` — an identifier added
+// on one side and not the other is a build failure, not a silent gap.
+//
+// It has to be duplicated here because the fast path never runs the shim: the
+// plugin writes the envelope itself, so an identity read only in Rust would be
+// present on the spawn fallback and missing on every ordinary event.
+//
+// Identifiers are captured by value and are all public — each one already
+// appears in the provider's own audit log. Credentials are recorded by NAME
+// only and their values are never read.
+// argus:identifiers:begin
+const IDENTIFIERS: [string, string][] = [
+  ["AWS_PROFILE", "aws.profile"],
+  ["AWS_DEFAULT_PROFILE", "aws.profile"],
+  ["AWS_REGION", "aws.region"],
+  ["AWS_DEFAULT_REGION", "aws.region"],
+  ["AWS_ROLE_ARN", "aws.role_arn"],
+  ["AWS_ROLE_SESSION_NAME", "aws.role_session_name"],
+  ["AWS_ACCOUNT_ID", "aws.account_id"],
+  ["AWS_ACCESS_KEY_ID", "aws.access_key_id"],
+  ["AWS_WEB_IDENTITY_TOKEN_FILE", "aws.web_identity_token_file"],
+  ["AWS_CONTAINER_CREDENTIALS_FULL_URI", "aws.container_creds_uri"],
+  ["AWS_CONTAINER_CREDENTIALS_RELATIVE_URI", "aws.container_creds_uri"],
+  ["AZURE_TENANT_ID", "azure.tenant_id"],
+  ["AZURE_CLIENT_ID", "azure.client_id"],
+  ["AZURE_SUBSCRIPTION_ID", "azure.subscription_id"],
+  ["AZURE_FEDERATED_TOKEN_FILE", "azure.federated_token_file"],
+  ["ARM_TENANT_ID", "azure.tenant_id"],
+  ["ARM_CLIENT_ID", "azure.client_id"],
+  ["ARM_SUBSCRIPTION_ID", "azure.subscription_id"],
+  ["GOOGLE_CLOUD_PROJECT", "gcp.project"],
+  ["GCLOUD_PROJECT", "gcp.project"],
+  ["CLOUDSDK_CORE_PROJECT", "gcp.project"],
+  ["GOOGLE_CLOUD_QUOTA_PROJECT", "gcp.quota_project"],
+  ["CLOUDSDK_CORE_ACCOUNT", "gcp.account"],
+  ["GOOGLE_APPLICATION_CREDENTIALS", "gcp.credentials_file"],
+  ["KUBECONFIG", "k8s.kubeconfig"],
+  ["KUBERNETES_SERVICE_HOST", "k8s.api_host"],
+  ["KUBE_CONTEXT", "k8s.context"],
+  ["VAULT_ADDR", "vault.addr"],
+  ["VAULT_NAMESPACE", "vault.namespace"],
+  ["CLOUDFLARE_ACCOUNT_ID", "cloudflare.account_id"],
+  ["DIGITALOCEAN_CONTEXT", "digitalocean.context"],
+  ["DOPPLER_PROJECT", "doppler.project"],
+  ["GITHUB_REPOSITORY", "github.repository"],
+  ["GH_HOST", "github.host"],
+  ["GITHUB_ACTOR", "github.actor"],
+];
+// argus:identifiers:end
+// argus:markers:begin
+const CREDENTIAL_MARKERS = [
+  "TOKEN",
+  "SECRET",
+  "PASSWORD",
+  "PASSWD",
+  "API_KEY",
+  "APIKEY",
+  "ACCESS_KEY",
+  "PRIVATE_KEY",
+  "CREDENTIALS",
+  "SESSION_KEY",
+];
+// argus:markers:end
+
+type CloudIdentity = {
+  attributes: Record<string, string>;
+  credentials: string[];
+};
+let identity: CloudIdentity | null = null;
+
+// Computed once per host process: a plugin host is long-lived and its
+// environment was fixed when the agent started it, so recomputing per event
+// would walk the whole environment thousands of times for the same answer.
+function cloudIdentity(): CloudIdentity {
+  if (identity) return identity;
+  const env = process.env;
+  const id: CloudIdentity = { attributes: {}, credentials: [] };
+  const claimed = new Set(IDENTIFIERS.map(([name]) => name));
+  // In the allowlist's declared order rather than the environment's, so an
+  // alias never displaces the variable the SDK itself prefers.
+  for (const [name, attribute] of IDENTIFIERS) {
+    const value = env[name];
+    // An exported-but-empty variable is not an identity: `AWS_PROFILE=` means
+    // no profile is set, and recording it would report one that is not.
+    if (value && !(attribute in id.attributes)) id.attributes[attribute] = value;
+  }
+  // Sorted, to match the Rust side and so one environment does not look like
+  // two because the host enumerated it differently.
+  for (const name of Object.keys(env).sort()) {
+    if (claimed.has(name) || !env[name]) continue;
+    const upper = name.toUpperCase();
+    if (CREDENTIAL_MARKERS.some((m) => upper.includes(m)))
+      id.credentials.push(name);
+  }
+  identity = id;
+  return id;
+}
+
 export function send(source: string, payload: Record<string, unknown>): void {
   try {
     const raw = JSON.stringify(payload);
@@ -129,6 +229,7 @@ export function send(source: string, payload: Record<string, unknown>): void {
       JSON.stringify({
         source,
         received_at: new Date().toISOString(),
+        cloud_identity: cloudIdentity(),
         payload,
       }) + "\n";
     if (!sendViaSocket(frame)) sendViaSpawn(source, raw);

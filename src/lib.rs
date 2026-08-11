@@ -1,5 +1,6 @@
 pub mod adapters;
 pub mod buffer;
+pub mod cloudid;
 pub mod config;
 pub mod daemon;
 pub mod detect;

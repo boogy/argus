@@ -249,6 +249,7 @@ mod tests {
 
     fn env(event: &str, payload: serde_json::Value) -> Envelope {
         Envelope {
+            cloud_identity: Default::default(),
             source: "copilot".into(),
             received_at: chrono::Utc::now(),
             truncated: false,
@@ -608,6 +609,7 @@ mod tests {
     #[test]
     fn pascal_case_payload_without_event_hint_still_parses() {
         let envp = Envelope {
+            cloud_identity: Default::default(),
             source: "copilot".into(),
             received_at: chrono::Utc::now(),
             truncated: false,

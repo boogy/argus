@@ -1513,6 +1513,13 @@ pub fn parse(envelope: Envelope, capture: &CaptureCfg) -> Vec<Event> {
     let received_at = envelope.received_at;
     let (truncated, dropped) = (envelope.truncated, envelope.dropped);
     let source = envelope.source.clone();
+    // Policy is applied here rather than in the shim: the shim reads no config
+    // and reinstalling on every host is not how a fleet turns a capture off.
+    let cloud_identity = if capture.cloud_identity {
+        envelope.cloud_identity.clone()
+    } else {
+        Default::default()
+    };
     let mut events = dispatch(envelope, capture);
     // Ahead of the events they qualify, not after them: a reader who sees a
     // tool call with no result should learn that the payload was cut, or that
@@ -1559,6 +1566,10 @@ pub fn parse(envelope: Envelope, capture: &CaptureCfg) -> Vec<Event> {
     }
     for e in &mut events {
         e.ts = received_at;
+        // Every event from this envelope, the loss records included: "the
+        // agent that lost these was holding prod credentials" is the half of a
+        // gap report that decides how much it matters.
+        e.cloud_identity = cloud_identity.clone();
     }
     events
 }
@@ -2109,6 +2120,7 @@ mod tests {
     #[test]
     fn a_truncated_payload_announces_itself_ahead_of_the_event_it_spoils() {
         let mut env = Envelope {
+            cloud_identity: Default::default(),
             source: "claude-code".into(),
             received_at: chrono::Utc::now(),
             truncated: true,
@@ -2156,6 +2168,7 @@ mod tests {
     #[test]
     fn a_spool_trim_becomes_a_gap_the_collector_can_see() {
         let mut env = Envelope {
+            cloud_identity: Default::default(),
             source: "claude-code".into(),
             received_at: chrono::Utc::now(),
             truncated: false,
@@ -2185,11 +2198,68 @@ mod tests {
         );
     }
 
+    /// The shim reads the agent's environment unconditionally, because it is
+    /// the only process that holds it. Whether that identity is *kept* is a
+    /// config question, and config lives in the daemon — so a fleet that does
+    /// not want it turns one key off centrally rather than reinstalling the
+    /// hooks on every host.
+    #[test]
+    fn a_fleet_that_declines_cloud_identity_gets_none_of_it() {
+        let env = Envelope {
+            cloud_identity: crate::cloudid::from_vars([
+                ("AWS_ROLE_ARN", "arn:aws:iam::123456789012:role/prod-admin"),
+                ("AWS_SECRET_ACCESS_KEY", "wJalrXUtnFEMI"),
+            ]),
+            source: "claude-code".into(),
+            received_at: chrono::Utc::now(),
+            truncated: false,
+            // A loss record is synthesised here rather than by an adapter, and
+            // it carries the identity too: "the agent that lost these was
+            // holding prod credentials" is what decides how much a gap matters.
+            dropped: 2,
+            event: None,
+            payload: serde_json::json!({
+                "hook_event_name": "UserPromptSubmit",
+                "session_id": "s1",
+                "prompt": "hi",
+            }),
+        };
+
+        let on = parse(env.clone(), &CaptureCfg::default());
+        assert!(on.len() > 1);
+        for e in &on {
+            assert_eq!(
+                e.cloud_identity.attributes.get("aws.role_arn"),
+                Some(&"arn:aws:iam::123456789012:role/prod-admin".to_string()),
+                "an event left the daemon without the role that produced it: {:?}",
+                e.kind
+            );
+            assert_eq!(e.cloud_identity.credentials, ["AWS_SECRET_ACCESS_KEY"]);
+        }
+
+        let off = parse(
+            env,
+            &CaptureCfg {
+                cloud_identity: false,
+                ..CaptureCfg::default()
+            },
+        );
+        assert_eq!(off.len(), on.len());
+        for e in &off {
+            assert!(
+                e.cloud_identity.is_empty(),
+                "capture.cloud_identity = false still exported an identity: {:?}",
+                e.cloud_identity
+            );
+        }
+    }
+
     /// Two independent gaps on one envelope are two independent findings; the
     /// truncation qualifies the event that follows it, so it leads.
     #[test]
     fn a_cut_payload_that_also_trimmed_the_spool_reports_both() {
         let env = Envelope {
+            cloud_identity: Default::default(),
             source: "claude-code".into(),
             received_at: chrono::Utc::now(),
             truncated: true,

@@ -166,6 +166,7 @@ unset keys keep their default.
 | `capture.max_field_bytes`    | `65536`            | Per-field size cap (serialized bytes) for prompt text, assistant text, tool input/output, and each string *leaf* inside a JSON payload. Capping the leaves rather than the whole value is what keeps a large `Write` from costing its own `file_path`: the record used to say something big was written and not what. A structure that is still 16× the cap after that (or nested past 32 levels) is replaced wholesale with `{"_truncated":true,…}`. `0` = unlimited. |
 | `capture.truncate_mode`      | `head_tail`        | What survives the cap: `head` (first bytes + `…[truncated]`), `head_tail` (both ends, `…[truncated]…` between), `drop` (`[truncated]`, content discarded). `head_tail` is the default because the answer is usually at the end — a diff's outcome, a stack trace's cause — and `head` alone truncates exactly that away. Cuts land on character boundaries; a multi-byte character is never split. |
 | `capture.file_contents.*`    | off                | Capture the contents of files a tool touched. Off by default, whole table documented in [File-content capture](#file-content-capture). |
+| `capture.cloud_identity`     | `true`             | Record which cloud identity the agent was holding — assumed role, account, subscription, project, cluster — and name the credential variables it had in scope. Whole section in [Cloud identity](#cloud-identity). `false` → no `cloud.*` attribute on any event. |
 | `redaction.enabled`          | `true`             | Run the built-in secret scrubber before anything is buffered or exported.                                                                                                                                        |
 | `redaction.extra_patterns`   | `[]`               | Additional regexes scrubbed the same way as built-ins (invalid patterns are skipped with a warning, not fatal).                                                                                                  |
 | `buffer.max_events`          | `100000`           | SQLite buffer cap; oldest events are dropped once full (offline-first, not unbounded).                                                                                                                           |
@@ -274,6 +275,64 @@ name says it read the file. A `Grep`'s `path` is a directory to search and a
 `Bash`'s `command` is not a path at all, so neither produces anything to
 capture in any mode. Opening those would mean spending I/O on strings that were
 never claimed to be files, chosen by the agent being monitored.
+
+## Cloud identity
+
+An event says an agent ran `terraform apply`. The question an incident actually
+asks is *as whom* — which role it had assumed, which account, which cluster.
+Nothing in a hook payload carries that; the environment does, and the hook shim
+is spawned by the agent and inherits it.
+
+So the shim reads it, and every event from that envelope carries it as
+`cloud.*` attributes — indexable, groupable, joinable against the provider's own
+audit log:
+
+```
+cloud.aws.role_arn        = arn:aws:iam::123456789012:role/prod-admin
+cloud.aws.account_id      = 123456789012
+cloud.aws.region          = eu-west-1
+cloud.azure.subscription_id, cloud.azure.tenant_id, cloud.azure.client_id
+cloud.gcp.project, cloud.gcp.account, cloud.gcp.credentials_file
+cloud.k8s.api_host, cloud.k8s.kubeconfig, cloud.k8s.context
+cloud.vault.addr, cloud.vault.namespace
+cloud.github.repository, cloud.cloudflare.account_id, cloud.doppler.project, …
+```
+
+Two disjoint kinds of variable, and the split is the whole design:
+
+- **Identifiers** are an explicit allowlist, captured **by value**. Every one is
+  something the provider already writes into its own audit log: a role ARN, an
+  account id, a project, a profile name, an access key **id**. They say who the
+  agent was; none of them authenticates as anyone.
+- **Credentials** are everything whose *name* says it holds secret material
+  (`*_TOKEN`, `*_SECRET`, `*_PASSWORD`, `*_API_KEY`, `*_PRIVATE_KEY`, …). Only
+  the **name** is recorded — the value is never read at all. They arrive as one
+  attribute, `cloud.credentials_present=AWS_SECRET_ACCESS_KEY,GITHUB_TOKEN`,
+  which answers "what did this session have in scope" for free.
+
+Anything matching neither is ignored. An agent's environment on a developer's
+machine holds their entire shell, and a monitoring tool that shipped it
+wholesale would be the largest thing it had to defend. The allowlist is
+deliberately not exhaustive and no heuristic ever inspects a *value*: a provider
+argus does not know yet is a missing attribute, never a leaked one.
+
+The read happens as close to the agent as possible, because that is the only
+place the agent's environment exists — the daemon was started from somewhere
+else entirely, and its environment describes whoever started it. For Claude
+Code, Copilot CLI and Codex's `notify` that is the hook shim; for opencode and
+pi it is the plugin itself, which writes its own envelope over the socket and
+only falls back to the shim. The two allowlists are pinned to each other by a
+test, so one cannot drift from the other.
+
+The *policy* is applied in the daemon: `capture.cloud_identity = false` in fleet
+config switches it off everywhere without reinstalling a single hook.
+
+**One channel cannot carry it.** Codex's `[otel]` export posts to the daemon
+over HTTP from Codex's own process, so those records arrive with no identity
+attached; the same session's `notify` events do carry one. Nothing can be
+inferred for the HTTP path without labelling an agent's telemetry with whatever
+credentials the daemon's own environment happens to hold, which would be worse
+than the gap.
 
 ## Privacy and redaction
 

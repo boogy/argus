@@ -104,6 +104,7 @@ mod tests {
 
     fn prompt_through_pipeline(text: &str, capture: &CaptureCfg) -> String {
         let envelope = Envelope {
+            cloud_identity: Default::default(),
             source: "claude-code".into(),
             received_at: chrono::Utc::now(),
             truncated: false,
@@ -200,6 +201,7 @@ mod tests {
         let mut capture = capture(65536, TruncateMode::HeadTail);
         capture.file_contents.enabled = true;
         let envelope = Envelope {
+            cloud_identity: Default::default(),
             source: "claude-code".into(),
             received_at: chrono::Utc::now(),
             truncated: false,

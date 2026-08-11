@@ -620,6 +620,7 @@ mod tests {
 
     fn envelope_of(text: &str) -> Envelope {
         Envelope {
+            cloud_identity: Default::default(),
             source: "claude-code".into(),
             received_at: chrono::Utc::now(),
             truncated: false,
@@ -766,6 +767,7 @@ mod tests {
         tokio::spawn(listener.accept_loop(tx));
 
         let env = Envelope {
+            cloud_identity: Default::default(),
             source: "claude-code".into(),
             received_at: chrono::Utc::now(),
             truncated: false,
@@ -804,6 +806,7 @@ mod tests {
         tokio::spawn(listener.accept_loop(tx));
 
         let env = Envelope {
+            cloud_identity: Default::default(),
             source: "claude-code".into(),
             received_at: chrono::Utc::now(),
             truncated: false,
@@ -856,6 +859,7 @@ mod tests {
         PEAK_FRAME_BYTES.store(0, Relaxed);
 
         let env = Envelope {
+            cloud_identity: Default::default(),
             source: "claude-code".into(),
             received_at: chrono::Utc::now(),
             truncated: false,
@@ -919,6 +923,7 @@ mod tests {
         tokio::spawn(listener.accept_loop(tx));
 
         let env = Envelope {
+            cloud_identity: Default::default(),
             source: "opencode".into(),
             received_at: chrono::Utc::now(),
             truncated: false,

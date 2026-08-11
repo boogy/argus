@@ -80,6 +80,17 @@ pub struct CaptureCfg {
     /// What a string that exceeds `max_field_bytes` is reduced to.
     pub truncate_mode: TruncateMode,
     pub file_contents: FileContentsCfg,
+    /// Record which cloud identity the agent held — the assumed role, the
+    /// subscription, the project — and name the credential variables it had in
+    /// scope. See [`crate::cloudid`] for what is read by value and what is
+    /// only ever named.
+    ///
+    /// On by default, and unlike file contents that is not a close call: an
+    /// allowlist of identifiers a provider already writes into its own audit
+    /// log is the cheapest thing argus captures and the one that makes the
+    /// rest attributable. Off, an event says a tool ran `terraform apply`;
+    /// on, it says which account it ran against.
+    pub cloud_identity: bool,
 }
 impl Default for CaptureCfg {
     fn default() -> Self {
@@ -91,6 +102,7 @@ impl Default for CaptureCfg {
             max_field_bytes: 65536,
             truncate_mode: TruncateMode::default(),
             file_contents: FileContentsCfg::default(),
+            cloud_identity: true,
         }
     }
 }
