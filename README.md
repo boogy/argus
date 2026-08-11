@@ -79,6 +79,7 @@ argus captures everything each surface offers.
 | Session lifecycle           |             Y              |           Y           |            Y            |         Y         |           Y           |
 | Model, tokens, cost per turn |             —              |  Y (message.updated)  |            —            |         —         |     Y (turn_end)      |
 | Interactive shells (pty)    |             —              |  Y (created+exited)   |            —            |         —         |    Y (user_bash `!`)  |
+| File contents               |         Y (opt-in)         |      Y (opt-in)       |       Y (opt-in)        |    Y (opt-in)     |      Y (opt-in)       |
 
 Copilot's `userPromptTransformed` is the one row with no equivalent elsewhere,
 and the reason it is wired: it reports what was *actually* sent to the model
@@ -99,6 +100,13 @@ for the model, tokens, cost and stop reason. The `!`-prefixed shell command is
 pi's answer to opencode's pty — a command the user runs directly, which never
 passes through `tool_call`, and whose `!!` form the transcript itself never
 records either.
+
+The file-contents row is uniform across all five because it is the one feature
+that does not read a tool's vocabulary. Enrichment runs on every tool event
+whatever produced it, and picks candidates out of the input by shape — the
+file-path keys the adapters already agree on, an `apply_patch` body, an `edits`
+array — so a surface gets file capture by carrying a path, not by being on a
+list. See [File-content capture](#file-content-capture); it is off by default.
 
 A row saying `Y` means the event is recorded, not that every field in it is.
 Four that used to be read past are now kept, because each is the part of its
@@ -155,7 +163,9 @@ unset keys keep their default.
 | `capture.tool_inputs`        | `true`             | Capture tool-call input JSON. `false` → tool events still emitted (name, files, FQDNs) without the input payload.                                                                                                |
 | `capture.tool_outputs`       | `true`             | Capture tool result/output JSON on post-tool events. `false` → output field left null.                                                                                                                           |
 | `capture.assistant_messages` | `true`             | Capture assistant message text (Claude Code/Codex `Stop`, opencode `chat.message`). `false` → assistant-message events suppressed.                                                                               |
-| `capture.max_field_bytes`    | `65536`            | Per-field size cap (serialized bytes) for prompt text, assistant text, tool input/output. Oversized text gets `…[truncated]`; oversized JSON is replaced with `{"_truncated":true,"_bytes":n}`. `0` = unlimited. |
+| `capture.max_field_bytes`    | `65536`            | Per-field size cap (serialized bytes) for prompt text, assistant text, tool input/output, and each string *leaf* inside a JSON payload. Capping the leaves rather than the whole value is what keeps a large `Write` from costing its own `file_path`: the record used to say something big was written and not what. A structure that is still 16× the cap after that (or nested past 32 levels) is replaced wholesale with `{"_truncated":true,…}`. `0` = unlimited. |
+| `capture.truncate_mode`      | `head_tail`        | What survives the cap: `head` (first bytes + `…[truncated]`), `head_tail` (both ends, `…[truncated]…` between), `drop` (`[truncated]`, content discarded). `head_tail` is the default because the answer is usually at the end — a diff's outcome, a stack trace's cause — and `head` alone truncates exactly that away. Cuts land on character boundaries; a multi-byte character is never split. |
+| `capture.file_contents.*`    | off                | Capture the contents of files a tool touched. Off by default, whole table documented in [File-content capture](#file-content-capture). |
 | `redaction.enabled`          | `true`             | Run the built-in secret scrubber before anything is buffered or exported.                                                                                                                                        |
 | `redaction.extra_patterns`   | `[]`               | Additional regexes scrubbed the same way as built-ins (invalid patterns are skipped with a warning, not fatal).                                                                                                  |
 | `buffer.max_events`          | `100000`           | SQLite buffer cap; oldest events are dropped once full (offline-first, not unbounded).                                                                                                                           |
@@ -179,6 +189,77 @@ prompts = false        # metadata-only: never persist prompt text
 extra_patterns = ["ACME-[0-9]{6}"]
 ```
 
+## File-content capture
+
+A tool call records that `Write` touched `src/deploy.rs`. What it wrote is a
+different question, and the one an investigation actually asks. Turning this on
+attaches a `file_contents` array to tool events — one entry per file, each with
+the path, the action (`read`, `written`, `edited`, `patched`), where the bytes
+came from (`payload` or `disk`), the size, the mtime, a `sha256`, and the
+content when policy allows it.
+
+It is **off by default**, and deliberately so: it is the one setting that turns
+an audit trail into a copy of source code.
+
+```toml
+[capture.file_contents]
+enabled = true
+```
+
+| Key                                   | Default                                                    | Meaning                                                                                                                                                                                                      |
+| ------------------------------------- | ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `capture.file_contents.enabled`       | `false`                                                     | Master switch. Off means no `file_contents` key at all — not an empty array on every tool call in every session.                                                                                             |
+| `capture.file_contents.mode`          | `payload`                                                   | Where bytes may come from. `payload`: only what the hook already carried (a `Write`'s content, an `Edit`'s two halves, a patch body) — exact, race-free, **zero I/O**. `disk`: read the file. `both`: the payload when it carried one, the disk otherwise. |
+| `capture.file_contents.include`       | `[]`                                                        | Regexes on the path. Empty means no restriction — an `include` matching nothing would be an enabled feature that captures nothing.                                                                            |
+| `capture.file_contents.exclude`       | `node_modules`, `.git`, `*.lock`/`*.min.js`, `.env*`, `*.pem`, `.ssh/`, `*_rsa`, `*.p12` | Regexes applied after `include`; a tie goes to the exclusion. Writing your own list **replaces** these rather than adding to them — a config that states a whole policy should not silently keep ours.        |
+| `capture.file_contents.max_bytes`     | `32768`                                                     | Per file. A payload body over this is kept truncated; a file on *disk* over it is measured and not read at all (see below). Bounded by `capture.max_field_bytes` regardless.                                  |
+| `capture.file_contents.max_files`     | `10`                                                        | Per event, so one `apply_patch` across forty files cannot become forty bodies in one record.                                                                                                                  |
+| `capture.file_contents.max_total_bytes` | `262144`                                                  | Per event, across all files, and shared by both halves — `both` is not quietly twice the number written here.                                                                                                 |
+| `capture.file_contents.skip_binary`   | `true`                                                      | Drop content that is not text: invalid UTF-8, or any control byte other than tab/CR/LF in the first 8 KiB. Metadata is still recorded.                                                                        |
+| `capture.file_contents.hash`          | `true`                                                      | Record `sha256`, size and mtime **even where content is withheld**. This is what keeps an excluded file visible as *touched*, and what lets two captures of one path be told apart.                           |
+| `capture.file_contents.read_timeout_ms` | `2000`                                                    | How long one file's stat-and-read may take before the daemon stops waiting and records it as unreadable. `0` waits forever.                                                                                    |
+
+Every file that is *named* appears in the record, whether or not its content
+does. A withheld body carries a `skipped` reason — `excluded`, `too_large`,
+`binary`, `budget`, `unreadable` — which is exported as an attribute, because a
+policy excluding more than its author intended otherwise looks exactly like a
+quiet week.
+
+What the disk half will not do:
+
+- **Follow a symlink.** `/tmp/x -> ~/.ssh/id_rsa` is the oldest way to get a
+  privileged reader to fetch something on your behalf, and it walks straight
+  past an `exclude` list that matches on the path the *agent* said. The stat
+  refuses the link, and the open refuses it again (`O_NOFOLLOW`) because a stat
+  and an open are two syscalls and swapping the path in between is the whole
+  point of the gap. A refused link is reported without even its target's size.
+- **Open anything that is not a regular file.** `read()` on a fifo never
+  returns; a daemon that opened one would stop enriching events entirely.
+- **Read a file bigger than the cap.** It is measured, not truncated: reading
+  2 GiB off disk to keep 32 KiB is I/O for a prefix of a file you could not see
+  anyway. Size and mtime are still reported.
+- **Ship the contents of an excluded file.** With `hash = true` an excluded
+  file is opened, hashed, and its bytes dropped — the digest is what makes one
+  `.env` the same `.env` across forty sessions. With `hash = false` it is never
+  opened at all.
+- **Wait forever.** A read that stops returning — a network mount that goes
+  away mid-read — is abandoned after `read_timeout_ms` and reported as
+  unreadable. Nothing here can *cancel* that read (a thread parked in the
+  kernel is not interruptible from userspace); what the deadline bounds is the
+  blast radius, so one dead mount costs one stuck thread instead of every event
+  behind it.
+
+Captured bodies go through the redactor like any other field, before anything
+is buffered or exported. Two consequences worth stating plainly: the `sha256`
+is of the bytes the tool actually handled, not of the scrubbed copy — a digest
+of a redaction marker matches nothing — and a body that was truncated carries
+no digest at all, for the same reason.
+
+`disk` mode reads the file a moment *after* the tool acted, so what it records
+is the state that resulted, not necessarily the state the tool wrote. `payload`
+mode has the opposite property and no I/O; `both` is the one that answers "what
+does this file look like now" for calls that only named it.
+
 ## Privacy and redaction
 
 - Redaction runs **before** anything touches disk or the network — secrets never
@@ -200,6 +281,38 @@ extra_patterns = ["ACME-[0-9]{6}"]
   `make record-fixtures` redacts on the way into `tests/fixtures/`. See
   [docs/adding-a-tool.md](docs/adding-a-tool.md).
 
+### The spool holds un-redacted payloads on disk
+
+"Before anything touches disk" is true of the buffer and the exporter. It is
+**not** true of the hand-off spool, and the difference is worth being explicit
+about, because it is the one place a secret exists on disk in the clear.
+
+Redaction runs in the daemon. The shim runs in the host tool's process, on the
+critical path, with a 250 ms budget — it cannot compile a dozen regexes and
+walk a payload there without becoming the thing it was written to avoid. So
+when the daemon is not reachable, the shim writes the envelope to
+`<data-dir>/spool/` exactly as the tool sent it, secrets included, and the
+daemon redacts it on the way in when it drains.
+
+What bounds that window:
+
+- Spool files are written owner-only (`0600`) into a `0700` directory, so the
+  exposure is to this account and to root, not to the machine.
+- The spool exists only while the daemon is down; the shim autospawns it, and
+  a drained file is deleted only after its events reach the buffer.
+- `spool.max_bytes` caps the directory, so an unbounded outage does not become
+  an unbounded pile of un-redacted payloads.
+
+What does **not** bound it: the `capture.*` switches. Those are enforced in the
+daemon's adapters, so `capture.prompts = false` means the prompt is never
+stored or exported — it does not mean an un-drained spool file lacks it. The
+one thing they do keep out of the spool is what the daemon adds later: a file
+read off disk under `capture.file_contents` happens in the daemon's enrichment
+stage, so it never passes through a spool file at all.
+
+Treat `<data-dir>` as sensitive, on the same footing as the buffer database and
+the Codex receiver token that already live there.
+
 ## Architecture
 
 ```
@@ -214,9 +327,12 @@ extra_patterns = ["ACME-[0-9]{6}"]
                         v
                  argus daemon
                         |
-              adapter parse (per-tool)
+       Stage A: adapter parse (per-tool), one task
                         |
-                    redaction
+       Stage B: enrich — file capture, redaction, field caps
+                (blocking pool, several batches at once)
+                        |
+       Stage C: SQLite write, one task, in arrival order
                         |
               SQLite durable buffer  <-- offline-first, capped, oldest-dropped
                         |
@@ -663,7 +779,11 @@ directory; none are needed for an ordinary install.
 - No OS service management (`launchd`/`systemd`/Windows service) — the daemon
   is autospawned by the first hook invocation instead.
 - Remote config is trusted over HTTPS; no detached-signature verification yet.
-- Bash tool parsing only extracts FQDNs, not file writes via `>`/`tee`.
+- Bash tool parsing only extracts FQDNs, not file writes via `>`/`tee`. A file
+  written that way is invisible to file-content capture too — nothing names it,
+  so there is no candidate to read.
 - No Claude Code transcript-path mining for token/model usage stats.
+- The hand-off spool holds un-redacted payloads while the daemon is down — see
+  [The spool holds un-redacted payloads on disk](#the-spool-holds-un-redacted-payloads-on-disk).
 - Claude Code `MessageDisplay` and `FileChanged` are deliberately not wired —
   see the wired-hooks notes in [Per-tool fidelity](#per-tool-fidelity).

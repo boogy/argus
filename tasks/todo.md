@@ -2014,6 +2014,46 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
 
 - [ ] **T19** — Docs. Dependency: T18.
   Files: `docs/adding-a-tool.md`, `README.md`, `docs/telemetry-gaps.md`
+  Split three ways, one file each: T19a `README.md`, T19b
+  `docs/adding-a-tool.md`, T19c `docs/telemetry-gaps.md`.
+
+- [x] **T19a** — `README.md`. Dependency: T18e.
+  Files: `README.md`
+
+  What the reader could not previously learn from the README:
+
+  - **File-content capture had no documentation at all.** New section with the
+    full ten-key table, the `skipped` vocabulary, and — the part a table
+    cannot carry — the list of things the disk half refuses to do and why:
+    symlinks (two syscalls, one swappable path), non-regular files (a `read`
+    on a fifo never returns), oversized files measured rather than truncated,
+    excluded-but-hashed, and the read deadline that bounds blast radius
+    rather than pretending to cancel a parked thread.
+  - **`max_field_bytes` described the old whole-value cap.** Rewritten for
+    leaf capping, the 16× structure ceiling and the 32-level depth fallback,
+    with the reason leaves are the right unit: the record used to say
+    something large was written and not what file.
+  - **`truncate_mode` was undocumented.** Added, including why `head_tail` is
+    the default — the answer is usually at the end, which `head` cuts away.
+  - **The spool's un-redacted window was never stated.** "Redaction runs
+    before anything touches disk" is true of the buffer and the exporter and
+    false of the spool. New subsection: why (the shim's 250 ms budget on the
+    host tool's critical path), what bounds it (`0600` in a `0700` dir, the
+    file deleted only after its events reach the buffer, `spool.max_bytes`),
+    and what does *not* — the `capture.*` switches, which are enforced in the
+    daemon's adapters and so cannot shrink a file already written.
+  - **The architecture diagram still showed one parse-then-redact path.** Now
+    the three stages, including that Stage B runs several batches at once and
+    Stage C writes in arrival order.
+  - Fidelity table gains a file-contents row, uniform across all five tools
+    because enrichment runs on every tool event and picks candidates by input
+    *shape*, not by tool name — verified against the single call site in
+    `enrich.rs`, which is adapter-agnostic.
+
+  Three claims in the draft were wrong and were corrected against the code
+  rather than shipped: the `FileAction` spellings, `looks_binary`'s rule (any
+  control byte but tab/CR/LF in the first 8 KiB — not a ratio), and the claim
+  that `capture.prompts = false` keeps prompts out of the spool.
 
 ## Dependency graph (from the plan)
 
