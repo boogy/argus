@@ -289,6 +289,19 @@ mod tests {
         );
     }
 
+    /// A command is not a file, and `files` is what a reviewer reads to answer
+    /// "what did this session touch". A shell command mentions paths in a
+    /// dozen shapes, none of them a claim that the tool opened one, so a key
+    /// carrying a command must never join `FILE_KEYS` — the list would fill
+    /// with strings that only look like paths, and file capture keys off the
+    /// same list.
+    #[test]
+    fn a_shell_command_is_not_a_file_path() {
+        let input = serde_json::json!({"command": "cat /etc/passwd > /tmp/out.txt"});
+        assert!(extract_files_for_tool("Bash", &input).is_empty());
+        assert!(extract_files_for_tool("shell", &input).is_empty());
+    }
+
     /// The same path reached through both sources — a path key and a patch
     /// header — must be counted once. It arrives non-adjacent whenever the
     /// patch touches anything else first, which is the ordinary case.

@@ -2114,6 +2114,43 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
   nothing matches `mcp__` (#6 open), and `extract_fqdns` still runs on input
   only (#4 open).
 
+- [x] **T19d** — the claim the docs made that the code does not keep.
+  Files: `src/filecap.rs`, `src/config.rs`, `src/adapters/mod.rs`, `README.md`
+
+  Writing T19 meant reading the doc comments next to the code, and three of
+  them promised coverage that does not exist. `ContentMode::Disk` said it
+  catches "a `Bash` with a `>` redirect, a `sed -i`" — it cannot: candidates
+  come from path keys, a `Bash` payload carries a command, and no mode reaches
+  a file nothing names. Two more (the module header, `Candidate`) offered a
+  `Grep` as the example of a call disk mode answers for, but the candidate for
+  a content-less call is gated on `t.contains("read")`, so a `Grep` produces
+  nothing at all.
+
+  This is the failure mode the docs task exists to catch: an operator reads
+  "disk mode catches shell redirects", turns it on, and believes a blind spot
+  is covered. Comments corrected to what the code does, and the *reason* the
+  gate is right recorded next to it — a `Grep`'s `path` is a directory to
+  search and a `command` is not a path, so opening either spends I/O on
+  strings an untrusted agent chose that were never claimed to be files.
+
+  Two tests, because a corrected comment drifts back:
+
+  - `a_call_that_does_not_claim_to_have_read_a_file_opens_nothing` — a
+    redirect target and a `Grep` path, both existing on disk, across all three
+    modes. The existing test covered payload mode only, where "the payload
+    carried no content" is answer enough; disk mode is the half that would
+    have to go looking.
+  - `a_shell_command_is_not_a_file_path` in `adapters` — `FILE_KEYS` must
+    never gain a command-carrying key, which would fill `files` with strings
+    that only look like paths and, since capture keys off the same list, turn
+    them into reads.
+
+  Mutations: widening the read gate to `if true`, deleting it outright, and
+  adding `command` to `FILE_KEYS` — all three bite. The third is why the
+  second test exists: it survived the first run, because the read gate rather
+  than `FILE_KEYS` is what stops a `Bash` candidate, so nothing anywhere
+  asserted what `files` may contain.
+
 ## Dependency graph (from the plan)
 
 ```

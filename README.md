@@ -263,9 +263,17 @@ the body. The `files` list is unaffected: such an event still *names* every
 file and describes none of them.
 
 `disk` mode reads the file a moment *after* the tool acted, so what it records
-is the state that resulted, not necessarily the state the tool wrote. `payload`
-mode has the opposite property and no I/O; `both` is the one that answers "what
-does this file look like now" for calls that only named it.
+is the state that resulted, not necessarily the state the tool wrote — which is
+also how it shows a change the tool did not make, such as a formatter that ran
+afterwards. `payload` mode has the opposite property and no I/O; `both` is the
+one that answers "what does this file look like now" for a call that named a
+file without quoting it.
+
+"Named without quoting it" means the read family specifically — a tool whose
+name says it read the file. A `Grep`'s `path` is a directory to search and a
+`Bash`'s `command` is not a path at all, so neither produces anything to
+capture in any mode. Opening those would mean spending I/O on strings that were
+never claimed to be files, chosen by the agent being monitored.
 
 ## Privacy and redaction
 

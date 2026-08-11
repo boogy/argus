@@ -185,9 +185,13 @@ pub enum ContentMode {
     /// it is what the tool said it was about to do.
     #[default]
     Payload,
-    /// Read the file. Catches what payloads never mention — a `Bash` with a
-    /// `>` redirect, a `sed -i`, an external formatter — at the cost of
-    /// reading the state a moment *after* the tool acted.
+    /// Read the file. Answers for the calls a payload describes but does not
+    /// quote — a `Read`, a `Grep`, an edit whose result nothing carried — and
+    /// shows changes the tool did not make, like a formatter that ran after
+    /// it, at the cost of reading the state a moment *after* the tool acted.
+    ///
+    /// It does not reach a file the payload never named: a `Bash` with a `>`
+    /// redirect carries a command, not a path, and no mode captures that.
     Disk,
     Both,
 }

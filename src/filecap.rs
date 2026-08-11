@@ -7,10 +7,15 @@
 //!
 //! The capture around it comes in two halves that answer different questions.
 //! The payload half is what the tool *said* it would write: exact, race-free,
-//! and already in memory. The disk half is what is *there*, which is the only
-//! half that sees a `Bash` with a `>` redirect, a `sed -i`, or a formatter that
-//! ran afterwards — at the cost of real I/O against paths an untrusted agent
+//! and already in memory. The disk half is what is *there* — the only half
+//! that answers for a call which merely named a file — a `Read` — and the only
+//! one that shows a change the tool did not make, like a formatter that ran
+//! after the write, at the cost of real I/O against paths an untrusted agent
 //! chose.
+//!
+//! Neither half sees a file the payload never names. A `Bash` with a `>`
+//! redirect or a `sed -i` carries a command, not a path, so there is no
+//! candidate to read and disk mode is not the way around that.
 
 use crate::config::{CaptureCfg, ContentMode, FileContentsCfg};
 use crate::event::{Event, EventKind, FileAction, FileSnapshot, SkipReason, SnapshotSource};
@@ -112,8 +117,13 @@ impl PathFilter {
 /// carried for it.
 ///
 /// `content` is `None` for a call that names a file without quoting it — a
-/// `Read`, a `Grep`. Payload mode has nothing to say about those, which is
-/// exactly where disk mode earns its keep.
+/// `Read`. Payload mode has nothing to say about those, which is exactly where
+/// disk mode earns its keep.
+///
+/// Only the read family produces one: the tool has to say it read the file.
+/// A `Grep`'s `path` is a directory to search, and a `Bash`'s `command` is not
+/// a path at all — treating either as a file to open would spend I/O on paths
+/// that were never claimed to be files.
 #[derive(Debug)]
 pub struct Candidate {
     pub path: String,
@@ -289,9 +299,9 @@ pub fn capture(event: &mut Event, capture: &CaptureCfg, filter: &PathFilter) {
             Some(body) if cfg.mode != ContentMode::Disk => {
                 payload_snapshot(&c, &body, capture, filter, &mut budget)
             }
-            // A call that only named a file — a `Read`, a `Grep` — is where
-            // disk mode earns its keep, and the one thing payload mode has
-            // nothing to say about.
+            // A call that only named a file — a `Read` — is where disk mode
+            // earns its keep, and the one thing payload mode has nothing to
+            // say about.
             _ if cfg.mode != ContentMode::Payload => {
                 disk_snapshot(&c, cwd.as_deref(), capture, filter, &mut budget)
             }
@@ -1451,5 +1461,46 @@ mod tests {
         let snap = read_of(dir.path(), "a.rs", &c);
         assert_eq!(snap.content.as_deref(), Some("let a = 1;"));
         assert_eq!(snap.skipped, None);
+    }
+
+    /// The documented blind spot, asserted rather than described, and asserted
+    /// in every mode — the earlier version of this checked payload mode only,
+    /// where "no content in the payload" is answer enough. Disk mode is the
+    /// one that would have to go looking.
+    ///
+    /// A shell redirect writes a file no key in the payload names, and a
+    /// `Grep`'s `path` is a directory to search rather than a file it read.
+    /// Both files exist on disk here, so what the test pins is that nothing
+    /// goes looking for them: `FILE_KEYS` gaining `command`, or the read gate
+    /// widening to any tool that mentions a path, would start opening paths
+    /// taken from an untrusted string, and this is where that shows up.
+    #[test]
+    fn a_call_that_does_not_claim_to_have_read_a_file_opens_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let redirected = dir.path().join("out.txt");
+        std::fs::write(&redirected, "written by a redirect").unwrap();
+        let searched = dir.path().join("hay.rs");
+        std::fs::write(&searched, "needle").unwrap();
+        let cmd = format!("echo hi > {}", redirected.display());
+
+        for capture in [on(|_| {}), disk(), on(|fc| fc.mode = ContentMode::Both)] {
+            let mode = capture.file_contents.mode;
+            for (tool, input) in [
+                ("Bash", serde_json::json!({ "command": cmd })),
+                (
+                    "Grep",
+                    serde_json::json!({ "path": dir.path().to_string_lossy() }),
+                ),
+                (
+                    "Grep",
+                    serde_json::json!({ "path": searched.to_string_lossy() }),
+                ),
+            ] {
+                assert!(
+                    snaps(tool, input, &capture).is_empty(),
+                    "{tool} produced a snapshot in {mode:?} mode"
+                );
+            }
+        }
     }
 }
