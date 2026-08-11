@@ -92,13 +92,74 @@ impl Listener {
     }
 
     pub async fn accept_loop(self, tx: Ingress) {
+        let mut backoff = AcceptBackoff::new();
         loop {
-            let Ok(conn) = self.inner.accept().await else {
-                continue;
-            };
-            let tx = tx.clone();
-            tokio::spawn(async move { handle(conn, tx).await });
+            match self.inner.accept().await {
+                Ok(conn) => {
+                    backoff.reset();
+                    let tx = tx.clone();
+                    tokio::spawn(async move { handle(conn, tx).await });
+                }
+                Err(e) => backoff.wait("hook socket", &e.to_string()).await,
+            }
         }
+    }
+}
+
+/// What a failing `accept` costs before it is tried again.
+///
+/// An `accept` that fails once — a connection reset between the kernel's
+/// handshake and our call — is ordinary and must not cost a visible pause, so
+/// the first wait is small. An `accept` that fails *persistently* is the case
+/// this exists for: descriptor exhaustion (`EMFILE`/`ENFILE`) does not clear
+/// on its own, and the loop that simply retried it spun a whole core, silently,
+/// in the one process whose job is to keep recording through an incident. The
+/// ceiling is a second because that is long enough to cost nothing and short
+/// enough that recovery — a handler finishing and returning its descriptor —
+/// is picked up promptly.
+const ACCEPT_BACKOFF_MIN_MS: u64 = 10;
+const ACCEPT_BACKOFF_MAX_MS: u64 = 1_000;
+
+/// Exponential backoff for an accept loop, shared by the hook socket and the
+/// Codex OTLP receiver because both had the same silent spin.
+pub(crate) struct AcceptBackoff {
+    ms: u64,
+}
+
+impl AcceptBackoff {
+    pub(crate) fn new() -> Self {
+        Self { ms: 0 }
+    }
+
+    /// Called after an accepted connection: the listener is healthy, so the
+    /// next failure starts from the bottom again.
+    pub(crate) fn reset(&mut self) {
+        self.ms = 0;
+    }
+
+    /// Advance to the next wait and return it.
+    ///
+    /// Split out of [`AcceptBackoff::wait`] so the schedule can be asserted
+    /// without a test that sleeps for it — a test that instead recomputed the
+    /// formula would pass against any implementation, including one that never
+    /// waits at all.
+    fn next_ms(&mut self) -> u64 {
+        self.ms = (self.ms * 2).clamp(ACCEPT_BACKOFF_MIN_MS, ACCEPT_BACKOFF_MAX_MS);
+        self.ms
+    }
+
+    /// Log the failure and sleep. Every retry is logged: at the ceiling that is
+    /// one line per second, which is what makes a wedged listener visible
+    /// rather than merely quiet — the failure this replaced was silent.
+    ///
+    /// Takes the error already rendered, rather than something `Display`: an
+    /// `io::Error` is not `Sync`, and a future holding a reference to one
+    /// across its `await` is not `Send` — which makes the whole accept loop
+    /// unspawnable.
+    pub(crate) async fn wait(&mut self, what: &str, detail: &str) {
+        let ms = self.next_ms();
+        tracing::warn!("{what}: accept failed, retrying in {ms}ms: {detail}");
+        tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
     }
 }
 
@@ -566,6 +627,39 @@ mod tests {
             event: None,
             payload: serde_json::json!({"hook_event_name": "UserPromptSubmit", "prompt": text}),
         }
+    }
+
+    /// A failing `accept` has to cost time, or the loop that retries it is a
+    /// spin.
+    ///
+    /// `EMFILE` is the case: it does not clear by itself, so the `else
+    /// { continue }` this replaced burned a core silently — in the process
+    /// whose whole purpose is to keep recording while something is going
+    /// wrong. What is pinned here is that every wait is non-zero, that it
+    /// grows, that it stops growing, and that a healthy accept puts it back —
+    /// so a "fix" that logs the error and still retries immediately fails.
+    #[test]
+    fn a_failing_accept_always_waits_before_the_next_try() {
+        let mut b = AcceptBackoff::new();
+        let waits: Vec<u64> = (0..12).map(|_| b.next_ms()).collect();
+        assert!(
+            waits.iter().all(|&w| w > 0),
+            "a wait of zero is a spin: {waits:?}"
+        );
+        assert!(
+            waits.windows(2).any(|w| w[1] > w[0]),
+            "the wait never grew, so a persistent failure never backs off: {waits:?}"
+        );
+        assert_eq!(
+            *waits.last().unwrap(),
+            ACCEPT_BACKOFF_MAX_MS,
+            "the wait must stop growing, or recovery is never noticed: {waits:?}"
+        );
+
+        // And a connection that does get accepted means the listener is
+        // healthy again: the next hiccup must not inherit the ceiling.
+        b.reset();
+        assert_eq!(b.next_ms(), ACCEPT_BACKOFF_MIN_MS);
     }
 
     /// The queue is bounded by bytes as well as rows, and reaching the byte

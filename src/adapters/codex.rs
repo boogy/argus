@@ -189,12 +189,20 @@ const MAX_BODY_BYTES: usize = 10_000_000;
 /// Minimal HTTP/1.1 server: enough for Codex's OTLP/JSON POSTs on localhost.
 pub async fn serve(listener: TcpListener, tx: Ingress, token: String) {
     let token: Arc<str> = token.into();
+    let mut backoff = crate::ipc::AcceptBackoff::new();
     loop {
-        let Ok((stream, _)) = listener.accept().await else {
-            continue;
-        };
-        let tx = tx.clone();
-        tokio::spawn(handle_conn(stream, tx, token.clone()));
+        match listener.accept().await {
+            Ok((stream, _)) => {
+                backoff.reset();
+                let tx = tx.clone();
+                tokio::spawn(handle_conn(stream, tx, token.clone()));
+            }
+            // Same hazard as the hook socket's accept loop, and the same
+            // reason it matters more here than the count of connections
+            // suggests: this receiver and that socket share one process and
+            // one descriptor table, so a spin on either starves both.
+            Err(e) => backoff.wait("codex otlp receiver", &e.to_string()).await,
+        }
     }
 }
 
