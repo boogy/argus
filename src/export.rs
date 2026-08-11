@@ -424,12 +424,6 @@ impl std::fmt::Display for Rejection {
     }
 }
 
-/// `4xx` means the collector read the request and said no — except for the two
-/// that ask for the same request again later. `408 Request Timeout` and `429
-/// Too Many Requests` are refusals of the *moment*, not of the payload, and a
-/// busy collector answering 429 is the case backoff exists for; treating those
-/// as permanent would throw away exactly the batches sent when a fleet is
-/// noisiest.
 /// The request body under the `gzip` content coding — the gzip container, not
 /// bare deflate, which is what OTLP/HTTP receivers decode under that name.
 fn gzip(body: &[u8]) -> std::io::Result<Vec<u8>> {
@@ -439,6 +433,12 @@ fn gzip(body: &[u8]) -> std::io::Result<Vec<u8>> {
     enc.finish()
 }
 
+/// `4xx` means the collector read the request and said no — except for the two
+/// that ask for the same request again later. `408 Request Timeout` and `429
+/// Too Many Requests` are refusals of the *moment*, not of the payload, and a
+/// busy collector answering 429 is the case backoff exists for; treating those
+/// as permanent would throw away exactly the batches sent when a fleet is
+/// noisiest.
 fn is_permanent(status: u16) -> bool {
     (400..500).contains(&status) && status != 408 && status != 429
 }

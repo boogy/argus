@@ -291,8 +291,9 @@ impl Buffer {
 /// `LENGTH` on a TEXT value counts *characters*, and every size in this file is
 /// quoted in bytes — to the user in `buffer.max_bytes`, and to a collector that
 /// rejects on request size. A buffer of CJK or emoji-bearing prompts was
-/// therefore holding up to three times the bytes it was told to. The `CAST` to
-/// BLOB is what makes `LENGTH` count octets.
+/// therefore holding several times the bytes it was told to — three per
+/// character for CJK, four for an emoji, each of which `LENGTH` counts as one.
+/// The `CAST` to BLOB is what makes it count octets.
 fn total_bytes(conn: &Connection) -> Result<u64> {
     let n: i64 = conn.query_row(
         "SELECT COALESCE(SUM(LENGTH(CAST(body AS BLOB))), 0) FROM events",
@@ -621,7 +622,8 @@ mod tests {
     /// Every size here is quoted in bytes — to the operator in
     /// `buffer.max_bytes`, and to a collector that rejects on request size.
     /// SQLite's `LENGTH` counts characters, so a buffer of CJK or emoji-bearing
-    /// prompts held up to three times what it was told to.
+    /// prompts held several times what it was told to — three bytes per
+    /// character for CJK, four for an emoji.
     #[test]
     fn sizes_are_counted_in_bytes_not_characters() {
         let _dir = tmp();
