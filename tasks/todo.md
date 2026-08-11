@@ -221,7 +221,7 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
     failed the matching test. The copier is injected, so the locked-file and
     truncated-write paths are exercised on a platform that has neither.
 
-- [ ] **T7** — Durability and loss visibility. Dependency: T6.
+- [x] **T7** — Durability and loss visibility. Dependency: T6.
   Files: `src/buffer.rs`, `src/spool.rs`, `src/config.rs`, `src/event.rs`, `src/hook.rs`
   Split four ways, one behavioural change each — the row bundles four of them
   across five files, past the sizing rule. T7a = loss visibility for buffer
@@ -399,7 +399,7 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
     Also fixed in passing: T7b's `stdin_truncated` detail string had a run of
     ~25 spaces in it from an unescaped multi-line `format!`.
 
-- [ ] **T8** — Transport security. Dependency: T3.
+- [x] **T8** — Transport security. Dependency: T3.
   Files: `src/paths.rs`, `src/ipc.rs`, `src/adapters/codex.rs`, `src/install.rs`, `Cargo.toml`
   Split by the sizing rule — four independent behavioral changes across two
   transports, one of which (the Windows DACL) has an unresolved feasibility
@@ -654,7 +654,7 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
     `r.needle` in place of `r.what` failed it too — the "never prints the token"
     assertion has teeth rather than being documentation.
 
-- [ ] **T9** — Export correctness. Dependency: T3.
+- [x] **T9** — Export correctness. Dependency: T3.
   Files: `src/export.rs`, `src/buffer.rs`, `Cargo.toml`
   Three behavioral changes, so three commits under the sizing rule.
   - [x] **T9a** — Permanent vs transient export failures. Files:
@@ -748,7 +748,7 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
     on the compressed leg — the uncompressed leg's media type was unguarded, so
     the test now asserts it on both.
 
-- [ ] **T10** — Claude Code field-mismatch fixes. Dependency: T4, T5.
+- [x] **T10** — Claude Code field-mismatch fixes. Dependency: T4, T5.
   Files: `src/adapters/claude_code.rs`, `src/adapters/mod.rs`, `src/harness/claude_code.rs`
   Split under the sizing rule: T10a wrong field names on the non-tool arms,
   T10b `Meta` gains `tool_use_id`/`effort`, T10c `ToolUse` gains
@@ -877,7 +877,7 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
     counted twice inflates every "how often was this touched" query, which is
     the query the `files` array exists to answer. One mutation, bites.
 
-- [ ] **T11** — Codex parity. Dependency: T4, T5.
+- [x] **T11** — Codex parity. Dependency: T4, T5.
   Files: `src/adapters/codex.rs`, `src/harness/codex.rs`, `src/integrity.rs`
   Split under the sizing rule — five independent behavioral changes: T11a
   `SessionEnd`, T11b kill-switch detection in `check`, T11c install refreshes
@@ -986,7 +986,7 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
     hooks only once that `.codex/` layer is trusted there per user, and anyone
     who can push can delete what this writes.
 
-- [ ] **T12** — Copilot parity. Dependency: T4, T5.
+- [x] **T12** — Copilot parity. Dependency: T4, T5.
   Files: `src/adapters/copilot.rs`, `src/harness/copilot.rs`
   Split per the plan's sizing rule into four independent behavioral changes:
   T12a `userPromptTransformed`, T12b `disableAllHooks` detection in `check`,
@@ -1097,7 +1097,7 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
     Two mutations, both bite: `sessionEnd` back to `HookEvent::new`, and
     `ev.timeout` back to a literal `10`.
 
-- [ ] **T13** — opencode + shared TS transport. Dependency: T4, T5.
+- [x] **T13** — opencode + shared TS transport. Dependency: T4, T5.
   Files: `plugins/opencode/argus.ts` + new shared TS transport, `src/adapters/opencode.rs`, `src/harness/opencode.rs`
   - [x] **T13a** — Stop sending the same event twice. Files:
     `plugins/opencode/argus.ts`, new `tests/opencode_plugin.rs`, new
@@ -1395,7 +1395,7 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
   is equivalent as long as the cwd is read first, so it was rewritten to put
   the throwing read first, and then it bit.
 
-- [ ] **T15** — `install --managed`. Dependency: T10, T11, T12, T13, T14.
+- [x] **T15** — `install --managed`. Dependency: T10, T11, T12, T13, T14.
   Files: `src/harness/*` (`Scope::Managed` arms), `src/install.rs`, `src/integrity.rs`, `src/main.rs`
 
   Split under the ~6-file rule: T15a the scope itself, T15b Claude Code's
@@ -1648,7 +1648,7 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
   `docs/telemetry-gaps.md` is deliberately untouched: the gaps it lists are what
   T16–T18 close, so it is annotated after them, in T19.
 
-- [ ] **T16** — Pipeline restructure (A/B/C stages). Dependency: T7.
+- [x] **T16** — Pipeline restructure (A/B/C stages). Dependency: T7.
   Files: `src/daemon.rs`, new `src/enrich.rs`, `src/ipc.rs`
 
   Split into T16a (byte-bounded ingress) and T16b (the A/B/C stage split with
@@ -1729,7 +1729,7 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
   `the_pipeline_redacts_before_anything_reaches_the_buffer` closes it. All seven
   bite now.
 
-- [ ] **T17** — Truncation rework. Dependency: T16.
+- [x] **T17** — Truncation rework. Dependency: T16.
   Files: `src/adapters/mod.rs`, `src/config.rs`, `src/redact.rs`
 
   Split into T17a (recursive per-leaf capping) and T17b (`truncate_mode` and
@@ -1792,7 +1792,7 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
 
   Nine mutations, all biting on the first run.
 
-- [ ] **T18** — File-content capture. Dependency: T17.
+- [x] **T18** — File-content capture. Dependency: T17.
   Files: `src/enrich.rs`, `src/config.rs`, `src/event.rs`, `src/redact.rs`, `src/export.rs`, `Cargo.toml`
 
   Split four ways per the sizing rule — it is four behavioural changes, not
