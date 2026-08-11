@@ -40,7 +40,10 @@ pub fn legacy_data_dir() -> Option<PathBuf> {
 pub enum Migration {
     /// No legacy directory, or a buffer already exists at the new location.
     Skipped,
-    /// Every file copied, read back identical, and the source removed.
+    /// Every file copied and read back identical. Removing the source is
+    /// attempted after that and its failure ignored: the data is already safe
+    /// at the new location, and a directory that outlives the move is litter,
+    /// not a loss.
     Moved { files: usize },
     /// Some files did not make it. What copied is usable; the source is left
     /// exactly as it was, because nothing gets deleted that was not verified.
@@ -127,8 +130,10 @@ fn collect_files(dir: &Path, base: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// Streamed rather than slurped: the buffer is capped in rows, not bytes, so
-/// a busy install can bring a database far too large to hold twice in memory.
+/// Streamed rather than slurped: `buffer.max_bytes` bounds the stored event
+/// text, not the file that holds it, and its default leaves room for a database
+/// of a few hundred megabytes before indices, a WAL and freed pages are counted.
+/// Reading both sides in to compare them would be twice that, at daemon start.
 fn same_bytes(a: &Path, b: &Path) -> std::io::Result<bool> {
     let mut a = std::io::BufReader::new(std::fs::File::open(a)?);
     let mut b = std::io::BufReader::new(std::fs::File::open(b)?);

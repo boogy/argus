@@ -91,10 +91,18 @@ pub struct Event {
 /// Metadata and content are deliberately separable. The default `exclude` list
 /// keeps `.env`, keys and lockfiles out of *content* while still recording
 /// that they were read or written — "an agent opened your SSH key" is the
-/// finding, and it does not require shipping the key to reach it. So every
-/// field except `content` is populated even when `content` is `None`, and
+/// finding, and it does not require shipping the key to reach it. So `path`,
+/// `action` and `source` are recorded whatever becomes of `content`, and
 /// `skipped` says which rule made that call rather than leaving the omission
 /// indistinguishable from a file that was empty.
+///
+/// The rest is narrower, and the difference is where the bytes came from. A
+/// disk snapshot stats the file before deciding anything, so an excluded one
+/// still carries its size and mtime, and — when `hash` is on, which is what
+/// opens it at all — its digest. A payload snapshot has no stat to reuse: its
+/// `bytes` is the length of what the tool said it would write, and an exclusion
+/// stops it before the digest. A file nothing could be learned about at all,
+/// `unreadable`, reports zero bytes, because zero is what was measured.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FileSnapshot {
     pub path: String,
@@ -486,7 +494,10 @@ pub fn visit_strings(kind: &mut EventKind, f: &mut impl FnMut(&mut String)) {
                 f(i);
             }
         }
-        // Enumerated, fixed-vocabulary fields: nothing user-authored.
+        // Argus's own prose or an identifier — in neither case free text a
+        // secret hides in. An integrity `detail` is written by this crate, and
+        // a `FileChange` path is the same kind of identifier as `files` above:
+        // scrubbing it would corrupt what every query joins on.
         EventKind::FileChange { path: _, action: _ }
         | EventKind::Integrity {
             status: _,

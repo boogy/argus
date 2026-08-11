@@ -88,8 +88,11 @@ impl Buffer {
 
     /// Adopt the caps from a reloaded config.
     ///
-    /// Same clamps as `open`: a cap of zero would empty the buffer on every
-    /// write, which is a config typo away from turning the audit trail off.
+    /// Same clamps as `open`. `max_events` is the one that needs it: at zero the
+    /// row trim's `OFFSET 0` takes every row on every write, which is a config
+    /// typo away from turning the audit trail off. `max_bytes` is clamped for
+    /// symmetry rather than out of need — `trim_to_bytes` exempts the newest row,
+    /// so zero there already keeps the event that was just written.
     pub fn set_limits(&self, cfg: &crate::config::BufferCfg) {
         use std::sync::atomic::Ordering::Relaxed;
         self.max_events.store(cfg.max_events.max(1), Relaxed);
