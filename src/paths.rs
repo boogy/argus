@@ -122,7 +122,17 @@ fn collect_files(dir: &Path, base: &Path, out: &mut Vec<PathBuf>) {
         return;
     };
     for path in entries.flatten().map(|e| e.path()) {
-        if path.is_dir() {
+        // `symlink_metadata`, not `is_dir`: the latter follows the link, so a
+        // symlink pointing at its own ancestor is walked through again and
+        // again, stopping only when the accumulated path hits the platform's
+        // length limit — hundreds of copies of every real file, each of which
+        // `migrate` then dutifully copies into the new data directory before
+        // deleting the source. A symlink is treated as an ordinary entry
+        // instead: one pointing at a file copies its contents, and one pointing
+        // at a directory fails to copy, so it lands in `left` and leaves the
+        // migration `Partial` with the source intact — the safe direction.
+        let is_dir = std::fs::symlink_metadata(&path).is_ok_and(|md| md.is_dir());
+        if is_dir {
             collect_files(&path, base, out);
         } else if let Ok(rel) = path.strip_prefix(base) {
             out.push(rel.to_path_buf());
@@ -484,6 +494,43 @@ mod tests {
             from.path().join("events.db-wal").exists(),
             "nothing unverified may be deleted"
         );
+    }
+
+    /// A symlink in the legacy directory is an entry to copy, never a directory
+    /// to descend into. One that points at its own ancestor is otherwise
+    /// re-walked until the path runs out of length, so a one-file legacy
+    /// directory migrates as hundreds of nested duplicates — and the source is
+    /// deleted afterwards, because every one of those copies verified.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_directory_is_not_descended_into() {
+        let from = legacy_tree();
+        // spool/loop -> the legacy root itself: the cycle a user creates by
+        // symlinking an old data directory back into its own subtree.
+        std::os::unix::fs::symlink(from.path(), from.path().join("spool/loop")).unwrap();
+
+        let mut files = Vec::new();
+        collect_files(from.path(), from.path(), &mut files);
+        assert!(
+            files.contains(&PathBuf::from("spool/loop")),
+            "the link itself must be recorded, not skipped: {files:?}"
+        );
+        assert!(
+            // `starts_with` is component-wise, so the link itself matches too.
+            !files
+                .iter()
+                .any(|f| f.starts_with("spool/loop") && f.as_path() != Path::new("spool/loop")),
+            "walked through the link into the tree it points back at: {files:?}"
+        );
+
+        // And the migration keeps the source, because the link cannot be copied.
+        let to = tempfile::tempdir().unwrap();
+        let result = migrate(from.path(), to.path(), &real_copy);
+        assert!(
+            matches!(result, Migration::Partial { .. }),
+            "a directory that could not be fully copied must not be removed: {result:?}"
+        );
+        assert!(from.path().join("events.db").exists());
     }
 
     /// The copy half is the easy half. This is the one that matters: a copier
