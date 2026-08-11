@@ -81,8 +81,16 @@ pub fn extract_patch_files(patch: &str) -> Vec<String> {
 /// longer matches the pattern that would have removed it, so what survived was
 /// a fragment of a live credential nobody could see was one. Parsing therefore
 /// caps to `max + this`, the redactor sees whole tokens, and [`cap_mode`]
-/// trims the rest away afterwards. Bounded work either way: 512 bytes is far
-/// more than the longest pattern here can match.
+/// trims the rest away afterwards. Bounded work either way — the slack is a
+/// constant, not a share of the input.
+///
+/// 512 bytes covers the shapes that fit in a field: an API key, a bearer
+/// token, an access-key id. It does not cover a PEM block, which runs to
+/// thousands of bytes and so can still be cut in two; that is why
+/// [`crate::redact`] carries a second rule matching the
+/// `-----BEGIN … PRIVATE KEY-----` header on its own. A severed key is at
+/// least named as one — its remaining base64 still ships, which is the honest
+/// limit of capping before scrubbing.
 pub const REDACTION_HEADROOM: usize = 512;
 
 fn working(max: usize) -> usize {
@@ -168,9 +176,13 @@ const STRUCTURE_CEILING: usize = 16;
 
 /// Deepest nesting that is walked rather than dropped.
 ///
-/// `serde_json` refuses to parse past 128 levels, so nothing arriving over the
-/// socket can exceed this; it exists because `cap_leaves` recurses, and a
-/// stack overflow is not an error the daemon can report.
+/// `cap_leaves` recurses, and a stack overflow is not an error the daemon can
+/// report — hence a bound. `serde_json` stops parsing at 128 levels, so that
+/// is the deepest thing the socket can deliver, but 32 is the limit that
+/// actually bites: a payload nested forty deep parses fine and then loses
+/// everything below level 32 to a `depth` marker. Set far below any nesting a
+/// real tool input reaches, because the cost of hitting it is bounded and the
+/// cost of not having it is not.
 const MAX_DEPTH: usize = 32;
 
 /// Cap every string inside `v`, keeping the structure around them.

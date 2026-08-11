@@ -7,8 +7,11 @@ use std::sync::{Arc, RwLock};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
-/// Parses either a flattened OTLP logRecord (`{"event_name": ..., "attributes": {...}}`)
-/// or a raw Codex `notify` payload (top-level `{"type": "agent-turn-complete", ...}`,
+/// Three payload shapes reach this, from three different transports: a
+/// Claude-shaped hook payload (`hook_event_name`), which is handed straight to
+/// the shared parser; a flattened OTLP logRecord
+/// (`{"event_name": ..., "attributes": {...}}`) from the receiver below; and a
+/// raw Codex `notify` payload (top-level `{"type": "agent-turn-complete", ...}`,
 /// delivered via `argus hook --source codex`).
 pub fn parse(env: &Envelope, capture: &CaptureCfg) -> Vec<Event> {
     let p = &env.payload;
@@ -67,7 +70,10 @@ pub fn parse(env: &Envelope, capture: &CaptureCfg) -> Vec<Event> {
                 input,
                 output: Value::Null,
                 error: None,
-                // Codex's hook payloads carry neither.
+                // Codex's OTLP attributes carry neither. This arm is the
+                // receiver's path only — a payload with `hook_event_name`
+                // left for the shared parser several lines above, which reads
+                // both fields when they are present.
                 duration_ms: None,
                 interrupted: false,
                 files: vec![],
@@ -122,8 +128,10 @@ pub fn existing_token() -> Option<String> {
 /// into Codex's `[otel]` headers — rotating it on every daemon start would
 /// leave every already-wired Codex talking to a receiver that now refuses it.
 ///
-/// 256 bits, as two v4 UUIDs: `uuid` is already in the tree, and pulling in an
-/// RNG crate to produce the same thing would be new supply chain for nothing.
+/// Two v4 UUIDs, so 244 random bits — 128 each, less the six that the version
+/// and variant fields pin to fixed values. `uuid` is already in the tree, and
+/// pulling in an RNG crate to reach a round 256 would be new supply chain for
+/// a difference nothing can exploit.
 pub fn shared_token() -> anyhow::Result<String> {
     if let Some(token) = existing_token() {
         return Ok(token);
@@ -229,9 +237,10 @@ async fn handle_conn_inner(mut stream: tokio::net::TcpStream, tx: Ingress, token
             return;
         }
     };
-    // content_length <= MAX_BODY_BYTES and headers_end <= MAX_BODY_BYTES
-    // (enforced by the header-growth cap above), so this addition cannot
-    // overflow usize.
+    // `content_length` is at most MAX_BODY_BYTES, checked above, and
+    // `headers_end` is within one 4 KiB read of it: the growth check runs on
+    // every iteration that does not find the terminator. Both are therefore
+    // around ten megabytes, so this addition cannot overflow usize.
     let body_end = headers_end + content_length;
     while buf.len() < body_end {
         let Ok(n) = stream.read(&mut tmp).await else {
