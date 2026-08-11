@@ -214,10 +214,14 @@ pub fn parse(env: &Envelope, capture: &CaptureCfg) -> Vec<Event> {
                 }),
             })];
             // A subagent's final answer is assistant text, so it is recorded
-            // as one rather than buried in a session detail blob: it is
-            // capped, redacted and suppressed by `capture.assistant_messages`
-            // like every other assistant message. Copilot also spells it
-            // `last_assistant_message` in the snake_case payloads.
+            // as one rather than buried in a session detail blob: capped and
+            // redacted like any other assistant message. What
+            // `capture.assistant_messages` off means here is not what it means
+            // in the other adapters — they drop the event, this keeps the row
+            // and withholds the body, because a subagent having answered is
+            // worth knowing even when what it said is not recorded. Copilot
+            // spells the field `last_assistant_message` in the snake_case
+            // payloads.
             if name == "subagentStop"
                 && let Some(text) = sfield(p, "response", "last_assistant_message")
                 && !text.is_empty()
@@ -549,10 +553,10 @@ mod tests {
         // grouping at all.
         assert_eq!(events[0].meta.agent_type.as_deref(), Some("reviewer"));
         assert_eq!(events[0].meta.agent_id.as_deref(), Some("sub-7f21"));
-        // The answer is assistant text and is recorded as such — capped,
-        // redacted and suppressible like every other assistant message,
-        // instead of riding along inside a session blob that none of that
-        // applies to.
+        // The answer is assistant text and is recorded as such — capped and
+        // redacted like any other, and reduced to a placeholder when capture
+        // is off — instead of riding along inside a session blob that none of
+        // that applies to.
         assert!(
             matches!(&events[1].kind, EventKind::AssistantMessage { text } if text == "no blocking issues"),
             "{:?}",
