@@ -400,6 +400,53 @@ pub async fn fetch_remote(
     Ok(Some((body, new_etag)))
 }
 
+/// One poll's worth of "the server sent a new body": validate it, cache it,
+/// hot-swap the shared config.
+///
+/// Split out of [`poll_loop`] so the one thing that matters here — that `etag`
+/// advances only once the body is actually on disk — can be asserted without
+/// running a loop whose shortest cycle is 30 seconds.
+fn apply_remote(
+    shared: &std::sync::RwLock<Config>,
+    etag: &mut Option<String>,
+    body: &str,
+    new_etag: Option<String>,
+) {
+    // Gate the cache write on Config-shape validity, not just TOML syntax: a
+    // type-mismatched remote body must not overwrite the last-known-good cache.
+    match body
+        .parse::<toml::Table>()
+        .and_then(|t| t.try_into::<Config>())
+    {
+        Ok(_) => {
+            let cache = crate::paths::cached_remote_config_path();
+            let tmp = cache.with_extension("tmp");
+            match std::fs::write(&tmp, body).and_then(|()| std::fs::rename(&tmp, &cache)) {
+                Ok(()) => {
+                    // Only now. An ETag committed ahead of the write makes
+                    // every later poll a 304 for a body that was never cached,
+                    // so a single failed write — a full disk, a data directory
+                    // an admin has locked down — stops fleet policy from *ever*
+                    // being applied again, on the quiet path where 304 means
+                    // "you already have it". The daemon would look healthy
+                    // while running on local config alone.
+                    *etag = new_etag;
+                    *shared.write().unwrap() = load();
+                    tracing::info!("remote config applied");
+                }
+                Err(e) => {
+                    let _ = std::fs::remove_file(&tmp);
+                    tracing::warn!(
+                        "could not cache remote config at {cache:?}, \
+                         refetching next poll: {e}"
+                    );
+                }
+            }
+        }
+        Err(e) => tracing::warn!("rejecting invalid remote config: {e}"),
+    }
+}
+
 /// Daemon task: poll remote config, atomically cache, hot-swap shared config.
 pub async fn poll_loop(shared: std::sync::Arc<std::sync::RwLock<Config>>) {
     let mut etag: Option<String> = None;
@@ -411,27 +458,7 @@ pub async fn poll_loop(shared: std::sync::Arc<std::sync::RwLock<Config>>) {
         if let Some(url) = url {
             match fetch_remote(&url, etag.as_deref()).await {
                 Ok(Some((body, new_etag))) => {
-                    // Gate the cache write on Config-shape validity, not just TOML
-                    // syntax: a type-mismatched remote body must not overwrite the
-                    // last-known-good cache.
-                    match body
-                        .parse::<toml::Table>()
-                        .and_then(|t| t.try_into::<Config>())
-                    {
-                        Ok(_) => {
-                            etag = new_etag;
-                            let cache = crate::paths::cached_remote_config_path();
-                            let tmp = cache.with_extension("tmp");
-                            if std::fs::write(&tmp, &body)
-                                .and_then(|_| std::fs::rename(&tmp, &cache))
-                                .is_ok()
-                            {
-                                *shared.write().unwrap() = load();
-                                tracing::info!("remote config applied");
-                            }
-                        }
-                        Err(e) => tracing::warn!("rejecting invalid remote config: {e}"),
-                    }
+                    apply_remote(&shared, &mut etag, &body, new_etag);
                 }
                 Ok(None) => {}
                 Err(e) => tracing::warn!("remote config fetch failed (using cache): {e}"),
@@ -675,6 +702,55 @@ mod tests {
         assert!(body.contains("prompts = false"));
         assert_eq!(etag.as_deref(), Some("\"v1\""));
         assert!(fetch_remote(&url, etag.as_deref()).await.unwrap().is_none());
+    }
+
+    #[test]
+    fn a_failed_cache_write_does_not_burn_the_etag() {
+        let dir = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("ARGUS_DATA_DIR", dir.path());
+        }
+        let cache = crate::paths::cached_remote_config_path();
+        // Occupy the cache path with a non-empty directory: the rename cannot
+        // land on it on any platform, which is the disk-full/locked-down case
+        // without needing either.
+        std::fs::create_dir_all(cache.join("blocker")).unwrap();
+
+        let shared = std::sync::RwLock::new(Config::default());
+        let mut etag: Option<String> = None;
+        apply_remote(
+            &shared,
+            &mut etag,
+            "[capture]\nprompts = false\n",
+            Some("\"v1\"".into()),
+        );
+        assert_eq!(
+            etag, None,
+            "the etag advanced past a body that never reached the cache, so every \
+             later poll 304s and this policy is never applied"
+        );
+        assert!(
+            shared.read().unwrap().capture.prompts,
+            "config was hot-swapped from a cache write that failed"
+        );
+
+        // Same body once the path is writable: now it must stick.
+        std::fs::remove_dir_all(&cache).unwrap();
+        apply_remote(
+            &shared,
+            &mut etag,
+            "[capture]\nprompts = false\n",
+            Some("\"v1\"".into()),
+        );
+        assert_eq!(etag.as_deref(), Some("\"v1\""));
+        assert!(!shared.read().unwrap().capture.prompts);
+        assert!(
+            !cache.with_extension("tmp").exists(),
+            "tmp file left behind"
+        );
+        unsafe {
+            std::env::remove_var("ARGUS_DATA_DIR");
+        }
     }
 
     #[test]
