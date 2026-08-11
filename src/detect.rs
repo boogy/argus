@@ -12,10 +12,17 @@
 //! *generic* binary name only counts once something else corroborates it.
 //!
 //! Everything the algorithm reads from the outside world arrives in [`Env`],
-//! **including the platform**. Nothing here branches on `cfg!`, so the Windows
-//! layout is exercised by the suite on Linux and macOS too. The alternative —
-//! `cfg!(windows)` inline — produces code that only Windows CI ever executes,
-//! which is how the untested-path bugs got here in the first place.
+//! **including the platform**. Every decision below is taken against
+//! [`Env::platform`], a field a test sets, so the Windows layout is exercised
+//! by the suite on Linux and macOS too. The alternative — `cfg!(windows)`
+//! inline — produces code that only Windows CI ever executes, which is how the
+//! untested-path bugs got here in the first place.
+//!
+//! Compile-time platform checks survive in exactly two places, both of which
+//! ask about the *host* rather than the layout: [`Platform::host`], which is
+//! how the real machine names itself, and the mode-bit read in
+//! `Env::is_executable`, which cannot be compiled where the trait it needs
+//! does not exist.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
