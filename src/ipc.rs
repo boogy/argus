@@ -145,8 +145,8 @@ impl Ingress {
     }
 
     /// Same channel with limits a test can reach in milliseconds. Not a knob:
-    /// nothing outside tests picks its own bounds, so the daemon cannot be
-    /// wired to an unbounded one by editing a call site.
+    /// no config key reaches these bounds, and `channel` is the only caller
+    /// outside tests, so no deployment can widen them.
     pub fn with_limits(rows: usize, bytes: usize) -> (Ingress, IngressRx) {
         // Permits are counted in `u32`, so a budget wider than that is not
         // expressible; clamping is the only reading that never wraps a charge

@@ -65,7 +65,9 @@ pub async fn run() -> Result<()> {
     let (tx, mut rx) = ipc::Ingress::channel();
     tokio::spawn(listener.accept_loop(tx.clone()));
 
-    // Codex OTLP receiver (Task 13 wires real events into tx; stub for now).
+    // Codex has no hook surface and speaks OTLP instead, so its events arrive
+    // over a loopback HTTP listener rather than the socket. Same ingress queue
+    // either way, so everything downstream is unaware of the difference.
     tokio::spawn(crate::adapters::codex::otlp_listener(
         shared_cfg.clone(),
         tx.clone(),
