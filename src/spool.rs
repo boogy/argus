@@ -24,16 +24,16 @@ fn enforce_cap(dir: &std::path::Path, incoming: u64, max_bytes: u64) -> u64 {
         .filter(|e| e.path().extension().is_some_and(|x| x == "jsonl"))
         .filter_map(|e| {
             let m = e.metadata().ok()?;
-            Some((m.modified().ok()?, m.len(), e.path()))
+            Some((m.modified().ok()?, e.file_name(), m.len(), e.path()))
         })
         .collect();
-    let mut total: u64 = files.iter().map(|f| f.1).sum();
+    let mut total: u64 = files.iter().map(|f| f.2).sum();
     if total + incoming <= max_bytes {
         return 0;
     }
-    files.sort_by_key(|f| f.0);
+    files.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
     let mut dropped = 0;
-    for (_, len, path) in files {
+    for (_, _, len, path) in files {
         if total + incoming <= max_bytes {
             break;
         }
@@ -86,13 +86,35 @@ pub fn append(envelope: &Envelope) -> Result<()> {
         envelope.dropped += dropped;
         body = serde_json::to_vec(&envelope)?;
     }
-    let file = dir.join(format!("{}.jsonl", uuid::Uuid::new_v4()));
+    let file = dir.join(spool_name());
     std::fs::write(&file, body)?;
     #[cfg(unix)]
     {
         std::fs::set_permissions(&file, std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
     }
     Ok(())
+}
+
+/// A spool file name that carries its own place in the timeline.
+///
+/// The sort that replays these leads on mtime, which is not enough on its own:
+/// Windows takes last-write-time from the ~15 ms system clock tick, so a burst
+/// of spooled envelopes — precisely what a daemon outage produces — lands with
+/// identical timestamps and would otherwise replay in whatever order `read_dir`
+/// happened to yield. The name breaks that tie, so it is built to sort:
+/// nanoseconds since the epoch first, then a per-process counter that separates
+/// two writes a coarse clock reported at the same instant, then a UUID so two
+/// processes spooling together still get distinct files.
+///
+/// Zero-padded because the sort is lexicographic; the nanosecond field stays
+/// nineteen digits until the year 2262.
+fn spool_name() -> String {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("{nanos:019}-{seq:012}-{}.jsonl", uuid::Uuid::new_v4())
 }
 
 /// How many spool files one pass takes.
@@ -125,20 +147,22 @@ pub fn take(limit: usize) -> Vec<(std::path::PathBuf, Envelope)> {
     };
     // Oldest first: the spool is a timeline, and a backlog drained newest-first
     // would keep re-reading the same tail while the oldest files starve behind
-    // the batch bound. Names are UUIDs and carry no order, so mtime it is.
+    // the batch bound. mtime leads and the name breaks its ties — see
+    // [`spool_name`], which exists to make that tiebreak mean something.
     let mut files: Vec<_> = entries
         .flatten()
         .map(|e| e.path())
         .filter(|p| p.extension().is_some_and(|e| e == "jsonl"))
         .map(|p| {
             let mtime = std::fs::metadata(&p).and_then(|m| m.modified()).ok();
-            (mtime, p)
+            let name = p.file_name().map(std::ffi::OsStr::to_os_string);
+            (mtime, name, p)
         })
         .collect();
-    files.sort_by_key(|f| f.0);
+    files.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
 
     let mut out = Vec::new();
-    for (_, path) in files {
+    for (_, _, path) in files {
         if out.len() >= limit {
             break;
         }
@@ -252,9 +276,11 @@ mod tests {
                 event: None,
                 payload: serde_json::json!({ "n": i }),
             };
+            // Deliberately no sleep between writes. This used to pause 10 ms so
+            // that coarse filesystem timestamps could still order the files,
+            // which meant the ordering the daemon actually depends on was never
+            // the thing under test.
             append(&env).unwrap();
-            // Coarse filesystem timestamps would make the sort meaningless.
-            std::thread::sleep(std::time::Duration::from_millis(10));
         }
         let batch = take(2);
         assert_eq!(batch.len(), 2, "the batch bound was ignored");
@@ -265,6 +291,42 @@ mod tests {
             5,
             "take must not delete what it hands out"
         );
+    }
+
+    /// The property the sort's tiebreak rests on, asserted where every platform
+    /// can see it: on a filesystem whose timestamps are fine enough, mtime alone
+    /// gets the order right and the tiebreak is never reached, so a test of
+    /// `take` cannot tell whether the names sort at all. Windows is where that
+    /// stops being true — and where nobody is watching.
+    #[test]
+    fn spool_names_sort_into_the_order_they_were_written() {
+        let _dir = setup();
+        for i in 0..5u32 {
+            let env = Envelope {
+                source: "codex".into(),
+                received_at: chrono::Utc::now(),
+                truncated: false,
+                dropped: 0,
+                event: None,
+                payload: serde_json::json!({ "n": i }),
+            };
+            append(&env).unwrap();
+        }
+        let mut paths: Vec<_> = std::fs::read_dir(crate::paths::spool_dir())
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .collect();
+        paths.sort();
+        let order: Vec<u64> = paths
+            .iter()
+            .map(|p| {
+                let text = std::fs::read_to_string(p).unwrap();
+                let env: Envelope = serde_json::from_str(&text).unwrap();
+                env.payload["n"].as_u64().unwrap()
+            })
+            .collect();
+        assert_eq!(order, [0, 1, 2, 3, 4], "names sorted out of write order");
     }
 
     fn env(n: u32) -> Envelope {
