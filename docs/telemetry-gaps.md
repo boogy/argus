@@ -4,6 +4,11 @@ Code review of the adapters, extractors, plugin shim, and event model
 (2026-07-11), focused on two questions: what session context and what network
 activity is available at each hook surface but not yet captured.
 
+Items closed since are annotated in place with the task that closed them and
+what the implementation decided where it differed from the fix sketched here.
+Everything without a **Closed** note is still open; [Status](#status) lists
+both sides so a reader does not have to scan for the absence of a label.
+
 ## Network connections
 
 ### 1. FQDN extraction only sees three top-level keys
@@ -80,6 +85,11 @@ Writes via `>`, `>>`, `tee`, and `cp/mv/rm` targets are invisible to
 `extract_files_for_tool`. A light shell-word pass over Bash commands for
 redirection targets and file-verb arguments would close most of it.
 
+Still open, and it costs more than it did: file-content capture keys off the
+same `FILE_KEYS` path spellings, so a file written through a redirect is not
+merely unnamed — it is the one write whose *contents* no capture mode can
+reach, because nothing in the payload says which file to read.
+
 ## Session context
 
 ### 8. Event timestamps are wrong for spooled events
@@ -92,6 +102,14 @@ spooled while the daemon is down get stamped hours/days late when drained.
 **Fix:** thread `env.received_at` into the adapters and use it as `ts`
 (keep parse time as a secondary field if useful). This is the single biggest
 fidelity fix in this list.
+
+**Closed (T6b).** Not threaded into the adapters: every event an envelope
+produces has its `ts` overwritten with `envelope.received_at` at the single
+point where parsing returns (`harness/mod.rs`). Threading it through five
+adapters would have made correctness depend on each of them remembering, and
+the one that forgot would be invisible — a plausible timestamp is the failure
+mode nobody notices. Parse time is not kept as a second field: it answers no
+question about the session, only about the daemon.
 
 ### 9. opencode drops model, token, and cost data it already receives
 
@@ -147,6 +165,17 @@ capture it. With a call id, tool latency, hung-tool detection, and
 output-to-input joins all become simple queries. Without it, only heuristic
 (same session, adjacent seq) pairing is possible.
 
+**Closed for three of five.** Claude Code carries `tool_use_id` (T10b) and,
+since it reports one directly, `duration_ms` (T10c) — a measured duration
+beats one subtracted from two timestamps stamped on different sides of a
+socket. opencode maps `callID` (T13d), pi its tool-call id (T14a); opencode's
+permission events carry the same id, so a prompt joins the call it gated
+rather than being matched by adjacency.
+
+Still open for Codex and Copilot, whose payloads have not been audited for an
+id — see #16. Neither reports a duration either, so those two are the pairs
+that remain heuristic.
+
 ### 12. Transcript mining (already a known limitation, high value)
 
 `meta.transcript_path` is captured for Claude Code and Copilot but never read.
@@ -170,6 +199,10 @@ tool version (Claude Code sends `version`/`model` in some payloads; Copilot has
 a version field), the monitor's own version (already on the OTLP scope but not
 in `body`), and parent PID/tty for correlating simultaneous sessions.
 
+**Partly closed.** `meta.model` is carried where the surface reports it, and
+the per-event process spawn behind `host`/`username` is gone (T6a). Tool
+version, monitor version in the body, and PID/tty remain open.
+
 ### 15. Codex OTLP: unmapped event names land in `raw`
 
 Only `codex.user_prompt`, `codex.tool_decision`, `codex.tool_result`,
@@ -190,13 +223,62 @@ into `Meta`.
 
 - `hostname()` (`src/event.rs:142`) spawns the `hostname` process **per
   event**. Cache it in a `OnceLock`.
+
+  **Closed (T6a).** Host *and* username behind one `OnceLock`, since both were
+  paying per event and both are constant for the life of a process.
+
 - `extract_files_for_tool` calls `out.dedup()` without sorting — only adjacent
   duplicates are removed (apply_patch touching the same file twice keeps
   both). Sort first or dedup via a set, preserving first-seen order if needed.
+
+  **Closed (T10f).** Sorted before the dedup. First-seen order was not worth
+  preserving: nothing consumes the list positionally, and a sorted list is the
+  one that compares equal across two captures of the same call.
+
 - `EventKind::Permission.action` doc comment says `"requested" | "denied" |
 "replied"` but opencode also emits `"updated"` — update the comment.
 
-## Suggested priority
+  **Closed, the other way round.** The comment was right and the adapter was
+  wrong: `permission.updated` *is* opencode's ask — it carries the tool type,
+  the pattern matched, and the call gated. The mapping to `requested` lived in
+  an arm for `permission.asked`, an event opencode has never emitted, so every
+  permission request on opencode arrived labelled `updated` and a query for
+  requests matched nothing. `updated` now maps to `requested`.
+
+## Status
+
+Closed:
+
+- **#8** spooled-event timestamps (T6b) — the item this list called its single
+  biggest fidelity fix.
+- **#9** opencode model/tokens/cost (T13e), as an `EventKind::Usage` rather
+  than a JSON blob on the session.
+- **#10** opencode `cwd` and `callID` (T13d).
+- **#11** call ids, for Claude Code (T10b), opencode (T13d) and pi (T14a),
+  plus a reported tool duration on Claude Code (T10c).
+- **#14** in part: the per-event `hostname` spawn (T6a).
+- Both remaining small fixes: the unsorted `dedup` (T10f) and opencode's
+  permission action, which turned out to be an adapter bug rather than a stale
+  comment.
+
+Open, in the order this list would still do them:
+
+1. **#1/#2/#3 network extraction** — recursive scan of nested strings,
+   non-HTTP schemes and schemeless hosts, and port/scheme retention. Untouched,
+   and still the group that answers "what did the agent talk to".
+2. **#4** output scanning, **#5** Codex file extraction (`files: vec![]` is
+   still literal in `codex.rs`), **#6** MCP server tagging.
+3. **#7** Bash file activity — now also the one write file capture cannot see.
+4. **#11** for Codex and Copilot, and **#16**, which is the audit that would
+   tell us whether their payloads carry an id at all.
+5. **#12** transcript mining, **#13** git enrichment, **#15** Codex `raw`
+   inventory, and the rest of **#14**.
+
+Not on this list because it postdates it: file-content capture, which answers
+"what did the agent write" — a question this review did not ask. Off by
+default; see the README.
+
+## Suggested priority (as first written)
 
 1. **#8 spool timestamps** — silent data-quality bug.
 2. **#1/#2/#3 network extraction** (recursive scan, non-HTTP schemes, ports) —

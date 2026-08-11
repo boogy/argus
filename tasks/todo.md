@@ -2012,7 +2012,7 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
     which is the case that only exists on a real filesystem. The mechanism it
     depends on is covered directly, against a genuine read that never returns.
 
-- [ ] **T19** — Docs. Dependency: T18.
+- [x] **T19** — Docs. Dependency: T18.
   Files: `docs/adding-a-tool.md`, `README.md`, `docs/telemetry-gaps.md`
   Split three ways, one file each: T19a `README.md`, T19b
   `docs/adding-a-tool.md`, T19c `docs/telemetry-gaps.md`.
@@ -2084,6 +2084,35 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
   And: cap adapter input with the shared `cap_value`/`cap_text` only. They keep
   both ends and leave `REDACTION_HEADROOM`; a hand-rolled truncation hands the
   capture a middle that the final `head_tail` cap will present as a tail.
+
+- [x] **T19c** — `docs/telemetry-gaps.md`. Dependency: T19b.
+  Files: `docs/telemetry-gaps.md`
+
+  The review listed sixteen gaps and three small fixes; the waves closed some
+  of them, and a reader had no way to tell which without reading the code. Each
+  closed item now carries the task that closed it *and* what the implementation
+  decided where it diverged from the fix sketched in 2026-07:
+
+  - #8 (T6b) — not threaded through five adapters as proposed, overwritten once
+    where parsing returns, because a plausible wrong timestamp is the failure
+    mode nobody notices. Parse time not kept: it describes the daemon.
+  - #11 — closed for three of five, with the two that remain named (Codex,
+    Copilot) rather than left to inference.
+  - The permission-action fix is recorded as the inverse of what was filed: the
+    comment was right and the adapter was wrong, and the arm that held the only
+    mapping to `requested` was keyed on an event opencode never emits.
+  - #14 marked *partly* closed — the `hostname` spawn is gone, the version and
+    PID/tty additions are not.
+
+  Two things a status list is for, and both are stated: #7 costs more than it
+  did, because file capture keys off the same path spellings and so a redirect
+  write is the one write no mode can read; and file-content capture itself is
+  *not* on this list, because the review never asked what the agent wrote.
+
+  Verified each claim against the code before writing it rather than against
+  the commit subjects: `files: vec![]` is still literal in `codex.rs` (#5 open),
+  nothing matches `mcp__` (#6 open), and `extract_fqdns` still runs on input
+  only (#4 open).
 
 ## Dependency graph (from the plan)
 
