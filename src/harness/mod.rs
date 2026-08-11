@@ -463,13 +463,13 @@ pub fn quote_program(exe: &str, style: CmdStyle) -> String {
             let escaped = exe.replace('`', "``").replace('"', "`\"");
             format!("& \"{escaped}\"")
         }
-        CmdStyle::Shell if cfg!(windows) => {
-            // cmd.exe has no escape for `"` inside a quoted string; paths
-            // containing one are not representable, and Windows forbids `"`
-            // in filenames anyway.
-            format!("\"{}\"", exe.replace('"', ""))
-        }
         CmdStyle::Shell => {
+            // POSIX quoting whatever host wrote the file. The only consumer is
+            // the `bash` key of a Copilot hook entry, which bash runs; the
+            // machine argus installed from does not get a say in that, and
+            // quoting for the local shell instead would put cmd.exe syntax in a
+            // field bash is going to read. A Windows path survives it: the
+            // backslashes are literal inside single quotes.
             if exe
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || "._-/".contains(c))
@@ -2124,16 +2124,21 @@ mod tests {
             "/usr/local/bin/argus",
             "a plain path stays readable"
         );
-        if !cfg!(windows) {
-            assert_eq!(
-                quote_program("/opt/my apps/argus", CmdStyle::Shell),
-                "'/opt/my apps/argus'"
-            );
-            assert_eq!(
-                quote_program("/opt/it's/argus", CmdStyle::Shell),
-                r"'/opt/it'\''s/argus'"
-            );
-        }
+        assert_eq!(
+            quote_program("/opt/my apps/argus", CmdStyle::Shell),
+            "'/opt/my apps/argus'"
+        );
+        assert_eq!(
+            quote_program("/opt/it's/argus", CmdStyle::Shell),
+            r"'/opt/it'\''s/argus'"
+        );
+        // Asserted on every host, not just Unix ones: the quoting belongs to
+        // the shell that will run the command, and installing from Windows does
+        // not change which shell that is.
+        assert_eq!(
+            quote_program(r"C:\Program Files\argus\argus.exe", CmdStyle::Shell),
+            r"'C:\Program Files\argus\argus.exe'"
+        );
     }
 
     /// The bug: `format!("{} hook …", exe)` on a path with a space produced a
