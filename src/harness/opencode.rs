@@ -123,6 +123,9 @@ impl Harness for OpenCode {
             // fallback binary itself at runtime, so there is no baked-in path
             // for `check` to resolve.
             commands: Vec::new(),
+            // Code the runtime loads into its own process: anything on disk
+            // that this binary did not write is a finding.
+            exact: true,
         }]
     }
 

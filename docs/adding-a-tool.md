@@ -100,6 +100,16 @@ so give it something falsifiable per artifact:
   leave it empty for a file that reaches the daemon without invoking the
   binary. A test asserts every marker really is in the contents `install`
   writes, so a bad marker fails the suite rather than every user's `check`.
+  Set `exact` when the host tool *executes* the file — the opencode plugin,
+  the pi extension — and `check` additionally requires it to be byte-identical
+  to what this binary writes, reporting both sha256 prefixes when it is not.
+  Markers alone cannot cover this: they constrain the substrings they name and
+  nothing else, so a plugin with every marker intact and a payload appended is
+  code running inside the agent's process. Leave `exact` false for a file the
+  tool only reads whose schema documents keys argus does not write — Copilot's
+  `hooks/argus.json` takes a `disableAllHooks` beside argus's hooks — and
+  falsify those through their contents instead. `exact` also catches a plugin
+  left behind by an older argus, which keeps every marker.
 - `TomlEdit` — set `argv_tail` when the value is an argv array starting with
   the argus binary, and `check` compares the trailing arguments element-wise
   and resolves element 0. Otherwise `ours_markers` is used as a substring test.

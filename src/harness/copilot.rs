@@ -136,6 +136,10 @@ impl Harness for Copilot {
             ),
             markers,
             commands,
+            // Data Copilot reads, and its schema documents keys argus does
+            // not write (`disableAllHooks`). Checked through its hook
+            // entries and kill switches rather than its bytes.
+            exact: false,
         }]
     }
 

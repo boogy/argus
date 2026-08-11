@@ -406,6 +406,15 @@ the Codex receiver token that already live there.
   as one — `check` looks for a marker from each, and the plugin test runs the
   composed file rather than either fragment.
 
+  Because the composed file is embedded in the binary rather than read from
+  disk at install time, `check` can hold the installed copy to it exactly: the
+  plugin and the pi extension must be byte-identical to what this binary
+  writes, and a mismatch is reported with both sha256 prefixes. Markers alone
+  would not be enough for a file a runtime loads as code — every marker
+  survives having a payload appended after them — and the same comparison
+  names the quieter case, a plugin left over from an older argus that keeps
+  its markers while speaking an older frame to the daemon.
+
   opencode discovers plugins under `plugin/` *or* `plugins/` — both spellings
   are in its own documentation — so argus writes into whichever the config
   directory already has, preferring the one that already holds an `argus.ts`.
