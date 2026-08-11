@@ -86,6 +86,70 @@ pub struct Event {
     pub kind: EventKind,
 }
 
+/// What one file looked like at the moment a tool touched it.
+///
+/// Metadata and content are deliberately separable. The default `exclude` list
+/// keeps `.env`, keys and lockfiles out of *content* while still recording
+/// that they were read or written — "an agent opened your SSH key" is the
+/// finding, and it does not require shipping the key to reach it. So every
+/// field except `content` is populated even when `content` is `None`, and
+/// `skipped` says which rule made that call rather than leaving the omission
+/// indistinguishable from a file that was empty.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FileSnapshot {
+    pub path: String,
+    pub action: FileAction,
+    /// Size of the file as touched, not of `content` — those differ whenever
+    /// `truncated` is set, and the difference is the point.
+    pub bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mtime: Option<DateTime<Utc>>,
+    /// Where the bytes came from. A payload snapshot is exactly what the tool
+    /// said it would write; a disk snapshot is what was there when the daemon
+    /// looked, which is a slightly later and racier question.
+    pub source: SnapshotSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skipped: Option<SkipReason>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FileAction {
+    Written,
+    Edited,
+    Read,
+    Patched,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SnapshotSource {
+    Payload,
+    Disk,
+}
+
+/// Why `content` is absent. A closed set rather than a free-form string: these
+/// are what a query groups by when asking "what is this deployment not
+/// capturing, and is that the config or a failure?"
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkipReason {
+    /// An `exclude` pattern matched, or `include` did not.
+    Excluded,
+    Binary,
+    TooLarge,
+    /// Missing, unreadable, a symlink, or the read timed out.
+    Unreadable,
+    /// The per-event file or byte budget was already spent.
+    Budget,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum EventKind {
@@ -128,6 +192,14 @@ pub enum EventKind {
         interrupted: bool,
         files: Vec<String>,
         fqdns: Vec<String>,
+        /// What the files in this call actually contained.
+        ///
+        /// `serde(default)` is what keeps rows already sitting in a buffer
+        /// readable after an upgrade: the daemon that reads them may be newer
+        /// than the one that wrote them, and a buffer that cannot be drained
+        /// is a buffer that grows until the disk cap deletes evidence.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        file_contents: Vec<FileSnapshot>,
     },
     Skill {
         name: String,
@@ -314,13 +386,26 @@ pub fn visit_strings(kind: &mut EventKind, f: &mut impl FnMut(&mut String)) {
             // secret, so neither is visited.
             duration_ms: _,
             interrupted: _,
+            // Paths, hostnames and hashes: extracted from fields that are
+            // themselves visited, and none of them is free text a secret can
+            // hide in. Scrubbing them would corrupt the identifiers every
+            // query joins on.
             files: _,
             fqdns: _,
+            file_contents,
         } => {
             visit_json_strings(input, f);
             visit_json_strings(output, f);
             if let Some(err) = error {
                 f(err);
+            }
+            for snap in file_contents {
+                // Whole files, read off disk or lifted out of a payload —
+                // the single largest concentration of credentials argus
+                // handles, and the reason capture is off by default.
+                if let Some(c) = &mut snap.content {
+                    f(c);
+                }
             }
         }
         // `name`/`agent_type` are tool identifiers, not user content.
@@ -495,6 +580,7 @@ mod tests {
                 interrupted: false,
                 files: vec!["/repo/a.rs".into()],
                 fqdns: vec![],
+                file_contents: vec![],
             },
         );
         let s = serde_json::to_string(&e).unwrap();
@@ -528,11 +614,21 @@ mod tests {
             "source":"claude-code","session_id":null,"cwd":null,
             "type":"tool_use","tool":"Write","phase":"pre","input":{},"files":[],"fqdns":[]}"#;
         let e: Event = serde_json::from_str(old).unwrap();
-        let EventKind::ToolUse { output, error, .. } = &e.kind else {
+        let EventKind::ToolUse {
+            output,
+            error,
+            file_contents,
+            ..
+        } = &e.kind
+        else {
             panic!()
         };
         assert!(output.is_null());
         assert!(error.is_none());
+        // The rows already in somebody's buffer when they upgrade. A buffer
+        // that cannot be drained grows until the disk cap starts deleting the
+        // oldest evidence in it.
+        assert!(file_contents.is_empty());
         assert!(e.meta.is_empty());
 
         let old_session = r#"{"id":"x","ts":"2026-07-11T00:00:00Z","host":"h","username":"u",
@@ -540,6 +636,96 @@ mod tests {
             "type":"session","action":"Stop"}"#;
         let e: Event = serde_json::from_str(old_session).unwrap();
         assert!(matches!(&e.kind, EventKind::Session { detail, .. } if detail.is_null()));
+    }
+
+    /// A snapshot has two shapes — one with content, one that says why there
+    /// is none — and both have to survive the buffer.
+    #[test]
+    fn file_snapshots_round_trip_in_both_shapes() {
+        let captured = FileSnapshot {
+            path: "/repo/a.rs".into(),
+            action: FileAction::Written,
+            bytes: 12,
+            sha256: Some("abc123".into()),
+            mtime: Some(chrono::Utc::now()),
+            source: SnapshotSource::Payload,
+            content: Some("fn main() {}".into()),
+            truncated: true,
+            skipped: None,
+        };
+        let withheld = FileSnapshot {
+            path: "/repo/.env".into(),
+            action: FileAction::Read,
+            bytes: 400,
+            sha256: Some("def456".into()),
+            mtime: None,
+            source: SnapshotSource::Disk,
+            content: None,
+            truncated: false,
+            skipped: Some(SkipReason::Excluded),
+        };
+        let e = Event::new(
+            "claude-code",
+            None,
+            None,
+            EventKind::ToolUse {
+                tool: "Write".into(),
+                phase: "post".into(),
+                input: serde_json::json!({}),
+                output: serde_json::Value::Null,
+                error: None,
+                duration_ms: None,
+                interrupted: false,
+                files: vec![],
+                fqdns: vec![],
+                file_contents: vec![captured.clone(), withheld.clone()],
+            },
+        );
+        let v = serde_json::to_value(&e).unwrap();
+        assert_eq!(v["file_contents"][1]["skipped"], "excluded");
+        assert_eq!(v["file_contents"][1]["action"], "read");
+        assert_eq!(v["file_contents"][1]["source"], "disk");
+        // The withheld one still carries what a query needs to know the file
+        // was touched at all — that is the whole point of separating them.
+        assert_eq!(v["file_contents"][1]["sha256"], "def456");
+        assert!(v["file_contents"][1].get("content").is_none());
+
+        let back: Event = serde_json::from_str(&serde_json::to_string(&e).unwrap()).unwrap();
+        let EventKind::ToolUse { file_contents, .. } = &back.kind else {
+            panic!()
+        };
+        assert_eq!(file_contents[0], captured);
+        assert_eq!(file_contents[1], withheld);
+    }
+
+    /// Capture is off by default, so almost every tool call in almost every
+    /// deployment has no snapshots. An empty array on each of them is bytes
+    /// through the buffer, the 4 MiB export body and the collector, forever,
+    /// to say nothing.
+    #[test]
+    fn a_call_that_captured_nothing_carries_no_snapshot_key() {
+        let e = Event::new(
+            "claude-code",
+            None,
+            None,
+            EventKind::ToolUse {
+                tool: "Bash".into(),
+                phase: "pre".into(),
+                input: serde_json::json!({}),
+                output: serde_json::Value::Null,
+                error: None,
+                duration_ms: None,
+                interrupted: false,
+                files: vec![],
+                fqdns: vec![],
+                file_contents: vec![],
+            },
+        );
+        let v = serde_json::to_value(&e).unwrap();
+        assert!(
+            v.get("file_contents").is_none(),
+            "an empty snapshot list must not be serialized: {v}"
+        );
     }
 
     #[test]
@@ -638,6 +824,7 @@ mod tests {
                 interrupted: false,
                 files: vec![],
                 fqdns: vec![],
+                file_contents: vec![],
             },
         );
         let v = serde_json::to_value(&e).unwrap();

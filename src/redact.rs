@@ -173,11 +173,56 @@ mod tests {
                 interrupted: false,
                 files: vec![],
                 fqdns: vec![],
+                file_contents: vec![],
             },
         );
         let out = r().scrub_event(e);
         let s = serde_json::to_string(&out).unwrap();
         assert!(!s.contains("ghp_AbCdEf"));
+    }
+
+    /// Captured file content is the largest concentration of credentials
+    /// argus handles, and `docs/adding-a-tool.md` names this as the field an
+    /// author forgets. The `path` beside it deliberately survives untouched:
+    /// it is an identifier every query joins on, not free text.
+    #[test]
+    fn captured_file_content_is_scrubbed() {
+        let secret = "ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789";
+        let e = crate::event::Event::new(
+            "claude-code",
+            None,
+            None,
+            crate::event::EventKind::ToolUse {
+                tool: "Write".into(),
+                phase: "post".into(),
+                input: serde_json::Value::Null,
+                output: serde_json::Value::Null,
+                error: None,
+                duration_ms: None,
+                interrupted: false,
+                files: vec![],
+                fqdns: vec![],
+                file_contents: vec![crate::event::FileSnapshot {
+                    path: "/repo/deploy.sh".into(),
+                    action: crate::event::FileAction::Written,
+                    bytes: 40,
+                    sha256: None,
+                    mtime: None,
+                    source: crate::event::SnapshotSource::Payload,
+                    content: Some(format!("export TOKEN={secret}")),
+                    truncated: false,
+                    skipped: None,
+                }],
+            },
+        );
+        let out = r().scrub_event(e);
+        let crate::event::EventKind::ToolUse { file_contents, .. } = &out.kind else {
+            panic!()
+        };
+        let content = file_contents[0].content.as_deref().unwrap();
+        assert!(!content.contains("ghp_AbCdEf"), "leaked: {content}");
+        assert!(content.contains("[REDACTED:"), "no marker: {content}");
+        assert_eq!(file_contents[0].path, "/repo/deploy.sh");
     }
 
     #[test]
@@ -262,6 +307,7 @@ mod tests {
                 interrupted: false,
                 files: vec![],
                 fqdns: vec![],
+                file_contents: vec![],
             },
         ];
         for kind in cases {

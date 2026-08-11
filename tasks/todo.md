@@ -1795,6 +1795,41 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
 - [ ] **T18** — File-content capture. Dependency: T17.
   Files: `src/enrich.rs`, `src/config.rs`, `src/event.rs`, `src/redact.rs`, `src/export.rs`, `Cargo.toml`
 
+  Split four ways per the sizing rule — it is four behavioural changes, not
+  one: T18a the wire shape, T18b the path matcher, T18c payload capture,
+  T18d disk capture.
+
+- [x] **T18a** — `FileSnapshot` on the wire. Dependency: T17b.
+  Files: `src/event.rs`, `src/export.rs`, `src/redact.rs`, and a one-line
+  addition at each of the five adapters' `ToolUse` construction sites.
+
+  The shape, the scrubbing and the export, landed together and with no
+  producer yet — deliberately. `docs/adding-a-tool.md` already warns that
+  `scrub_event` and `export.rs` are the two sites an author forgets, and a
+  commit that adds the field without them is exactly the bug the plan is
+  written to avoid: a field that ships unredacted, or that reaches the buffer
+  and never the wire.
+
+  Metadata and content are separable, because they answer different questions.
+  The default `exclude` list keeps `.env`, keys and lockfiles out of *content*
+  while `sha256`/size/mtime still record that they were touched — "an agent
+  read your SSH key" is the finding, and reaching it does not require shipping
+  the key. So `skipped` carries a closed set of reasons rather than a bare
+  `None`, and export lifts those reasons out as an attribute: a config
+  excluding more than its author intended otherwise looks exactly like a quiet
+  week.
+
+  `export.rs`'s `ToolUse` arm now destructures exhaustively, so the next field
+  added upstream is a build error there rather than an attribute nobody
+  notices is missing.
+
+  Nine mutations. One survived the first run and was investigated, not
+  shrugged off: nothing asserted that a call capturing nothing omits the key
+  entirely. Capture is off by default, so that empty array would have ridden
+  on almost every tool call in almost every deployment, through the buffer and
+  the 4 MiB export body, to say nothing.
+  `a_call_that_captured_nothing_carries_no_snapshot_key` closes it.
+
 - [ ] **T19** — Docs. Dependency: T18.
   Files: `docs/adding-a-tool.md`, `README.md`, `docs/telemetry-gaps.md`
 

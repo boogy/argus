@@ -59,6 +59,7 @@ pub fn parse(env: &Envelope, capture: &CaptureCfg) -> Vec<Event> {
             vec![mk(EventKind::ToolUse {
                 files: crate::adapters::extract_files_for_tool("user_bash", &args),
                 fqdns: crate::adapters::extract_net_for_tool("user_bash", &args),
+                file_contents: vec![],
                 tool: "user_bash".into(),
                 phase: "pre".into(),
                 input: if capture.tool_inputs {
@@ -122,6 +123,7 @@ pub fn parse(env: &Envelope, capture: &CaptureCfg) -> Vec<Event> {
                 interrupted: false,
                 files,
                 fqdns,
+                file_contents: vec![],
             });
             ev.meta.tool_use_id = p
                 .get("toolCallId")

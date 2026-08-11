@@ -137,6 +137,7 @@ pub fn parse(env: &Envelope, capture: &CaptureCfg) -> Vec<Event> {
                 interrupted: false,
                 files,
                 fqdns,
+                file_contents: vec![],
             })]
         }
         "permissionRequest" => vec![mk(EventKind::Permission {

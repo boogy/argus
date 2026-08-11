@@ -85,6 +85,7 @@ pub fn parse(env: &Envelope, capture: &CaptureCfg) -> Vec<Event> {
                 interrupted: false,
                 files,
                 fqdns,
+                file_contents: vec![],
             });
             // The plugin has always sent this and the adapter has always
             // dropped it. It is the only thing that pairs the `before` with
@@ -223,6 +224,7 @@ pub fn parse(env: &Envelope, capture: &CaptureCfg) -> Vec<Event> {
                 interrupted: false,
                 files: vec![],
                 fqdns,
+                file_contents: vec![],
             });
             ev.meta.tool_use_id = props.get("id").and_then(Value::as_str).map(String::from);
             vec![ev]

@@ -28,6 +28,52 @@ fn attr(k: &str, v: &str) -> Value {
     json!({ "key": k, "value": { "stringValue": v } })
 }
 
+/// The indexable summary of a call's file snapshots.
+///
+/// Content itself stays in the body — it is unbounded and nobody groups by it.
+/// What goes up as attributes is what a query needs to *find* the event
+/// without parsing every body: how many files, how many bytes, their digests,
+/// and — the one that matters for tuning a deployment — why anything was
+/// skipped. Without that last one, a config excluding more than its author
+/// intended looks exactly like a quiet week.
+fn file_snapshot_attrs(snaps: &[crate::event::FileSnapshot]) -> Vec<Value> {
+    if snaps.is_empty() {
+        return vec![];
+    }
+    let mut out = vec![
+        attr("file.snapshots", &snaps.len().to_string()),
+        attr(
+            "file.snapshots.bytes",
+            &snaps.iter().map(|s| s.bytes).sum::<u64>().to_string(),
+        ),
+    ];
+    let digests: Vec<String> = snaps
+        .iter()
+        .filter_map(|s| s.sha256.as_ref().map(|h| format!("{}={}", s.path, h)))
+        .collect();
+    if !digests.is_empty() {
+        out.push(attr("file.sha256", &digests.join(",")));
+    }
+    // Distinct reasons, in first-seen order: five files skipped for one
+    // reason is one fact, not five.
+    let mut reasons: Vec<String> = vec![];
+    for s in snaps {
+        if let Some(r) = s.skipped {
+            let name = serde_json::to_value(r)
+                .ok()
+                .and_then(|v| v.as_str().map(String::from))
+                .unwrap_or_default();
+            if !reasons.contains(&name) {
+                reasons.push(name);
+            }
+        }
+    }
+    if !reasons.is_empty() {
+        out.push(attr("file.skipped", &reasons.join(",")));
+    }
+    out
+}
+
 fn record(e: &Event) -> Value {
     let mut attrs = vec![attr("source", &e.source)];
     if let Some(s) = &e.session_id {
@@ -57,6 +103,11 @@ fn record(e: &Event) -> Value {
             "prompt_transformed"
         }
         EventKind::AssistantMessage { .. } => "assistant_message",
+        // Destructured exhaustively on purpose. The body carries the whole
+        // event whatever happens here, but attributes are what a SIEM can
+        // index and alert on, and a field added upstream that nobody exports
+        // is invisible to every query anyone writes. `..` made that silent;
+        // this makes it a build error.
         EventKind::ToolUse {
             tool,
             phase,
@@ -65,7 +116,11 @@ fn record(e: &Event) -> Value {
             error,
             duration_ms,
             interrupted,
-            ..
+            file_contents,
+            // Both ride in the body. Indexing a tool input means indexing an
+            // arbitrarily large blob of JSON as one attribute string.
+            input: _,
+            output: _,
         } => {
             attrs.push(attr("tool.name", tool));
             attrs.push(attr("tool.phase", phase));
@@ -85,6 +140,9 @@ fn record(e: &Event) -> Value {
             }
             if !fqdns.is_empty() {
                 attrs.push(attr("net.fqdns", &fqdns.join(",")));
+            }
+            for a in file_snapshot_attrs(file_contents) {
+                attrs.push(a);
             }
             "tool_use"
         }
@@ -420,6 +478,7 @@ mod tests {
                 interrupted: false,
                 files: vec!["/a.rs".into()],
                 fqdns: vec![],
+                file_contents: vec![],
             },
         );
         let body = to_otlp_body(std::slice::from_ref(&e));
@@ -441,6 +500,72 @@ mod tests {
         // say neither — an attribute present on every row is one nobody reads.
         assert_eq!(get("tool.duration_ms"), None);
         assert_eq!(get("tool.interrupted"), None);
+        // Nothing captured, nothing said. Zero-valued attributes on every
+        // tool call in a fleet that has capture switched off is pure cost.
+        assert_eq!(get("file.snapshots"), None);
+        assert_eq!(get("file.sha256"), None);
+    }
+
+    /// Snapshots that reach the buffer but not the attributes are findable
+    /// only by full-text-searching every body, which is the thing attributes
+    /// exist to avoid.
+    #[test]
+    fn file_snapshots_reach_the_wire_as_attributes() {
+        use crate::event::{FileAction, FileSnapshot, SkipReason, SnapshotSource};
+        let snap =
+            |path: &str, bytes: u64, hash: Option<&str>, skip: Option<SkipReason>| FileSnapshot {
+                path: path.into(),
+                action: FileAction::Read,
+                bytes,
+                sha256: hash.map(String::from),
+                mtime: None,
+                source: SnapshotSource::Disk,
+                content: None,
+                truncated: false,
+                skipped: skip,
+            };
+        let e = Event::new(
+            "claude-code",
+            None,
+            None,
+            EventKind::ToolUse {
+                tool: "Read".into(),
+                phase: "post".into(),
+                input: serde_json::json!({}),
+                output: serde_json::Value::Null,
+                error: None,
+                duration_ms: None,
+                interrupted: false,
+                files: vec![],
+                fqdns: vec![],
+                file_contents: vec![
+                    snap("/repo/a.rs", 100, Some("aaa"), None),
+                    snap("/repo/.env", 20, Some("bbb"), Some(SkipReason::Excluded)),
+                    snap("/repo/.ssh/id_rsa", 30, None, Some(SkipReason::Excluded)),
+                    snap("/repo/big.bin", 900, None, Some(SkipReason::Binary)),
+                ],
+            },
+        );
+        let body = to_otlp_body(std::slice::from_ref(&e));
+        let attrs = body["resourceLogs"][0]["scopeLogs"][0]["logRecords"][0]["attributes"]
+            .as_array()
+            .unwrap()
+            .clone();
+        let get = |k: &str| {
+            attrs
+                .iter()
+                .find(|a| a["key"] == k)
+                .map(|a| a["value"]["stringValue"].as_str().unwrap().to_string())
+        };
+        assert_eq!(get("file.snapshots").as_deref(), Some("4"));
+        assert_eq!(get("file.snapshots.bytes").as_deref(), Some("1050"));
+        assert_eq!(
+            get("file.sha256").as_deref(),
+            Some("/repo/a.rs=aaa,/repo/.env=bbb"),
+            "a digest is what tells two versions of a file apart"
+        );
+        // Deduplicated: three files skipped for two reasons is two facts.
+        assert_eq!(get("file.skipped").as_deref(), Some("excluded,binary"));
     }
 
     /// A duration and a cancellation that reach the event but not the wire are
@@ -461,6 +586,7 @@ mod tests {
                 interrupted: true,
                 files: vec![],
                 fqdns: vec![],
+                file_contents: vec![],
             },
         );
         let body = to_otlp_body(std::slice::from_ref(&e));

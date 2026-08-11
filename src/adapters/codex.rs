@@ -72,6 +72,7 @@ pub fn parse(env: &Envelope, capture: &CaptureCfg) -> Vec<Event> {
                 interrupted: false,
                 files: vec![],
                 fqdns: extract_fqdns(&text_blob),
+                file_contents: vec![],
             })]
         }
         "codex.conversation_starts" => vec![mk(EventKind::Session {

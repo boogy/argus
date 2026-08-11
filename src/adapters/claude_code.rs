@@ -130,6 +130,7 @@ pub(crate) fn parse_hook(source: &'static str, p: &Value, capture: &CaptureCfg) 
                     .unwrap_or(false),
                 files,
                 fqdns,
+                file_contents: vec![],
             })];
             if hook == "PreToolUse" {
                 match tool.as_str() {
