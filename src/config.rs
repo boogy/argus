@@ -121,14 +121,22 @@ pub struct FileContentsCfg {
     /// Per event, so one `apply_patch` across forty files cannot become forty
     /// file bodies in one record.
     pub max_files: usize,
-    /// Per event, across all files. `max_bytes × max_files` is the worst case
-    /// without it, which at the defaults is ten times what anyone wants in a
-    /// single log record.
+    /// Per event, across all files. Without it the worst case is
+    /// `max_bytes × max_files` — 320 KB at the defaults, against the 256 KB
+    /// this holds it to. The margin is small until one of the other two is
+    /// raised, which is the point: this is the cap that stays put when a
+    /// deployment decides it wants 1 MiB files or forty of them.
     pub max_total_bytes: usize,
     pub skip_binary: bool,
-    /// Record `sha256`, size and mtime even where content is withheld. This is
-    /// what makes an excluded file still visible as *touched*, and what lets
-    /// two captures of one path be told apart.
+    /// Digest an excluded file's bytes anyway, so it stays visible as *touched*
+    /// and two captures of one path can be told apart.
+    ///
+    /// This is what makes `disk` mode open a file policy has already excluded:
+    /// the bytes are hashed and dropped, and no content of one reaches the
+    /// snapshot. `payload` mode has no such trade to make — an excluded file
+    /// stops at the filter, before any digest — so there the setting decides
+    /// nothing. Size is recorded in both modes whatever this says, and mtime
+    /// only in `disk`, which is the only one that stats a file at all.
     pub hash: bool,
     /// How long one file's stat-and-read may take before the daemon stops
     /// waiting for it and records the file as unreadable. `0` waits forever.
@@ -139,8 +147,10 @@ pub struct FileContentsCfg {
     /// radius* — the pipeline gets an answer and moves on, and an unreachable
     /// mount costs one stuck thread rather than every event behind it.
     ///
-    /// Local reads take microseconds, so the default is two orders of
-    /// magnitude of slack over anything healthy.
+    /// The default is two seconds, against local reads that take microseconds.
+    /// Nothing healthy is anywhere near it: the value is sized for the pause a
+    /// spun-down disk or a slow network mount can still recover from, not for
+    /// the normal case.
     pub read_timeout_ms: u64,
 }
 
@@ -180,9 +190,10 @@ impl Default for FileContentsCfg {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ContentMode {
-    /// Only what the hook payload already carried: `Write.content`, an
-    /// `Edit`'s two halves, a patch body. Exact, race-free, and zero I/O —
-    /// it is what the tool said it was about to do.
+    /// Only what the hook payload already carried: `Write.content`, the *new*
+    /// half of an `Edit`, a patch body. Exact, race-free, and zero I/O — it is
+    /// what the tool said it was about to do. What an edit replaced is not
+    /// captured: the question this answers is what the file now says.
     #[default]
     Payload,
     /// Read the file. Answers for the calls a payload describes but does not
