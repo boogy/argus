@@ -39,3 +39,11 @@ correction; keep entries terse.
   tripped in 7 places. A green `make verify` gate is worthless if the
   baseline was never green; verify the baseline before trusting it as a
   per-task gate.
+
+- **Never pipe a mutation run through `head`.** A closed pipe kills the
+  harness with SIGPIPE, so its `restore()` never runs and the working tree is
+  left holding whichever mutation was applied when the pipe closed — a state
+  that looks exactly like ordinary uncommitted work. It got committed and
+  pushed in T18e before `make verify` was read. Two rules follow: write the
+  full output to a file and read *that*, and read the verify exit code before
+  running `git commit`, never in the same `;`-joined line.
