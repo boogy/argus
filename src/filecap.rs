@@ -292,7 +292,7 @@ pub fn capture(event: &mut Event, capture: &CaptureCfg, filter: &PathFilter) {
             // A call that only named a file — a `Read`, a `Grep` — is where
             // disk mode earns its keep, and the one thing payload mode has
             // nothing to say about.
-            _ => {
+            _ if cfg.mode != ContentMode::Payload => {
                 disk_snapshot(&c, cwd.as_deref(), capture, filter, &mut budget)
             }
             _ => continue,
