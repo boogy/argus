@@ -130,6 +130,18 @@ pub struct FileContentsCfg {
     /// what makes an excluded file still visible as *touched*, and what lets
     /// two captures of one path be told apart.
     pub hash: bool,
+    /// How long one file's stat-and-read may take before the daemon stops
+    /// waiting for it and records the file as unreadable. `0` waits forever.
+    ///
+    /// A read that has stopped returning cannot be cancelled: a process parked
+    /// in the kernel on a dead NFS mount is not interruptible from userspace,
+    /// and nothing here pretends otherwise. What this bounds is the *blast
+    /// radius* — the pipeline gets an answer and moves on, and an unreachable
+    /// mount costs one stuck thread rather than every event behind it.
+    ///
+    /// Local reads take microseconds, so the default is two orders of
+    /// magnitude of slack over anything healthy.
+    pub read_timeout_ms: u64,
 }
 
 impl Default for FileContentsCfg {
@@ -159,6 +171,7 @@ impl Default for FileContentsCfg {
             max_total_bytes: 262144,
             skip_binary: true,
             hash: true,
+            read_timeout_ms: 2000,
         }
     }
 }
@@ -544,6 +557,7 @@ mod tests {
             max_total_bytes = 1024
             skip_binary = false
             hash = false
+            read_timeout_ms = 500
             "#,
         )
         .unwrap();
@@ -561,6 +575,7 @@ mod tests {
         assert_eq!(fc.max_total_bytes, 1024);
         assert!(!fc.skip_binary);
         assert!(!fc.hash);
+        assert_eq!(fc.read_timeout_ms, 500);
 
         // Sibling settings in `[capture]` survive the nested table.
         assert!(cfg.capture.prompts);
@@ -588,6 +603,10 @@ mod tests {
         assert_eq!(fc.mode, d.mode);
         assert_eq!(fc.skip_binary, d.skip_binary);
         assert_eq!(fc.hash, d.hash);
+        // A default of zero here would be "wait forever" — the one value that
+        // turns the deadline off for everyone who never wrote the line.
+        assert_eq!(fc.read_timeout_ms, d.read_timeout_ms);
+        assert!(d.read_timeout_ms > 0, "the shipped default is no deadline");
     }
 
     /// The mode is written in a config file, in snake_case, or it is a knob

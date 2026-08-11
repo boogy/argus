@@ -292,7 +292,7 @@ pub fn capture(event: &mut Event, capture: &CaptureCfg, filter: &PathFilter) {
             // A call that only named a file — a `Read`, a `Grep` — is where
             // disk mode earns its keep, and the one thing payload mode has
             // nothing to say about.
-            _ if cfg.mode != ContentMode::Payload => {
+            _ => {
                 disk_snapshot(&c, cwd.as_deref(), capture, filter, &mut budget)
             }
             _ => continue,
@@ -436,13 +436,118 @@ fn read_capped(path: &Path, limit: usize) -> std::io::Result<Option<Vec<u8>>> {
     Ok((buf.len() <= limit).then_some(buf))
 }
 
-/// What the file looks like now, rather than what the call claimed it would.
-///
+/// Everything one disk snapshot asks of the filesystem, in a single call —
+/// because it is the call that has to be given up on, and giving up on half of
+/// a stat-then-read leaves the other half still running.
+struct Probe {
+    bytes: u64,
+    mtime: Option<DateTime<Utc>>,
+    /// `Ok(Some)` are the bytes; `Ok(None)` means nothing was read *on
+    /// purpose*; `Err` is the reason the file has no content to report.
+    body: Result<Option<Vec<u8>>, SkipReason>,
+}
+
 /// Stat first, and without following: the stat is what decides this is a thing
 /// that can be read at all, which is the difference between a bounded read and
 /// a `read()` on a fifo that never returns. Everything the stat knows — size,
-/// mtime — is recorded whether or not the content is, because "the agent read
+/// mtime — is reported whether or not the content is, because "the agent read
 /// your `.env`" is the finding and it does not require shipping the file.
+fn probe(path: &Path, ceiling: usize, want_body: bool) -> Probe {
+    let unreadable = Probe {
+        bytes: 0,
+        mtime: None,
+        body: Err(SkipReason::Unreadable),
+    };
+    let Ok(md) = std::fs::symlink_metadata(path) else {
+        return unreadable;
+    };
+    // A symlink lands here as a symlink and is refused: following one reads a
+    // file the tool never named, and `/tmp/x -> ~/.ssh/id_rsa` is the oldest
+    // way to get a privileged reader to fetch something on your behalf — one
+    // that would walk straight past an `exclude` list matching on the path the
+    // agent said. Everything else that is not a regular file — fifo, device,
+    // directory — is refused for the reason the stat comes first at all: those
+    // reads are unbounded.
+    if !md.is_file() {
+        return unreadable;
+    }
+    let mut p = Probe {
+        bytes: md.len(),
+        mtime: md.modified().ok().map(DateTime::<Utc>::from),
+        body: Ok(None),
+    };
+    // Unlike a payload body, an oversized file is not truncated. The payload
+    // is in memory whether we want it or not, so keeping a prefix costs
+    // nothing; reading a 2 GiB file off disk to keep 32 KiB of it is I/O this
+    // daemon chose to do, for a prefix of a file it could not see anyway. The
+    // size is still reported, which is what a query asking "what is this
+    // deployment not capturing" needs.
+    if md.len() > ceiling as u64 {
+        p.body = Err(SkipReason::TooLarge);
+        return p;
+    }
+    if !want_body {
+        return p;
+    }
+    match read_capped(path, ceiling) {
+        Ok(Some(b)) => {
+            // The size now describes the same bytes a digest will: the file may
+            // have been rewritten shorter between the stat and the read, and a
+            // record whose two halves describe two versions is worse than one
+            // that describes the later.
+            p.bytes = b.len() as u64;
+            p.body = Ok(Some(b));
+        }
+        // It grew between the stat and the read.
+        Ok(None) => p.body = Err(SkipReason::TooLarge),
+        Err(_) => p.body = Err(SkipReason::Unreadable),
+    }
+    p
+}
+
+/// Run the filesystem work with a deadline, giving up on the *answer* rather
+/// than on the thread.
+///
+/// Nothing here cancels a read. A thread parked in the kernel on a mount that
+/// stopped answering is not interruptible from userspace, and this does not
+/// pretend to make it so — it hands that thread its own stack and stops waiting
+/// for it. That is the whole difference between one lost thread and a Stage B
+/// that never returns, taking the socket's backpressure with it.
+///
+/// A deadline of `0` means the caller wants no deadline, and gets the read
+/// inline: no channel, no thread, no spawn cost per file.
+fn with_deadline<T: Send + 'static>(ms: u64, f: impl FnOnce() -> T + Send + 'static) -> Option<T> {
+    #[cfg(test)]
+    record_deadline(ms);
+    if ms == 0 {
+        return Some(f());
+    }
+    // Capacity one so the worker's send never waits for a reader: a read that
+    // finishes just after we stopped caring should end its thread, not park it
+    // on a rendezvous with nobody.
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let _ = tx.send(f());
+    });
+    rx.recv_timeout(std::time::Duration::from_millis(ms)).ok()
+}
+
+/// Test-only record of the deadline the last read was given. A timeout is only
+/// observable by waiting for it, so a test that the *configured* number is the
+/// one being used would otherwise have to be a slow test or a flaky one.
+#[cfg(test)]
+static LAST_DEADLINE_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
+
+#[cfg(test)]
+fn record_deadline(ms: u64) {
+    LAST_DEADLINE_MS.store(ms, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// What the file looks like now, rather than what the call claimed it would.
+///
+/// The policy half — which file, whether it may be read at all, what the bytes
+/// are allowed to become. Everything that touches the filesystem is in
+/// [`probe`], one call behind one deadline.
 fn disk_snapshot(
     c: &Candidate,
     cwd: Option<&str>,
@@ -456,61 +561,34 @@ fn disk_snapshot(
         snap.skipped = Some(SkipReason::Unreadable);
         return snap;
     };
-    let Ok(md) = std::fs::symlink_metadata(&path) else {
-        snap.skipped = Some(SkipReason::Unreadable);
-        return snap;
-    };
-    // A symlink lands here as a symlink and is refused: following one reads a
-    // file the tool never named, and `/tmp/x -> ~/.ssh/id_rsa` is the oldest
-    // way to get a privileged reader to fetch something on your behalf — one
-    // that would walk straight past an `exclude` list matching on the path the
-    // agent said. Everything else that is not a regular file — fifo, device,
-    // directory — is refused for the reason the stat comes first at all: those
-    // reads are unbounded.
-    if !md.is_file() {
-        snap.skipped = Some(SkipReason::Unreadable);
-        return snap;
-    }
-    snap.bytes = md.len();
-    snap.mtime = md.modified().ok().map(DateTime::<Utc>::from);
-
-    // Unlike a payload body, an oversized file is not truncated. The payload
-    // is in memory whether we want it or not, so keeping a prefix costs
-    // nothing; reading a 2 GiB file off disk to keep 32 KiB of it is I/O this
-    // daemon chose to do, for a prefix of a file it could not see anyway. The
-    // size is still reported, which is what a query asking "what is this
-    // deployment not capturing" needs.
     let ceiling = content_ceiling(capture);
-    if md.len() > ceiling as u64 {
-        snap.skipped = Some(SkipReason::TooLarge);
-        return snap;
-    }
     let allowed = filter.allows(&c.path);
-    if !allowed && !cfg.hash {
-        snap.skipped = Some(SkipReason::Excluded);
-        return snap;
-    }
     // An excluded file is still opened when `hash` is on, and that is the
     // deliberate part: the digest is what makes one `.env` the same `.env`
     // across forty sessions. It is computed and the bytes are dropped — no
     // content of an excluded file reaches the snapshot below.
-    let buf = match read_capped(&path, ceiling) {
+    let want_body = allowed || cfg.hash;
+    let Some(p) = with_deadline(cfg.read_timeout_ms, move || {
+        probe(&path, ceiling, want_body)
+    }) else {
+        // The read is still running somewhere, and may still be running when
+        // the process exits. What it is not doing is holding up the batch.
+        snap.skipped = Some(SkipReason::Unreadable);
+        return snap;
+    };
+    snap.bytes = p.bytes;
+    snap.mtime = p.mtime;
+    let buf = match p.body {
         Ok(Some(b)) => b,
-        // It grew between the stat and the read.
         Ok(None) => {
-            snap.skipped = Some(SkipReason::TooLarge);
+            snap.skipped = Some(SkipReason::Excluded);
             return snap;
         }
-        Err(_) => {
-            snap.skipped = Some(SkipReason::Unreadable);
+        Err(reason) => {
+            snap.skipped = Some(reason);
             return snap;
         }
     };
-    // The size now describes the same bytes the digest does: the file may have
-    // been rewritten shorter between the stat and the read, and a record whose
-    // two halves describe two versions is worse than one that describes the
-    // later.
-    snap.bytes = buf.len() as u64;
     if cfg.hash {
         snap.sha256 = Some(sha256_hex(&buf));
     }
@@ -1300,5 +1378,78 @@ mod tests {
             out.iter().any(|s| s.skipped == Some(SkipReason::Budget)),
             "a file dropped for budget did not say so: {out:?}"
         );
+    }
+
+    /// The hazard the deadline exists for, staged with the one thing that
+    /// reliably never returns: a read on a fifo with no writer. Stat-first
+    /// keeps that path out of `probe`, but a mount that stops answering
+    /// mid-read is the same shape and cannot be staged in a unit test — so the
+    /// read is called directly here, exactly as `probe` would call it.
+    ///
+    /// Without the deadline this test does not fail. It hangs, forever, which
+    /// is precisely what it is asserting about Stage B.
+    #[cfg(unix)]
+    #[test]
+    fn a_read_that_never_returns_is_given_up_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pipe");
+        let c = std::ffi::CString::new(path.to_string_lossy().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0, "mkfifo");
+
+        let started = std::time::Instant::now();
+        let out = with_deadline(200, move || read_capped(&path, 4096).ok().flatten());
+        assert!(out.is_none(), "a read that never returned returned");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "waited {:?} on a read that was supposed to be abandoned",
+            started.elapsed()
+        );
+    }
+
+    /// The deadline is a limit, not a policy of impatience: work that finishes
+    /// inside it comes back whole.
+    #[test]
+    fn a_read_that_finishes_in_time_is_not_thrown_away() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.rs");
+        std::fs::write(&path, "let a = 1;").unwrap();
+        let got = with_deadline(60_000, move || read_capped(&path, 4096).unwrap());
+        assert_eq!(got.flatten().as_deref(), Some(&b"let a = 1;"[..]));
+    }
+
+    /// A timeout is only observable by waiting for it, so the plumbing —
+    /// configured number in, same number used — is checked directly rather
+    /// than by a test that would have to be slow to be honest.
+    #[test]
+    fn the_configured_deadline_is_the_one_the_read_gets() {
+        use std::sync::atomic::Ordering::Relaxed;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.rs"), "let a = 1;").unwrap();
+        let mut c = disk();
+        c.file_contents.read_timeout_ms = 1234;
+
+        LAST_DEADLINE_MS.store(u64::MAX, Relaxed);
+        let snap = read_of(dir.path(), "a.rs", &c);
+        assert_eq!(snap.content.as_deref(), Some("let a = 1;"));
+        assert_eq!(
+            LAST_DEADLINE_MS.load(Relaxed),
+            1234,
+            "the read was given a deadline nobody configured"
+        );
+    }
+
+    /// `0` is the deployment that would rather block than lose a capture, and
+    /// it has to mean *wait* — a zero passed through to `recv_timeout` would
+    /// expire before any read could finish and turn the feature off silently.
+    #[test]
+    fn a_deadline_of_zero_waits_rather_than_capturing_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.rs"), "let a = 1;").unwrap();
+        let mut c = disk();
+        c.file_contents.read_timeout_ms = 0;
+
+        let snap = read_of(dir.path(), "a.rs", &c);
+        assert_eq!(snap.content.as_deref(), Some("let a = 1;"));
+        assert_eq!(snap.skipped, None);
     }
 }

@@ -1962,6 +1962,56 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
   hung read. Stat-first removes the fifo and device cases; a network mount
   that stops answering is what T18e's deadline is for.
 
+- [x] **T18e** — the read deadline. Dependency: T18d.
+  Files: `src/config.rs`, `src/filecap.rs`.
+
+  Stat-first removed the reads that never return *by construction* — fifos,
+  devices, directories. What it cannot remove is the read that stops returning
+  for reasons the stat had no way to see: an NFS or SMB mount that goes away
+  mid-read. Stage B runs on the blocking pool, and a batch parked there does
+  not just lose one file — it stops the socket's backpressure from ever
+  unwinding.
+
+  **The deadline gives up on the answer, not on the thread.** Nothing here
+  cancels a read, and the code says so rather than implying otherwise: a
+  thread parked in the kernel on a dead mount is not interruptible from
+  userspace. What this buys is the blast radius — one unreachable mount costs
+  one stuck thread instead of every event behind it, and the file comes back
+  as `skipped = unreadable` like any other file that could not be read.
+
+  Everything that touches the filesystem moved into one `probe` call, because
+  a deadline around half of a stat-then-read leaves the other half running.
+  The policy — which file, whether it may be read, what the bytes may become —
+  stayed in `disk_snapshot`, where it is still pure.
+
+  `read_timeout_ms` defaults to 2000: local reads take microseconds, so that
+  is two orders of magnitude of slack over anything healthy. `0` means *wait*,
+  and takes the inline path — no channel, no thread, no spawn per file. That
+  branch exists because a `0` passed through to `recv_timeout` expires before
+  any read can finish, which would turn the feature off for whoever wrote the
+  one value that reads like "no limit".
+
+  Twenty-five mutations. The four on the deadline itself all bite, including
+  `recv_timeout` → `recv`, which bites by *hanging* — the fifo test asserts
+  both that a read that never returns comes back `None` and that it came back
+  quickly, so a deadline in the wrong unit is caught too. The twenty-one T18d
+  mutations were re-pointed at the moved code and re-run: that the refactor
+  kept the guarantees rather than just kept the tests compiling is the only
+  thing that makes moving them safe.
+
+  Two things here are not mutation-covered, and neither is stageable in
+  process:
+
+  - `p.bytes = b.len()` — the read's size replacing the stat's — differs only
+    when the file changed between two adjacent syscalls. It is kept because
+    an agent rewriting a file just before its hook fires is exactly that race,
+    and a record whose size and digest describe two versions is worse than one
+    that describes the later.
+  - The give-up branch in `disk_snapshot` maps an expired deadline to
+    `unreadable`. Reaching it needs a read that hangs *past* the stat gate,
+    which is the case that only exists on a real filesystem. The mechanism it
+    depends on is covered directly, against a genuine read that never returns.
+
 - [ ] **T19** — Docs. Dependency: T18.
   Files: `docs/adding-a-tool.md`, `README.md`, `docs/telemetry-gaps.md`
 
