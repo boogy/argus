@@ -1068,10 +1068,88 @@ mod tests {
             1,
             "the bound pipe must grant exactly one account, not the default set: {dacl}"
         );
-        assert!(
-            dacl.contains(&format!(";;;{us})")),
+        let ours = rendered_sddl(&owner_only_sddl(&us)).unwrap();
+        assert_eq!(
+            trustee_of(&dacl)
+                .unwrap_or_else(|| panic!("the bound pipe's DACL names nobody: {dacl}")),
+            trustee_of(&ours).unwrap_or_else(|| panic!("our own descriptor names nobody: {ours}")),
             "the one account granted the pipe must be this one ({us}): {dacl}"
         );
+    }
+
+    /// The account named by the single allow ACE of a DACL: `D:P(A;;FA;;;LA)`
+    /// yields `LA`.
+    #[cfg(windows)]
+    fn trustee_of(dacl: &str) -> Option<&str> {
+        let ace = dacl.split_once("(A;")?.1;
+        ace.split_once(')')?.0.rsplit(';').next()
+    }
+
+    /// A descriptor string as Windows renders it, rather than as we spelled it.
+    ///
+    /// The two are not the same text. `ConvertSecurityDescriptorToString…`
+    /// substitutes a two-letter alias for any SID it recognises, so a host
+    /// logged in as the built-in Administrator — RID 500, which is what a CI
+    /// runner often is — reads its own pipe back as `LA` and never as the
+    /// `S-1-5-21-…` that was asked for. Putting our own string through the same
+    /// conversion is what makes the two comparable, and it compares the account
+    /// rather than its spelling.
+    #[cfg(windows)]
+    fn rendered_sddl(sddl: &str) -> Result<String> {
+        use std::ptr;
+        use windows_sys::Win32::Foundation::LocalFree;
+        use windows_sys::Win32::Security::Authorization::{
+            ConvertSecurityDescriptorToStringSecurityDescriptorW,
+            ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+        };
+        use windows_sys::Win32::Security::{DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR};
+
+        let wide = widestring::U16CString::from_str(sddl)?;
+        let mut sd: PSECURITY_DESCRIPTOR = ptr::null_mut();
+        // SAFETY: `wide` is NUL-terminated and outlives the call; `sd` is a
+        // valid out-pointer for a descriptor the call allocates on the local
+        // heap, and the size out-pointer is optional.
+        let parsed = unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                wide.as_ptr(),
+                SDDL_REVISION_1,
+                &mut sd,
+                ptr::null_mut(),
+            )
+        };
+        if parsed == 0 {
+            return Err(anyhow!(
+                "cannot parse {sddl:?}: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        let mut out: windows_sys::core::PWSTR = ptr::null_mut();
+        // SAFETY: `sd` is the descriptor just parsed; `out` is a valid
+        // out-pointer for a string the call allocates on the local heap.
+        let ok = unsafe {
+            ConvertSecurityDescriptorToStringSecurityDescriptorW(
+                sd,
+                SDDL_REVISION_1,
+                DACL_SECURITY_INFORMATION,
+                &mut out,
+                ptr::null_mut(),
+            )
+        };
+        // SAFETY: both pointers came from local-heap allocations owned here,
+        // and neither is used after this point.
+        let text = if ok == 0 {
+            Err(anyhow!(
+                "cannot render {sddl:?}: {}",
+                std::io::Error::last_os_error()
+            ))
+        } else {
+            Ok(unsafe { widestring::U16CStr::from_ptr_str(out) }.to_string_lossy())
+        };
+        unsafe {
+            LocalFree(out.cast());
+            LocalFree(sd.cast());
+        }
+        text
     }
 
     /// Read a named pipe's DACL back out of the object manager, as SDDL.
