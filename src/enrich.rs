@@ -42,7 +42,7 @@ pub fn enrich(
             // Before the scrub, not after: the copy has to be walked by the
             // same redactor pass as the input it was copied out of, or it is
             // the one field in the event nobody looked at.
-            crate::filecap::capture_from_payload(&mut e.kind, capture, paths);
+            crate::filecap::capture(&mut e, capture, paths);
             crate::adapters::cap_event(redactor.scrub_event(e), capture)
         })
         .collect()

@@ -1,15 +1,24 @@
-//! Deciding which files may have their contents captured.
+//! Deciding which files may have their contents captured, and capturing them.
 //!
-//! Separate from the capture itself because the decision is the security
-//! boundary and the capture is plumbing. Everything here is pure: a path in, a
-//! verdict out, no I/O — so the rule that keeps `.ssh/id_rsa` out of the SIEM
-//! can be tested exhaustively without a filesystem, and the same verdict
-//! applies whether the bytes came from a hook payload or a disk read.
+//! The decision — [`PathFilter`] — is the security boundary, and it is pure: a
+//! path in, a verdict out, no I/O, so the rule that keeps `.ssh/id_rsa` out of
+//! the SIEM can be tested exhaustively without a filesystem, and the same
+//! verdict applies whether the bytes came from a hook payload or a disk read.
+//!
+//! The capture around it comes in two halves that answer different questions.
+//! The payload half is what the tool *said* it would write: exact, race-free,
+//! and already in memory. The disk half is what is *there*, which is the only
+//! half that sees a `Bash` with a `>` redirect, a `sed -i`, or a formatter that
+//! ran afterwards — at the cost of real I/O against paths an untrusted agent
+//! chose.
 
 use crate::config::{CaptureCfg, ContentMode, FileContentsCfg};
-use crate::event::{EventKind, FileAction, FileSnapshot, SkipReason, SnapshotSource};
+use crate::event::{Event, EventKind, FileAction, FileSnapshot, SkipReason, SnapshotSource};
+use chrono::{DateTime, Utc};
 use regex::RegexSet;
 use serde_json::Value;
+use std::io::Read;
+use std::path::{Path, PathBuf};
 
 /// Compiled `include`/`exclude`, built once per config generation.
 ///
@@ -237,22 +246,30 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     out
 }
 
-/// Capture what the payload already carried, into `file_contents`.
+/// Capture the files a tool call touched, into `file_contents`.
 ///
 /// Runs *before* redaction, so the copy is scrubbed by the same walk that
 /// scrubs the input it came from. A capture that ran afterwards would be the
 /// one field in the event nobody had looked at.
-pub fn capture_from_payload(kind: &mut EventKind, capture: &CaptureCfg, filter: &PathFilter) {
+///
+/// Both halves share one set of per-event budgets. Running them with a budget
+/// each would make `mode = "both"` quietly twice as expensive as the number in
+/// the config file.
+pub fn capture(event: &mut Event, capture: &CaptureCfg, filter: &PathFilter) {
     let cfg = &capture.file_contents;
-    if !cfg.enabled || cfg.mode == ContentMode::Disk {
+    if !cfg.enabled {
         return;
     }
+    // Copied out before the borrow below: a patch names `src/a.rs`, and which
+    // file that is depends on where the session is, not on where the daemon
+    // happens to have been started.
+    let cwd = event.cwd.clone();
     let EventKind::ToolUse {
         tool,
         input,
         file_contents,
         ..
-    } = kind
+    } = &mut event.kind
     else {
         return;
     };
@@ -265,14 +282,53 @@ pub fn capture_from_payload(kind: &mut EventKind, capture: &CaptureCfg, filter: 
         if file_contents.len() >= cfg.max_files {
             break;
         }
-        let Some(body) = c.content.take() else {
-            continue;
+        let snap = match c.content.take() {
+            // `disk` means disk: a deployment that chose it did so to stop
+            // trusting what a tool claims, and handing it the claim anyway
+            // would be answering a different question.
+            Some(body) if cfg.mode != ContentMode::Disk => {
+                payload_snapshot(&c, &body, capture, filter, &mut budget)
+            }
+            // A call that only named a file — a `Read`, a `Grep` — is where
+            // disk mode earns its keep, and the one thing payload mode has
+            // nothing to say about.
+            _ if cfg.mode != ContentMode::Payload => {
+                disk_snapshot(&c, cwd.as_deref(), capture, filter, &mut budget)
+            }
+            _ => continue,
         };
-        file_contents.push(snapshot(&c, &body, capture, filter, &mut budget));
+        file_contents.push(snap);
     }
 }
 
-fn snapshot(
+/// Everything known about a file before anything has been read or decided.
+fn blank(c: &Candidate, bytes: u64, source: SnapshotSource) -> FileSnapshot {
+    FileSnapshot {
+        path: c.path.clone(),
+        action: c.action,
+        bytes,
+        sha256: None,
+        mtime: None,
+        source,
+        content: None,
+        truncated: false,
+        skipped: None,
+    }
+}
+
+/// The largest body that may reach the wire whole.
+///
+/// `max_field_bytes` caps every string in the event afterwards, so a
+/// `max_bytes` above it would be trimmed by a later stage that does not set the
+/// `truncated` flag — leaving a cut body claiming to be whole.
+fn content_ceiling(capture: &CaptureCfg) -> usize {
+    match capture.max_field_bytes {
+        0 => capture.file_contents.max_bytes,
+        n => capture.file_contents.max_bytes.min(n),
+    }
+}
+
+fn payload_snapshot(
     c: &Candidate,
     body: &str,
     capture: &CaptureCfg,
@@ -280,17 +336,7 @@ fn snapshot(
     budget: &mut usize,
 ) -> FileSnapshot {
     let cfg = &capture.file_contents;
-    let mut snap = FileSnapshot {
-        path: c.path.clone(),
-        action: c.action,
-        bytes: body.len() as u64,
-        sha256: None,
-        mtime: None,
-        source: SnapshotSource::Payload,
-        content: None,
-        truncated: false,
-        skipped: None,
-    };
+    let mut snap = blank(c, body.len() as u64, SnapshotSource::Payload);
     // Policy first, then cost, then budget: an excluded file must report the
     // reason it was excluded even on an event that had run out of room, or a
     // deployment cannot tell a policy from a full record.
@@ -306,16 +352,11 @@ fn snapshot(
         snap.skipped = Some(SkipReason::Budget);
         return snap;
     }
-    // `max_field_bytes` caps every string in the event afterwards, so a
-    // `max_bytes` above it would be trimmed by a later stage that does not set
-    // the flag — leaving a truncated body claiming to be whole. Clamping here
-    // covers the parse-time cap too: that one cut to `max_field_bytes` plus
-    // headroom, so anything longer than this ceiling was already a prefix and
-    // is flagged as one, and no digest of a prefix reaches the wire.
-    let ceiling = match capture.max_field_bytes {
-        0 => cfg.max_bytes,
-        n => cfg.max_bytes.min(n),
-    };
+    // The ceiling covers the parse-time cap too: that one cut to
+    // `max_field_bytes` plus headroom, so anything longer than this was
+    // already a prefix and is flagged as one, and no digest of a prefix
+    // reaches the wire.
+    let ceiling = content_ceiling(capture);
     let kept = if body.len() <= ceiling && body.len() <= *budget {
         body.to_string()
     } else {
@@ -340,6 +381,164 @@ fn snapshot(
     }
     *budget = budget.saturating_sub(kept.len());
     snap.content = Some(kept);
+    snap
+}
+
+/// A relative path is only a file once you know where it was said.
+///
+/// Resolving one against the daemon's own working directory would name a
+/// different file with the same name — and reading *that* is worse than
+/// reading nothing, because the record would look like a successful capture.
+fn resolve(path: &str, cwd: Option<&str>) -> Option<PathBuf> {
+    let p = Path::new(path);
+    if p.is_absolute() {
+        return Some(p.to_path_buf());
+    }
+    Some(Path::new(cwd?).join(p))
+}
+
+/// Open without following a link, on the platforms that can say so.
+///
+/// The stat below already refuses a symlink, but a stat and an open are two
+/// syscalls with a gap between them, and the whole point of the gap to an
+/// attacker is to swap the path for a link to something better. `O_NOFOLLOW`
+/// closes it: the open itself fails rather than reading whatever the link now
+/// points at.
+fn open_no_follow(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        // FILE_FLAG_OPEN_REPARSE_POINT: open the link, not its target, so a
+        // junction or a symlink fails here instead of resolving elsewhere.
+        opts.custom_flags(0x0020_0000);
+    }
+    opts.open(path)
+}
+
+/// The file's bytes, or `None` if it turned out to have more than `limit`.
+///
+/// The caller has already sized the file with a stat, but a stat and a read are
+/// two syscalls: a file that grew in between comes back as a prefix, and a
+/// digest of a prefix matches no file anywhere. Reading one byte past the limit
+/// is what makes that detectable rather than silent.
+fn read_capped(path: &Path, limit: usize) -> std::io::Result<Option<Vec<u8>>> {
+    let mut buf = Vec::new();
+    open_no_follow(path)?
+        .take(limit as u64 + 1)
+        .read_to_end(&mut buf)?;
+    Ok((buf.len() <= limit).then_some(buf))
+}
+
+/// What the file looks like now, rather than what the call claimed it would.
+///
+/// Stat first, and without following: the stat is what decides this is a thing
+/// that can be read at all, which is the difference between a bounded read and
+/// a `read()` on a fifo that never returns. Everything the stat knows — size,
+/// mtime — is recorded whether or not the content is, because "the agent read
+/// your `.env`" is the finding and it does not require shipping the file.
+fn disk_snapshot(
+    c: &Candidate,
+    cwd: Option<&str>,
+    capture: &CaptureCfg,
+    filter: &PathFilter,
+    budget: &mut usize,
+) -> FileSnapshot {
+    let cfg = &capture.file_contents;
+    let mut snap = blank(c, 0, SnapshotSource::Disk);
+    let Some(path) = resolve(&c.path, cwd) else {
+        snap.skipped = Some(SkipReason::Unreadable);
+        return snap;
+    };
+    let Ok(md) = std::fs::symlink_metadata(&path) else {
+        snap.skipped = Some(SkipReason::Unreadable);
+        return snap;
+    };
+    // A symlink lands here as a symlink and is refused: following one reads a
+    // file the tool never named, and `/tmp/x -> ~/.ssh/id_rsa` is the oldest
+    // way to get a privileged reader to fetch something on your behalf — one
+    // that would walk straight past an `exclude` list matching on the path the
+    // agent said. Everything else that is not a regular file — fifo, device,
+    // directory — is refused for the reason the stat comes first at all: those
+    // reads are unbounded.
+    if !md.is_file() {
+        snap.skipped = Some(SkipReason::Unreadable);
+        return snap;
+    }
+    snap.bytes = md.len();
+    snap.mtime = md.modified().ok().map(DateTime::<Utc>::from);
+
+    // Unlike a payload body, an oversized file is not truncated. The payload
+    // is in memory whether we want it or not, so keeping a prefix costs
+    // nothing; reading a 2 GiB file off disk to keep 32 KiB of it is I/O this
+    // daemon chose to do, for a prefix of a file it could not see anyway. The
+    // size is still reported, which is what a query asking "what is this
+    // deployment not capturing" needs.
+    let ceiling = content_ceiling(capture);
+    if md.len() > ceiling as u64 {
+        snap.skipped = Some(SkipReason::TooLarge);
+        return snap;
+    }
+    let allowed = filter.allows(&c.path);
+    if !allowed && !cfg.hash {
+        snap.skipped = Some(SkipReason::Excluded);
+        return snap;
+    }
+    // An excluded file is still opened when `hash` is on, and that is the
+    // deliberate part: the digest is what makes one `.env` the same `.env`
+    // across forty sessions. It is computed and the bytes are dropped — no
+    // content of an excluded file reaches the snapshot below.
+    let buf = match read_capped(&path, ceiling) {
+        Ok(Some(b)) => b,
+        // It grew between the stat and the read.
+        Ok(None) => {
+            snap.skipped = Some(SkipReason::TooLarge);
+            return snap;
+        }
+        Err(_) => {
+            snap.skipped = Some(SkipReason::Unreadable);
+            return snap;
+        }
+    };
+    // The size now describes the same bytes the digest does: the file may have
+    // been rewritten shorter between the stat and the read, and a record whose
+    // two halves describe two versions is worse than one that describes the
+    // later.
+    snap.bytes = buf.len() as u64;
+    if cfg.hash {
+        snap.sha256 = Some(sha256_hex(&buf));
+    }
+    if !allowed {
+        snap.skipped = Some(SkipReason::Excluded);
+        return snap;
+    }
+    // Bytes that are not text are binary by the same argument `looks_binary`
+    // makes: a field every downstream query treats as text is the wrong place
+    // for them.
+    let text = match String::from_utf8(buf) {
+        Ok(t) => t,
+        Err(e) if !cfg.skip_binary => String::from_utf8_lossy(e.as_bytes()).into_owned(),
+        Err(_) => {
+            snap.skipped = Some(SkipReason::Binary);
+            return snap;
+        }
+    };
+    if cfg.skip_binary && looks_binary(&text) {
+        snap.skipped = Some(SkipReason::Binary);
+        return snap;
+    }
+    if text.len() > *budget {
+        snap.skipped = Some(SkipReason::Budget);
+        return snap;
+    }
+    *budget -= text.len();
+    snap.content = Some(text);
     snap
 }
 
@@ -456,8 +655,17 @@ mod tests {
     }
 
     fn snaps(tool: &str, input: Value, capture: &CaptureCfg) -> Vec<FileSnapshot> {
+        snaps_in(tool, input, capture, None)
+    }
+
+    fn snaps_in(
+        tool: &str,
+        input: Value,
+        capture: &CaptureCfg,
+        cwd: Option<&str>,
+    ) -> Vec<FileSnapshot> {
         let filter = PathFilter::new(&capture.file_contents);
-        let mut kind = EventKind::ToolUse {
+        let kind = EventKind::ToolUse {
             tool: tool.into(),
             phase: "post".into(),
             input,
@@ -469,8 +677,9 @@ mod tests {
             fqdns: vec![],
             file_contents: vec![],
         };
-        capture_from_payload(&mut kind, capture, &filter);
-        match kind {
+        let mut event = Event::new("claude-code", None, cwd.map(str::to_string), kind);
+        super::capture(&mut event, capture, &filter);
+        match event.kind {
             EventKind::ToolUse { file_contents, .. } => file_contents,
             other => panic!("not a tool use: {other:?}"),
         }
@@ -528,18 +737,20 @@ mod tests {
     }
 
     /// `disk` means disk. A deployment that chose it to avoid trusting what a
-    /// tool claims must not get the claim anyway.
+    /// tool claims must not get the claim anyway — here the named file does not
+    /// exist, so the honest answer is that nothing was read.
     #[test]
     fn disk_mode_takes_nothing_from_the_payload() {
         let c = on(|fc| fc.mode = ContentMode::Disk);
-        assert!(
-            snaps(
-                "Write",
-                serde_json::json!({"file_path": "/a.rs", "content": "x"}),
-                &c
-            )
-            .is_empty()
+        let out = snaps(
+            "Write",
+            serde_json::json!({"file_path": "/nonexistent/a.rs", "content": "x"}),
+            &c,
         );
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].source, SnapshotSource::Disk);
+        assert_eq!(out[0].content, None, "the payload's claim was shipped");
+        assert_eq!(out[0].skipped, Some(SkipReason::Unreadable));
     }
 
     /// The whole argument for separating metadata from content: an agent
@@ -693,6 +904,398 @@ mod tests {
             .map(|s| s.content.as_deref().unwrap_or("").len())
             .sum();
         assert!(total <= 1000, "the byte budget was overrun: {total}");
+        assert!(
+            out.iter().any(|s| s.skipped == Some(SkipReason::Budget)),
+            "a file dropped for budget did not say so: {out:?}"
+        );
+    }
+
+    // --- disk capture ---
+
+    fn disk() -> CaptureCfg {
+        on(|fc| fc.mode = ContentMode::Disk)
+    }
+
+    /// Reads the file the way a `Read` tool call would name it: absolute path,
+    /// no content in the payload at all.
+    fn read_of(dir: &std::path::Path, name: &str, capture: &CaptureCfg) -> FileSnapshot {
+        let path = dir.join(name).to_string_lossy().into_owned();
+        let mut out = snaps("Read", serde_json::json!({ "file_path": path }), capture);
+        assert_eq!(out.len(), 1, "expected exactly one snapshot");
+        out.remove(0)
+    }
+
+    /// The whole reason disk mode exists: a call that only names a file says
+    /// nothing about its contents, and that is most of what an agent does.
+    #[test]
+    fn disk_mode_reads_what_the_payload_never_carried() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("main.rs"), "fn main() {}").unwrap();
+
+        let snap = read_of(dir.path(), "main.rs", &disk());
+        assert_eq!(snap.source, SnapshotSource::Disk);
+        assert_eq!(snap.action, FileAction::Read);
+        assert_eq!(snap.content.as_deref(), Some("fn main() {}"));
+        assert_eq!(snap.bytes, 12);
+        assert_eq!(snap.skipped, None);
+        assert!(!snap.truncated);
+        assert_eq!(
+            snap.sha256.as_deref(),
+            Some(&sha256_hex(b"fn main() {}")[..])
+        );
+        assert!(snap.mtime.is_some(), "a disk snapshot with no mtime");
+    }
+
+    /// `hash = false` is a deployment saying it does not want digests of its
+    /// files leaving the machine. The disk path has to enforce that on its own:
+    /// unlike the payload path, it has the bytes in hand either way, so the
+    /// cheap thing to do is hash them regardless.
+    #[test]
+    fn hashing_off_means_no_digest_even_when_the_bytes_were_read() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("main.rs"), "fn main() {}").unwrap();
+        let mut c = disk();
+        c.file_contents.hash = false;
+
+        let snap = read_of(dir.path(), "main.rs", &c);
+        assert_eq!(snap.content.as_deref(), Some("fn main() {}"));
+        assert_eq!(snap.sha256, None, "a digest nobody asked for");
+    }
+
+    /// `payload` mode does no I/O. A deployment that left the mode alone and
+    /// turned capture on did not agree to the daemon opening files.
+    #[test]
+    fn payload_mode_never_touches_the_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("main.rs"), "fn main() {}").unwrap();
+        let path = dir.path().join("main.rs").to_string_lossy().into_owned();
+        assert!(
+            snaps(
+                "Read",
+                serde_json::json!({ "file_path": path }),
+                &on(|_| {})
+            )
+            .is_empty(),
+            "payload mode read a file off disk"
+        );
+    }
+
+    /// `both` is not "twice": the payload half is exact and free, so it answers
+    /// for the calls that carry a body, and the disk half answers for the rest.
+    #[test]
+    fn both_mode_prefers_the_payload_and_falls_back_to_the_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.rs"), "on disk").unwrap();
+        let path = dir.path().join("a.rs").to_string_lossy().into_owned();
+        let c = on(|fc| fc.mode = ContentMode::Both);
+
+        let written = snaps(
+            "Write",
+            serde_json::json!({"file_path": path, "content": "in payload"}),
+            &c,
+        );
+        assert_eq!(written.len(), 1, "one call, one snapshot");
+        assert_eq!(written[0].source, SnapshotSource::Payload);
+        assert_eq!(written[0].content.as_deref(), Some("in payload"));
+
+        let read = snaps("Read", serde_json::json!({ "file_path": path }), &c);
+        assert_eq!(read[0].source, SnapshotSource::Disk);
+        assert_eq!(read[0].content.as_deref(), Some("on disk"));
+    }
+
+    /// A symlink is how you get a reader to fetch a file nobody named — and it
+    /// walks straight past an `exclude` list, which matches on the path the
+    /// agent said, not on the path it resolves to.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_is_reported_and_not_followed() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("id_rsa"), "PRIVATE KEY").unwrap();
+        std::os::unix::fs::symlink(dir.path().join("id_rsa"), dir.path().join("innocent.txt"))
+            .unwrap();
+
+        let snap = read_of(dir.path(), "innocent.txt", &disk());
+        assert_eq!(snap.content, None, "the link's target was shipped");
+        assert_eq!(snap.skipped, Some(SkipReason::Unreadable));
+        assert_eq!(snap.sha256, None, "the target was read to hash it");
+        // Not even measured. A stat that followed the link would refuse the
+        // read and still record the target's size and mtime — which is how
+        // large `id_rsa` is and when it last changed, for a file the tool
+        // never named.
+        assert_eq!(snap.bytes, 0, "the link's target was measured");
+        assert_eq!(snap.mtime, None, "the link's target was measured");
+    }
+
+    /// Why the stat comes first. A `read()` on a fifo with no writer never
+    /// returns, so a daemon that opened one would stop enriching events at all
+    /// — this test hangs rather than fails if that guarantee goes.
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_is_never_opened() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pipe");
+        let c = std::ffi::CString::new(path.to_string_lossy().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0, "mkfifo");
+
+        let snap = read_of(dir.path(), "pipe", &disk());
+        assert_eq!(snap.skipped, Some(SkipReason::Unreadable));
+        assert_eq!(snap.content, None);
+    }
+
+    #[test]
+    fn a_directory_is_not_a_file_and_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        let snap = read_of(dir.path(), "sub", &disk());
+        assert_eq!(snap.skipped, Some(SkipReason::Unreadable));
+    }
+
+    /// A patch header says `src/a.rs`. Which file that is depends on the
+    /// session's cwd — resolving it against the daemon's would read a
+    /// different file with the same name and record it as a success.
+    #[test]
+    fn a_relative_path_is_resolved_against_the_session_cwd() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/a.rs"), "let a = 1;").unwrap();
+        let input = serde_json::json!({"file_path": "src/a.rs"});
+
+        let here = snaps_in(
+            "Read",
+            input.clone(),
+            &disk(),
+            Some(&dir.path().to_string_lossy()),
+        );
+        assert_eq!(here[0].content.as_deref(), Some("let a = 1;"));
+
+        let nowhere = snaps_in("Read", input, &disk(), None);
+        assert_eq!(
+            nowhere[0].skipped,
+            Some(SkipReason::Unreadable),
+            "a relative path was resolved against the daemon's own cwd"
+        );
+        assert_eq!(nowhere[0].content, None);
+    }
+
+    /// The exclusion is about content, not about the file's existence: the
+    /// digest is what makes one `.env` the same `.env` across forty sessions,
+    /// and it is not the file.
+    #[test]
+    fn an_excluded_file_is_hashed_on_disk_but_never_shipped() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".env"), "AWS_SECRET_ACCESS_KEY=x").unwrap();
+
+        let snap = read_of(dir.path(), ".env", &disk());
+        assert_eq!(snap.skipped, Some(SkipReason::Excluded));
+        assert_eq!(snap.content, None, "an excluded file's body was shipped");
+        assert_eq!(
+            snap.sha256.as_deref(),
+            Some(&sha256_hex(b"AWS_SECRET_ACCESS_KEY=x")[..])
+        );
+        assert_eq!(snap.bytes, 23);
+
+        // And with hashing off there is no reason to open it at all.
+        let mut c = disk();
+        c.file_contents.hash = false;
+        let unopened = read_of(dir.path(), ".env", &c);
+        assert_eq!(unopened.skipped, Some(SkipReason::Excluded));
+        assert_eq!(unopened.sha256, None);
+        assert_eq!(
+            unopened.bytes, 23,
+            "the size came from the stat, not a read"
+        );
+    }
+
+    /// With hashing off there is no reason to open an excluded file at all,
+    /// and "no reason" has to mean "does not" — an unreadable `.env` that comes
+    /// back as `unreadable` is one that was opened.
+    #[cfg(unix)]
+    #[test]
+    fn an_excluded_file_is_not_opened_when_hashing_is_off() {
+        if unsafe { libc::geteuid() } == 0 {
+            return; // root reads it regardless, so the test proves nothing
+        }
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".env");
+        std::fs::write(&path, "AWS_SECRET_ACCESS_KEY=x").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let mut c = disk();
+        c.file_contents.hash = false;
+
+        let snap = read_of(dir.path(), ".env", &c);
+        assert_eq!(
+            snap.skipped,
+            Some(SkipReason::Excluded),
+            "an excluded file was opened for no one"
+        );
+        assert_eq!(snap.bytes, 23, "the size came from the stat, not a read");
+    }
+
+    /// An oversized file is reported by size and not read. Truncating a payload
+    /// body is free — it is already in memory; reading gigabytes off disk to
+    /// keep the first page of it is not.
+    #[test]
+    fn a_file_over_the_cap_is_measured_rather_than_read() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("big.rs"), "x".repeat(5000)).unwrap();
+        let mut c = disk();
+        c.file_contents.max_bytes = 100;
+
+        let snap = read_of(dir.path(), "big.rs", &c);
+        assert_eq!(snap.skipped, Some(SkipReason::TooLarge));
+        assert_eq!(snap.content, None);
+        assert!(!snap.truncated, "nothing was truncated; nothing was read");
+        assert_eq!(snap.bytes, 5000, "the size is what the record is for");
+        assert_eq!(snap.sha256, None, "a digest of a file nobody read");
+    }
+
+    /// The global field cap applies to a disk body for the reason it applies to
+    /// a payload one: a later stage would cut it without setting the flag.
+    #[test]
+    fn the_global_field_cap_bounds_a_disk_read_too() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("big.rs"), "x".repeat(5000)).unwrap();
+        let c = CaptureCfg {
+            max_field_bytes: 200,
+            ..disk()
+        };
+        assert_eq!(
+            read_of(dir.path(), "big.rs", &c).skipped,
+            Some(SkipReason::TooLarge)
+        );
+    }
+
+    /// Two ways a file is not text, and both have to be caught: control bytes
+    /// inside otherwise valid UTF-8, and bytes that are not UTF-8 at all.
+    #[test]
+    fn a_binary_file_on_disk_is_measured_and_not_shipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let control = [0x4d, 0x5a, 0x00, 0x01]; // valid UTF-8, not text
+        let invalid = [0x4d, 0x5a, 0xff, 0xfe]; // not UTF-8 at all
+        std::fs::write(dir.path().join("control.bin"), control).unwrap();
+        std::fs::write(dir.path().join("invalid.bin"), invalid).unwrap();
+
+        for (name, bytes) in [("control.bin", control), ("invalid.bin", invalid)] {
+            let snap = read_of(dir.path(), name, &disk());
+            assert_eq!(snap.skipped, Some(SkipReason::Binary), "{name}");
+            assert_eq!(snap.content, None, "{name}");
+            assert_eq!(
+                snap.sha256.as_deref(),
+                Some(&sha256_hex(&bytes)[..]),
+                "a file that is not shipped is still identified: {name}"
+            );
+        }
+
+        // `skip_binary = false` means both of them come through, the invalid
+        // one decoded lossily rather than dropped.
+        let mut c = disk();
+        c.file_contents.skip_binary = false;
+        for name in ["control.bin", "invalid.bin"] {
+            let snap = read_of(dir.path(), name, &c);
+            assert!(
+                snap.content.is_some(),
+                "skip_binary = false ignored: {name}"
+            );
+            assert_eq!(snap.skipped, None, "{name}");
+        }
+    }
+
+    /// The stat sized the file; the read is a second syscall against a path an
+    /// untrusted agent chose. A file that grew in between comes back as a
+    /// prefix, and a digest of a prefix matches no file anywhere — so the read
+    /// asks for one byte more than it will accept.
+    #[test]
+    fn a_read_that_hits_its_limit_is_refused_rather_than_returned_short() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ten.txt");
+        std::fs::write(&path, "0123456789").unwrap();
+
+        assert_eq!(read_capped(&path, 10).unwrap().unwrap().len(), 10);
+        assert_eq!(read_capped(&path, 100).unwrap().unwrap().len(), 10);
+        assert!(
+            read_capped(&path, 9).unwrap().is_none(),
+            "returned a prefix"
+        );
+        assert!(
+            read_capped(&path, 3).unwrap().is_none(),
+            "returned a prefix"
+        );
+    }
+
+    /// The stat refuses a symlink, but a stat and an open are two syscalls with
+    /// a gap, and swapping the path for a link is the whole point of the gap.
+    /// The open has to refuse one on its own.
+    #[cfg(unix)]
+    #[test]
+    fn the_read_itself_refuses_to_follow_a_link() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("id_rsa"), "PRIVATE KEY").unwrap();
+        let link = dir.path().join("innocent.txt");
+        std::os::unix::fs::symlink(dir.path().join("id_rsa"), &link).unwrap();
+
+        assert!(
+            read_capped(&link, 4096).is_err(),
+            "the open followed a link the stat had already refused"
+        );
+    }
+
+    /// "Measured rather than read" is only a claim until the file cannot be
+    /// read at all: a capture that opened it anyway would report `unreadable`
+    /// here instead of the size the record exists to carry.
+    #[cfg(unix)]
+    #[test]
+    fn an_oversized_file_is_not_opened_at_all() {
+        if unsafe { libc::geteuid() } == 0 {
+            return; // root reads it regardless, so the test proves nothing
+        }
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("big.rs");
+        std::fs::write(&path, "x".repeat(5000)).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let mut c = disk();
+        c.file_contents.max_bytes = 100;
+
+        let snap = read_of(dir.path(), "big.rs", &c);
+        assert_eq!(
+            snap.skipped,
+            Some(SkipReason::TooLarge),
+            "an oversized file was opened before its size was checked"
+        );
+        assert_eq!(snap.bytes, 5000);
+    }
+
+    /// The two halves share one budget. A `mode = "both"` that gave each half
+    /// its own would be quietly twice the number written in the config.
+    #[test]
+    fn the_per_event_byte_budget_covers_disk_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..4 {
+            std::fs::write(dir.path().join(format!("f{i}.rs")), "y".repeat(300)).unwrap();
+        }
+        let paths: Vec<String> = (0..4)
+            .map(|i| {
+                dir.path()
+                    .join(format!("f{i}.rs"))
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        let patch: String = paths
+            .iter()
+            .map(|p| format!("*** Update File: {p}\n+y\n"))
+            .collect();
+        let mut c = disk();
+        c.file_contents.max_total_bytes = 700;
+
+        let out = snaps("apply_patch", serde_json::json!({ "patch": patch }), &c);
+        assert_eq!(out.len(), 4, "every file is still named");
+        let total: usize = out
+            .iter()
+            .map(|s| s.content.as_deref().unwrap_or("").len())
+            .sum();
+        assert!(total <= 700, "the byte budget was overrun: {total}");
         assert!(
             out.iter().any(|s| s.skipped == Some(SkipReason::Budget)),
             "a file dropped for budget did not say so: {out:?}"

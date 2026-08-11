@@ -1902,6 +1902,66 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
     because they all compared the digest against this module's own output.
     `the_digest_is_a_sha256_in_lower_case_hex` pins a known answer instead.
 
+- [x] **T18d** — disk-mode capture. Dependency: T18c.
+  Files: `src/filecap.rs`, `src/enrich.rs`.
+
+  The disk half answers the question the payload half cannot: a `Read`, a
+  `Bash` with a `>` redirect, a `sed -i`, a formatter that ran afterwards. It
+  is entered only for a candidate the payload had no body for (`both`) or for
+  every candidate (`disk`), so `both` is not "twice" and `payload` still does
+  no I/O at all — a deployment that left the mode alone did not agree to the
+  daemon opening files.
+
+  One budget across both halves. Two budgets would make `mode = "both"`
+  quietly twice the number written in the config file.
+
+  **Stat first, and without following.** The stat is what decides the path is
+  a thing that can be read at all: `read()` on a fifo never returns, so a
+  daemon that opened one would stop enriching events entirely — the fifo test
+  hangs rather than fails if that guarantee goes, which is why the harness
+  counts a timeout as a bite. A symlink is refused for a different reason: it
+  reads a file the tool never named, and it walks straight past an `exclude`
+  list that matches on the path the *agent* said. `symlink_metadata` is what
+  keeps a link's snapshot from carrying its target's size and mtime — how big
+  `id_rsa` is and when it last changed, for a file nobody named. The open then
+  refuses a link again on its own (`O_NOFOLLOW`, `FILE_FLAG_OPEN_REPARSE_POINT`),
+  because a stat and an open are two syscalls and swapping the path in between
+  is the entire point of the gap.
+
+  **An oversized file is measured, not truncated.** A payload body is in memory
+  whether we want it or not, so keeping a prefix of it costs nothing; reading
+  2 GiB off disk to keep 32 KiB is I/O this daemon chose to do, for a prefix of
+  a file it could not see anyway. Size and mtime are still reported, which is
+  what "what is this deployment not capturing" needs. The read still asks for
+  one byte more than it will accept, so a file that grew between the stat and
+  the read is refused rather than returned as a prefix with a digest that
+  matches nothing.
+
+  **An excluded file is opened when — and only when — `hash` is on.** The
+  digest is what makes one `.env` the same `.env` across forty sessions; the
+  bytes are hashed and dropped, and no content of an excluded file reaches the
+  snapshot. With `hash = false` it is never opened, which a `chmod 000` test
+  proves by the reason it comes back.
+
+  A relative path is resolved against the *session's* cwd. Against the
+  daemon's it would name a different file with the same name and record it as
+  a success — the mutation that drops it reads this repo's own `src/a.rs`.
+
+  Twenty mutations, two survivors, both real gaps:
+
+  - `symlink_metadata` → `metadata` changed nothing observable, because the
+    `O_NOFOLLOW` open refused the link anyway. It was still a leak: the
+    snapshot picked up the *target's* size and mtime. The test now asserts a
+    refused link is not measured either.
+  - `hash = false` was unenforced on the disk path — every test that set it
+    also had the file excluded, so the early return hid it. The disk half has
+    the bytes in hand either way, so hashing them is the cheap default and had
+    to be checked separately.
+
+  Not mutation-covered, deliberately: nothing here stages a *timeout* on a
+  hung read. Stat-first removes the fifo and device cases; a network mount
+  that stops answering is what T18e's deadline is for.
+
 - [ ] **T19** — Docs. Dependency: T18.
   Files: `docs/adding-a-tool.md`, `README.md`, `docs/telemetry-gaps.md`
 
