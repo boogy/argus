@@ -515,6 +515,33 @@ mod tests {
             "refresh must pick the new capture settings up"
         );
 
+        // The capture table is nested, and `{:?}` on the outer struct is only
+        // load-bearing as long as every inner one is in it. A deployment that
+        // tightens `exclude` and sees no change until the next restart has
+        // been shipping the files it just banned.
+        let after_prompts = pipeline.fingerprint.clone();
+        cfg.write()
+            .unwrap()
+            .capture
+            .file_contents
+            .exclude
+            .push("/secrets/".into());
+        assert_ne!(
+            config_fingerprint(&cfg),
+            after_prompts,
+            "a file_contents change must invalidate the cached pipeline"
+        );
+        pipeline.refresh(&cfg);
+        assert!(
+            pipeline
+                .capture
+                .file_contents
+                .exclude
+                .iter()
+                .any(|p| p == "/secrets/"),
+            "refresh must pick the new exclusions up"
+        );
+
         let after_capture = pipeline.fingerprint.clone();
         cfg.write().unwrap().redaction.extra_patterns = vec!["ACME-[0-9]{6}".into()];
         assert_ne!(

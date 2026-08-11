@@ -79,6 +79,7 @@ pub struct CaptureCfg {
     pub max_field_bytes: usize,
     /// What a string that exceeds `max_field_bytes` is reduced to.
     pub truncate_mode: TruncateMode,
+    pub file_contents: FileContentsCfg,
 }
 impl Default for CaptureCfg {
     fn default() -> Self {
@@ -89,8 +90,93 @@ impl Default for CaptureCfg {
             assistant_messages: true,
             max_field_bytes: 65536,
             truncate_mode: TruncateMode::default(),
+            file_contents: FileContentsCfg::default(),
         }
     }
+}
+
+/// What an agent actually wrote into your files, not just which files it named.
+///
+/// Off by default, and that default is not timidity. Everything else argus
+/// captures is a description of an action; this is the content itself, and on
+/// a developer's machine that content is the largest concentration of
+/// credentials, customer data and unreleased work in one place. Turning it on
+/// is a decision about what a SIEM is allowed to hold, and it belongs to
+/// whoever runs the SIEM.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct FileContentsCfg {
+    pub enabled: bool,
+    pub mode: ContentMode,
+    /// Regexes on the normalized path. Empty means "no restriction" — an
+    /// `include` that matched nothing would be an enabled feature that
+    /// captures nothing, which reads as a bug rather than a policy.
+    pub include: Vec<String>,
+    /// Regexes on the normalized path, applied after `include`. Wins on a tie:
+    /// a deployment that both included `/src/` and excluded `/src/.env` meant
+    /// the exclusion.
+    pub exclude: Vec<String>,
+    /// Per file. Larger files are captured truncated, with the marker.
+    pub max_bytes: usize,
+    /// Per event, so one `apply_patch` across forty files cannot become forty
+    /// file bodies in one record.
+    pub max_files: usize,
+    /// Per event, across all files. `max_bytes × max_files` is the worst case
+    /// without it, which at the defaults is ten times what anyone wants in a
+    /// single log record.
+    pub max_total_bytes: usize,
+    pub skip_binary: bool,
+    /// Record `sha256`, size and mtime even where content is withheld. This is
+    /// what makes an excluded file still visible as *touched*, and what lets
+    /// two captures of one path be told apart.
+    pub hash: bool,
+}
+
+impl Default for FileContentsCfg {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            mode: ContentMode::default(),
+            include: vec![],
+            // Secrets and noise. These keep content out while `hash` still
+            // records that the file was touched — reading `.env` is a finding
+            // on its own, and reporting it does not require shipping it.
+            exclude: [
+                "/node_modules/",
+                r"/\.git/",
+                r"\.(lock|min\.js)$",
+                r"/\.env",
+                r"\.pem$",
+                r"/\.ssh/",
+                "_rsa$",
+                r"\.p12$",
+            ]
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect(),
+            max_bytes: 32768,
+            max_files: 10,
+            max_total_bytes: 262144,
+            skip_binary: true,
+            hash: true,
+        }
+    }
+}
+
+/// Where captured bytes may come from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContentMode {
+    /// Only what the hook payload already carried: `Write.content`, an
+    /// `Edit`'s two halves, a patch body. Exact, race-free, and zero I/O —
+    /// it is what the tool said it was about to do.
+    #[default]
+    Payload,
+    /// Read the file. Catches what payloads never mention — a `Bash` with a
+    /// `>` redirect, a `sed -i`, an external formatter — at the cost of
+    /// reading the state a moment *after* the tool acted.
+    Disk,
+    Both,
 }
 
 /// Which end of an oversized string is worth keeping.
@@ -420,6 +506,88 @@ mod tests {
             TruncateMode::Head,
             "the default must stay the historical behaviour"
         );
+    }
+
+    /// The one setting whose default is a policy decision rather than a
+    /// convenience: on, it puts file bodies in the SIEM.
+    #[test]
+    fn file_content_capture_is_off_until_someone_turns_it_on() {
+        let d = FileContentsCfg::default();
+        assert!(!d.enabled);
+        assert_eq!(d.mode, ContentMode::Payload, "the zero-I/O mode by default");
+        assert!(d.skip_binary);
+        assert!(d.hash, "an excluded file must still be visible as touched");
+        assert!(
+            d.include.is_empty(),
+            "an include list nobody asked for would silently narrow capture"
+        );
+        // The exclusions are the shipped policy. Losing one is not a
+        // regression a compiler can catch.
+        for pat in [r"/\.env", r"/\.ssh/", r"\.pem$", "_rsa$", "/node_modules/"] {
+            assert!(d.exclude.iter().any(|p| p == pat), "lost exclusion {pat}");
+        }
+        // max_bytes × max_files without it, which is 320 KB in one record.
+        assert!(d.max_total_bytes < d.max_bytes * d.max_files);
+    }
+
+    #[test]
+    fn the_file_contents_table_parses_the_way_the_docs_write_it() {
+        let cfg: Config = toml::from_str(
+            r#"
+            [capture.file_contents]
+            enabled = true
+            mode = "both"
+            include = ['/src/']
+            exclude = ['/vendor/']
+            max_bytes = 512
+            max_files = 3
+            max_total_bytes = 1024
+            skip_binary = false
+            hash = false
+            "#,
+        )
+        .unwrap();
+        let fc = &cfg.capture.file_contents;
+        assert!(fc.enabled);
+        assert_eq!(fc.mode, ContentMode::Both);
+        assert_eq!(fc.include, vec!["/src/".to_string()]);
+        // A user-supplied list replaces the defaults rather than adding to
+        // them: a deployment that writes its own `exclude` is stating a whole
+        // policy, and silently keeping ours would make its config a lie in the
+        // other direction.
+        assert_eq!(fc.exclude, vec!["/vendor/".to_string()]);
+        assert_eq!(fc.max_bytes, 512);
+        assert_eq!(fc.max_files, 3);
+        assert_eq!(fc.max_total_bytes, 1024);
+        assert!(!fc.skip_binary);
+        assert!(!fc.hash);
+
+        // Sibling settings in `[capture]` survive the nested table.
+        assert!(cfg.capture.prompts);
+        assert!(
+            toml::from_str::<Config>("[capture.file_contents]\nmode = \"stdin\"\n").is_err(),
+            "an unknown mode was accepted"
+        );
+    }
+
+    /// The realistic way this table gets written: one line to turn it on. If
+    /// that does not parse, the whole config is rejected at startup — and if it
+    /// parses to a zeroed struct, the shipped exclusions are gone and the very
+    /// first capture ships `.env`.
+    #[test]
+    fn turning_capture_on_takes_one_line_and_keeps_the_shipped_policy() {
+        let cfg: Config =
+            toml::from_str("[capture.file_contents]\nenabled = true\n").expect("minimal table");
+        let fc = &cfg.capture.file_contents;
+        assert!(fc.enabled);
+        let d = FileContentsCfg::default();
+        assert_eq!(fc.exclude, d.exclude, "the shipped exclusions were dropped");
+        assert_eq!(fc.max_bytes, d.max_bytes);
+        assert_eq!(fc.max_files, d.max_files);
+        assert_eq!(fc.max_total_bytes, d.max_total_bytes);
+        assert_eq!(fc.mode, d.mode);
+        assert_eq!(fc.skip_binary, d.skip_binary);
+        assert_eq!(fc.hash, d.hash);
     }
 
     /// The mode is written in a config file, in snake_case, or it is a knob

@@ -6,6 +6,7 @@ pub mod detect;
 pub mod enrich;
 pub mod event;
 pub mod export;
+pub mod filecap;
 pub mod harness;
 pub mod hook;
 pub mod install;

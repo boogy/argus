@@ -1830,6 +1830,40 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
   the 4 MiB export body, to say nothing.
   `a_call_that_captured_nothing_carries_no_snapshot_key` closes it.
 
+- [x] **T18b** — which files may have their contents captured. Dependency: T18a.
+  Files: `src/config.rs`, new `src/filecap.rs`, `src/lib.rs`, `src/daemon.rs`
+  (test only).
+
+  The decision is split from the capture because the decision is the security
+  boundary and the capture is plumbing. `PathFilter` is pure — a path in, a
+  verdict out, no I/O — so the rule that keeps `.ssh/id_rsa` out of the SIEM is
+  tested exhaustively without a filesystem, and one verdict covers both the
+  payload and the disk source.
+
+  It fails *closed*, uniquely in this codebase. Everywhere else an invalid
+  regex is warned about and dropped; a dropped redaction rule scrubs less than
+  asked, but a dropped exclusion ships the file it names, and the files it
+  names are `.env` and `id_rsa`. So a non-compiling `include` or `exclude`
+  refuses everything.
+
+  Path normalization is policy, not cosmetics. Every shipped `exclude` is
+  written with forward slashes, and Windows paths are case-insensitive, so
+  without `normalize` plus case folding the default policy silently misses
+  `C:\Repo\NODE_MODULES\` on exactly the platform `--managed` deployments
+  target. `with_case_folding` is split out of `new` so both branches are
+  asserted on every platform — under `cfg!(windows)` the folding would only
+  ever run on Windows CI, which is where nobody looks first.
+
+  An empty `include` is `None`, not an empty `RegexSet`: an empty set matches
+  nothing, which would make an enabled feature capture nothing.
+
+  Sixteen mutations. One survived: removing `#[serde(default)]` from
+  `FileContentsCfg` — the round-trip test writes every field, so serde never
+  needed the defaults. The realistic config is one line, `enabled = true`, and
+  without that attribute it either fails to parse or parses to a zeroed struct
+  whose `exclude` list is empty, so the very first capture ships `.env`.
+  `turning_capture_on_takes_one_line_and_keeps_the_shipped_policy` closes it.
+
 - [ ] **T19** — Docs. Dependency: T18.
   Files: `docs/adding-a-tool.md`, `README.md`, `docs/telemetry-gaps.md`
 
