@@ -117,6 +117,40 @@ so give it something falsifiable per artifact:
 Anything left unverified is silently permanent: before this, a `TomlEdit` was
 never checked at all, so a half-installed Codex reported healthy forever.
 
+## What a `ToolUse` owes the pipeline
+
+An adapter builds `EventKind::ToolUse` with `file_contents: vec![]` and leaves
+it that way. File capture runs in the daemon's enrichment stage, not at parse
+time, because it does filesystem I/O and parsing is a single task the whole
+socket queues behind. There is nothing per-tool to write.
+
+Two fields decide whether that stage can do anything, and both are the
+adapter's to get right:
+
+- **The path key.** Candidates are picked out of `input` by shape, not by tool
+  name: a recognized path key, plus `content`/`contents` (a write),
+  `new_string`/`newString`/`new_str` (an edit), an `edits` array, or an
+  `apply_patch` body. If the new tool spells its path something not in
+  `FILE_KEYS` (`src/adapters/mod.rs`), add it there — the same list feeds
+  `extract_files_for_tool`, so a missing spelling costs the `files` list as
+  well as the capture, and both failures look like a tool that touches no
+  files.
+- **`Event::cwd`.** A relative path is only a file once you know where it was
+  said. Resolving one against the daemon's working directory would name a
+  different file with the same name, so an event that carries a relative path
+  and no `cwd` is recorded as `unreadable` rather than guessed at. If the
+  tool's payload carries a project or session directory, map it.
+
+Content the payload already carried needs no I/O and no `cwd` — it is captured
+in `payload` mode, which is the default. It is read out of the `input` the
+adapter kept, which has two consequences. Cap that input with the shared
+`cap_value`/`cap_text` and nothing else: they keep both ends and leave
+redaction headroom, where a hand-rolled truncation hands the capture a middle
+it will report as a tail. And `capture.tool_inputs = false` nulls that input,
+which takes file capture with it — both halves, since the disk half also finds
+its paths there. The `files` list is read from the raw payload and is
+unaffected, so such an event still names every file and describes none of them.
+
 ## Fixtures
 
 Adapters written from documentation are guesses about field names, and a wrong

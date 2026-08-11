@@ -255,6 +255,13 @@ is of the bytes the tool actually handled, not of the scrubbed copy — a digest
 of a redaction marker matches nothing — and a body that was truncated carries
 no digest at all, for the same reason.
 
+One interaction is worth knowing before you rely on this: `capture.tool_inputs
+= false` disables file capture entirely, both halves. The files a call touched
+are found in its input, so an event with no input has no candidates to read —
+including for `disk` mode, which needs the path even though it does not need
+the body. The `files` list is unaffected: such an event still *names* every
+file and describes none of them.
+
 `disk` mode reads the file a moment *after* the tool acted, so what it records
 is the state that resulted, not necessarily the state the tool wrote. `payload`
 mode has the opposite property and no I/O; `both` is the one that answers "what

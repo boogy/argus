@@ -2055,6 +2055,36 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
   control byte but tab/CR/LF in the first 8 KiB — not a ratio), and the claim
   that `capture.prompts = false` keeps prompts out of the spool.
 
+- [x] **T19b** — `docs/adding-a-tool.md`. Dependency: T19a.
+  Files: `docs/adding-a-tool.md`, `README.md`
+
+  The adapter checklist said nothing about `file_contents`, which reads as "one
+  more field to fill in" — it is the opposite. New section stating that an
+  adapter builds it as `vec![]` and stops, because capture does I/O and parse
+  is the single task the socket queues behind.
+
+  What *is* the adapter's job, and both are easy to get silently wrong:
+
+  - The path key. Candidates are found by shape, so a tool spelling its path
+    something outside `FILE_KEYS` gets no capture — and no `files` list
+    either, since the same list feeds `extract_files_for_tool`. Both failures
+    look identical to a tool that touches no files.
+  - `Event::cwd`. A relative path resolved against the daemon's cwd names a
+    different file with the same name, which is worse than reading nothing
+    because the record looks like a successful capture. Missing `cwd` is
+    recorded `unreadable` rather than guessed.
+
+  Also documented, in both files: `capture.tool_inputs = false` disables file
+  capture entirely. The paths live in the input, so nulling it leaves the disk
+  half nothing to resolve either — verified against `candidates`, which
+  returns empty for `Value::Null` on both the keyed and `apply_patch` paths.
+  The `files` list is built from the raw payload and survives, so the event
+  still names every file and describes none of them.
+
+  And: cap adapter input with the shared `cap_value`/`cap_text` only. They keep
+  both ends and leave `REDACTION_HEADROOM`; a hand-rolled truncation hands the
+  capture a middle that the final `head_tail` cap will present as a tail.
+
 ## Dependency graph (from the plan)
 
 ```
