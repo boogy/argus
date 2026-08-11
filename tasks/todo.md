@@ -2151,6 +2151,196 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
   than `FILE_KEYS` is what stops a `Bash` candidate, so nothing anywhere
   asserted what `files` may contain.
 
+## Review wave 2 — corner cases, and the plan that came out of it
+
+A pass over every module asking one question the earlier waves did not: what
+does this code do when the machine misbehaves — a full disk, a symlink loop, a
+listener out of file descriptors, a plugin file someone appended to? Every item
+below was confirmed against the code before it was written, and every fix is
+mutation-checked: the test was shown to fail with the fix removed, because a
+green suite proves nothing on its own.
+
+The tasks are independent. Each touches a different module, each lands as one
+commit gated on `make verify`, and none needs another to be done first.
+
+### Landed before this wave (not previously in the ledger)
+
+- [x] **T19e–T19l** — comments and config docs corrected against the code they
+  describe. Dependency: T19d. Files: `src/*`, `README.md`
+- [x] **T20a** — order the spool by something the filesystem can express.
+  Dependency: none. Files: `src/spool.rs`
+- [x] **T20b** — quote the bash hook command for bash, not for the host.
+  Dependency: none. Files: `src/harness/copilot.rs`
+- [x] **T20c** — compare the named pipe's trustee, not its spelling.
+  Dependency: none. Files: `src/ipc.rs`
+- [x] **T21** — identify an excluded file in a payload, the way the disk path
+  does. Dependency: none. Files: `src/filecap.rs`
+
+### This wave
+
+- [x] **T22** — stop the two accept loops spinning on a persistent error.
+  Dependency: none. Files: `src/ipc.rs`, `src/adapters/codex.rs`
+
+  Both accept loops discarded an error with a bare `continue`. Transient
+  failures are handled by that; `EMFILE`/`ENFILE` is not transient, and turned
+  the loop into a tight spin — one core at 100%, no log line, in the process
+  whose job is to keep recording while something is going wrong. Shared
+  `AcceptBackoff`: 10ms doubling to 1s, reset by any accepted connection, every
+  retry logged. `next_ms` split out of `wait` so the schedule is assertable
+  without a test that sleeps. Mutation: a constant retry fails the "never grew"
+  assertion.
+
+- [x] **T23** — stop one failed cache write from silencing fleet policy
+  forever. Dependency: none. Files: `src/config.rs`
+
+  `poll_loop` committed the new ETag *before* the cache write. A failed write
+  therefore left the daemon sending `If-None-Match` for a body it had never
+  stored, collecting `304`s — running on local config alone, indefinitely,
+  with nothing logged. Recovery meant deleting the data directory. The ETag now
+  advances only after the rename lands. Extracted as `apply_remote` so the
+  ordering is assertable without running a loop whose shortest cycle is 30s;
+  the test blocks the cache path with a non-empty directory. Mutation:
+  restoring the early assignment fails it.
+
+- [x] **T24** — stop the legacy-data walk from following symlinks back into
+  itself. Dependency: none. Files: `src/paths.rs`
+
+  `collect_files` used `Path::is_dir`, which follows symlinks, so a link
+  pointing at one of its own ancestors was descended repeatedly until the path
+  hit the platform's length limit. `migrate` — which runs at daemon startup —
+  then copied the same database once per duplicate, and since every copy
+  verified byte-for-byte it reported `Moved` and **deleted the source**.
+  Classified with `symlink_metadata` now: a symlink is an entry to copy, not a
+  directory to descend. Mutation: restoring `is_dir()` reproduces the
+  duplicated walk in the test's failure output.
+
+- [x] **T25** — replace the host tools' config files whole, never in place.
+  Dependency: none. Files: `src/harness/mod.rs`
+
+  Install *and* uninstall edited `~/.claude/settings.json`,
+  `~/.codex/config.toml` and the plugin files with `fs::write`, which truncates
+  first. A full disk or a kill inside that window empties a file that belongs
+  to the user's coding agent — so what breaks is the agent, not argus. All four
+  sites share `write_atomic`: sibling temporary, mode carried over from the
+  file being replaced (several are 0600), temporary removed if the rename
+  fails. The test observes the difference through a hard link. Mutation:
+  writing through to the path first fails it.
+
+- [x] **T26** — hold the executed plugin files to the bytes this binary writes.
+  Dependency: none. Files: `src/harness/{mod,opencode,pi,copilot}.rs`,
+  `README.md`, `docs/adding-a-tool.md`
+
+  Answers the integrity half of the request directly. `check` verified an
+  `OwnedFile` by looking for literal markers, which constrain the substrings
+  they name and nothing else — so a plugin with every marker intact and a
+  payload appended after them passed, and the hourly integrity loop kept
+  calling it healthy. Same hole covered the quiet case: a plugin left by an
+  older argus keeps its markers, so a new binary talking to a stale on-disk
+  plugin read as "present".
+
+  Both plugin halves are `include_str!`-embedded and composed in Rust by
+  `shim_source()`, so the expected bytes are already in the binary — they are
+  never read from disk at install time, which is also the answer to "how are
+  these files copied when argus runs": they are not copied, they are written
+  from the binary. `OwnedFile` gains `exact`; when set, verification requires
+  byte-for-byte equality and reports both sha256 prefixes on a mismatch. No
+  whitespace normalisation — an integrity check that ignores trailing bytes is
+  the one an attacker writes into. `exact` is false only for Copilot's
+  `hooks/argus.json`, a data file whose documented schema takes foreign keys
+  beside argus's own. Live in both entry points: `argus check` and the daemon's
+  hourly integrity loop. Mutation: disabling the comparison fails it.
+
+- [x] **T27** — record which cloud identity the agent was holding.
+  Dependency: none. Files: `src/cloudid.rs` (new), `src/event.rs`,
+  `src/hook.rs`, `src/harness/mod.rs`, `src/export.rs`, `src/config.rs`,
+  `plugins/shared/transport.ts`, `tests/plugin/opencode_payload.mjs`,
+  `README.md`
+
+  An event says an agent ran `terraform apply`; which account it ran against is
+  the field an incident is pivoted on, and no hook payload carries it. The
+  environment does.
+
+  Identifiers come from an explicit allowlist and are captured **by value** —
+  every one already appears in the provider's own audit log (role ARN, account
+  id, project, profile, access key *id*). Everything whose *name* says it holds
+  secret material is recorded by **name only** and its value is never read.
+  Anything matching neither is ignored: an agent's environment is a developer's
+  whole shell, and a monitor that shipped it wholesale would be the largest
+  thing it had to defend. Exported as `cloud.*` attributes plus one
+  `cloud.credentials_present` list.
+
+  Read as close to the agent as the channel allows — the hook shim for Claude
+  Code, Copilot and Codex's `notify`; the TypeScript plugin for opencode and
+  pi, which write their own envelope over the socket and never run the shim. A
+  Rust test pins the two allowlists to each other, because two copies of a
+  policy is one copy that rots and the failure mode is invisible: events keep
+  flowing, from two tools, without the attribute. Policy is applied in the
+  daemon, so `capture.cloud_identity = false` switches it off fleet-wide
+  without reinstalling a hook.
+
+  Mutations, all fatal to a test: dropping the shim read, dropping the plugin
+  read, forcing the config gate on, removing the export attributes, and pushing
+  `NAME=value` instead of the name.
+
+  Known gap, documented rather than guessed at: Codex's `[otel]` records arrive
+  over HTTP from Codex's own process, so the daemon can reach no environment
+  but its own. Filling it in there would label an agent's telemetry with
+  whoever started the daemon.
+
+### Open — each independent, none started
+
+- [ ] **T28** — cloud identity from the files an SDK reads, not only the
+  environment. Dependency: T27. Files: `src/cloudid.rs`, `README.md`
+
+  `AWS_PROFILE=prod` alone says which profile, not which role or account —
+  those live in `~/.aws/config` under `[profile prod]` (`role_arn`,
+  `sso_account_id`), and the equivalent for gcloud is the ADC file already
+  named by `gcp.credentials_file`. Same rule as T27 throughout: read the
+  identifying fields, never a credential (an ADC file holds a private key; a
+  `~/.aws/credentials` secret key is out of scope entirely). Cost is the
+  constraint — this runs in the hook shim on the agent's hot path, so it must
+  be bounded (size cap, one read per process, failure is silence).
+
+- [ ] **T29** — network extraction: recursive scan, non-HTTP schemes,
+  port/scheme retention. Dependency: none. Files: `src/adapters/mod.rs`,
+  `README.md`, `docs/telemetry-gaps.md` (#1, #2, #3)
+
+  Still the group that answers "what did the agent talk to": FQDN extraction
+  reads three top-level keys, requires a scheme, and drops everything but the
+  hostname.
+
+- [ ] **T30** — scan tool *outputs* for network activity, not only inputs.
+  Dependency: T29. Files: `src/adapters/mod.rs`, `docs/telemetry-gaps.md` (#4)
+
+  `extract_fqdns` runs on input only, so a redirect followed, or a host named
+  in a command's output, is invisible.
+
+- [ ] **T31** — Codex adapter: extract files and FQDNs. Dependency: none.
+  Files: `src/adapters/codex.rs`, `docs/telemetry-gaps.md` (#5)
+
+  `files: vec![]` is still literal there, so Codex tool events name no file at
+  all — and file-content capture keys off that same list.
+
+- [ ] **T32** — MCP server inventory and per-call tagging. Dependency: none.
+  Files: `src/adapters/mod.rs`, `docs/telemetry-gaps.md` (#6)
+
+  Nothing anywhere matches `mcp__`, so a call into an MCP server is recorded as
+  an ordinary tool with no server attribution.
+
+- [ ] **T33** — Bash file activity. Dependency: T31. Files:
+  `src/adapters/mod.rs`, `src/filecap.rs`, `docs/telemetry-gaps.md` (#7)
+
+  A `>` redirect or a `sed -i` names its file only inside a command string, so
+  it is the one write no capture mode can see — and since file capture keys off
+  the same path list, closing this closes both.
+
+- [ ] **T34** — pre/post correlation for Codex and Copilot, and the payload
+  audit that decides whether it is possible. Dependency: none. Files:
+  `src/adapters/{codex,copilot}.rs`, `docs/telemetry-gaps.md` (#11, #16)
+
+  Claude Code, opencode and pi carry a call id and therefore a duration; the
+  other two have not been audited for one.
+
 ## Dependency graph (from the plan)
 
 ```
@@ -2159,4 +2349,16 @@ T1 ─► T2 ─► T3 ─┬─► T4 ─┬─► T10, T11, T12, T13, T14 ─�
                 ├─► T6 ─► T7 ─► T16 ─► T17 ─► T18 ─► T19
                 ├─► T8
                 └─► T9
+```
+
+Review wave 2 adds no edges to it. Every task in that wave is reachable on its
+own — a different module each, independently verifiable, independently
+committable:
+
+```
+T20a  T20b  T20c  T21  T22  T23  T24  T25  T26   (landed, no dependencies)
+T27 ─► T28                                        (identity: env, then files)
+T29 ─► T30                                        (hosts, then outputs)
+T31 ─► T33                                        (codex files, then bash)
+T32   T34                                         (independent)
 ```
