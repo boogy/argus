@@ -1,6 +1,6 @@
 use crate::{
     adapters, buffer::Buffer, config, config::ExportCfg, event::Envelope, event::Event,
-    event::EventKind, export::Exporter, ipc, redact::Redactor, spool,
+    event::EventKind, export::Exporter, filecap::PathFilter, ipc, redact::Redactor, spool,
 };
 use anyhow::Result;
 use std::sync::{Arc, RwLock};
@@ -206,6 +206,7 @@ impl Stages {
         &self,
         events: Vec<Event>,
         redactor: Arc<Redactor>,
+        paths: Arc<PathFilter>,
         capture: config::CaptureCfg,
         origin: Option<std::path::PathBuf>,
     ) {
@@ -215,7 +216,7 @@ impl Stages {
         let (done_tx, done) = tokio::sync::oneshot::channel();
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            let _ = done_tx.send(crate::enrich::enrich(events, &redactor, &capture));
+            let _ = done_tx.send(crate::enrich::enrich(events, &redactor, &capture, &paths));
         });
         let _ = self.write_tx.send(Pending { done, origin }).await;
     }
@@ -267,6 +268,7 @@ impl StageA {
             .submit(
                 events,
                 self.pipeline.redactor.clone(),
+                self.pipeline.paths.clone(),
                 self.pipeline.capture.clone(),
                 origin,
             )
@@ -436,6 +438,9 @@ async fn final_flush(buffer: &Buffer, cfg: &Arc<RwLock<config::Config>>) {
 /// settings were not, and paid a full clone per event to read five booleans.
 struct Pipeline {
     redactor: Arc<Redactor>,
+    /// Compiled once per config generation, for the same reason the redactor
+    /// is: these regexes are matched against every path in every tool call.
+    paths: Arc<PathFilter>,
     capture: config::CaptureCfg,
     buffer: config::BufferCfg,
     fingerprint: String,
@@ -443,15 +448,17 @@ struct Pipeline {
 
 impl Pipeline {
     fn build(cfg: &Arc<RwLock<config::Config>>) -> Self {
-        let (redactor, capture, buffer) = with_cfg(cfg, |c| {
+        let (redactor, paths, capture, buffer) = with_cfg(cfg, |c| {
             (
                 Arc::new(Redactor::new(&c.redaction)),
+                Arc::new(PathFilter::new(&c.capture.file_contents)),
                 c.capture.clone(),
                 c.buffer.clone(),
             )
         });
         Pipeline {
             redactor,
+            paths,
             capture,
             buffer,
             fingerprint: config_fingerprint(cfg),

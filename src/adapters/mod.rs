@@ -19,7 +19,7 @@ pub fn parse(envelope: Envelope, capture: &CaptureCfg) -> Vec<Event> {
     crate::harness::parse(envelope, capture)
 }
 
-const FILE_KEYS: &[&str] = &["file_path", "filePath", "notebook_path", "path"];
+pub(crate) const FILE_KEYS: &[&str] = &["file_path", "filePath", "notebook_path", "path"];
 const NET_KEYS: &[&str] = &["url", "command", "query"];
 
 /// File paths from a tool input: known path keys plus apply_patch-style

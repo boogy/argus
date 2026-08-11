@@ -14,6 +14,7 @@
 
 use crate::config::CaptureCfg;
 use crate::event::Event;
+use crate::filecap::PathFilter;
 use crate::redact::Redactor;
 
 /// Redact one parsed batch, then cut it down to the configured field cap.
@@ -27,12 +28,23 @@ use crate::redact::Redactor;
 /// Takes the whole batch rather than one event so that later additions with
 /// per-*event* budgets — file-content capture — have somewhere to enforce them
 /// that isn't a global.
-pub fn enrich(events: Vec<Event>, redactor: &Redactor, capture: &CaptureCfg) -> Vec<Event> {
+pub fn enrich(
+    events: Vec<Event>,
+    redactor: &Redactor,
+    capture: &CaptureCfg,
+    paths: &PathFilter,
+) -> Vec<Event> {
     #[cfg(test)]
     slow_down();
     events
         .into_iter()
-        .map(|e| crate::adapters::cap_event(redactor.scrub_event(e), capture))
+        .map(|mut e| {
+            // Before the scrub, not after: the copy has to be walked by the
+            // same redactor pass as the input it was copied out of, or it is
+            // the one field in the event nobody looked at.
+            crate::filecap::capture_from_payload(&mut e.kind, capture, paths);
+            crate::adapters::cap_event(redactor.scrub_event(e), capture)
+        })
         .collect()
 }
 
@@ -104,7 +116,8 @@ mod tests {
         };
         let events = crate::adapters::parse(envelope, capture);
         let redactor = Redactor::new(&RedactionCfg::default());
-        let out = enrich(events, &redactor, capture);
+        let paths = PathFilter::new(&capture.file_contents);
+        let out = enrich(events, &redactor, capture, &paths);
         match &out[0].kind {
             EventKind::Prompt { text } => text.clone(),
             other => panic!("not a prompt: {other:?}"),
@@ -176,6 +189,53 @@ mod tests {
 
         let dropped = prompt_through_pipeline(&text, &capture(200, TruncateMode::Drop));
         assert_eq!(dropped, "[truncated]");
+    }
+
+    /// Capture copies a secret out of the input into a second field. Doing it
+    /// after the scrub would leave that copy as the one string in the event
+    /// nobody had looked at — the input redacted, the file body not.
+    #[test]
+    fn a_secret_in_a_captured_file_is_redacted_before_the_buffer() {
+        let secret = format!("ghp_{}", "B".repeat(36));
+        let mut capture = capture(65536, TruncateMode::HeadTail);
+        capture.file_contents.enabled = true;
+        let envelope = Envelope {
+            source: "claude-code".into(),
+            received_at: chrono::Utc::now(),
+            truncated: false,
+            dropped: 0,
+            event: None,
+            payload: serde_json::json!({
+                "hook_event_name": "PreToolUse",
+                "tool_name": "Write",
+                "tool_input": {
+                    "file_path": "/repo/src/deploy.rs",
+                    "content": format!("let token = \"{secret}\";"),
+                },
+            }),
+        };
+        let events = crate::adapters::parse(envelope, &capture);
+        let redactor = Redactor::new(&RedactionCfg::default());
+        let paths = PathFilter::new(&capture.file_contents);
+        let out = enrich(events, &redactor, &capture, &paths);
+        let EventKind::ToolUse { file_contents, .. } = &out[0].kind else {
+            panic!("not a tool use: {:?}", out[0].kind)
+        };
+        let snap = &file_contents[0];
+        let body = snap.content.as_deref().expect("nothing captured");
+        assert!(!body.contains("ghp_"), "the captured body leaked: {body}");
+        assert!(body.contains("[REDACT"), "not scrubbed at all: {body}");
+        assert_eq!(
+            snap.path, "/repo/src/deploy.rs",
+            "the path was scrubbed along with the body"
+        );
+        // The digest is of the bytes the tool wrote, not of the scrubbed copy:
+        // it exists to match a file on disk, and a hash of the redaction marker
+        // matches nothing.
+        assert_eq!(
+            snap.sha256.as_deref(),
+            Some(&crate::filecap::sha256_hex(format!("let token = \"{secret}\";").as_bytes())[..])
+        );
     }
 
     /// Redaction and truncation walk the same fields, so a mode that keeps

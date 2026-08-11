@@ -1864,6 +1864,44 @@ One branch-less commit per task on `develop`, message subject prefixed `T<n>: `.
   whose `exclude` list is empty, so the very first capture ships `.env`.
   `turning_capture_on_takes_one_line_and_keeps_the_shipped_policy` closes it.
 
+- [x] **T18c** — payload-mode capture. Dependency: T18b.
+  Files: `Cargo.toml` (new `sha2`), `src/filecap.rs`, `src/enrich.rs`,
+  `src/daemon.rs`, `src/adapters/mod.rs` (one visibility change).
+
+  Capture runs **before** the scrub, not after. It copies a string out of
+  `input` into a second field, and a copy made after redaction would be the one
+  string in the event nobody had looked at — the input scrubbed, the file body
+  not. The digest is still taken from the pre-scrub bytes: it exists to match a
+  file on disk, and a hash of a redaction marker matches nothing.
+
+  Candidates are keyed on the *shape* of the input, not on a table of tool
+  names. Five harnesses spell three operations six ways (`content`,
+  `new_string`, `newString`, `edits[]`, a patch body), and a name table is a
+  thing that quietly stops covering a tool the day it is renamed.
+
+  Three bounds, because each one is a different unbounded shape: `max_bytes`
+  per file, `max_total_bytes` per event, and `max_files` — a forty-file patch
+  would otherwise put forty records in one event however small each is. The
+  `files` list still names every one of them, so what a full budget costs is
+  the content, not the fact that the file was touched. `cap_mode` spends its
+  marker *on top of* what it keeps, so the marker is reserved out of the
+  remaining budget; without that the record overshoots once per truncated file.
+
+  A truncated body never carries a digest. A hash of a prefix matches no file
+  anywhere, and correlating on it silently finds nothing — which is worse than
+  having no hash at all.
+
+  Seventeen mutations, two survivors, both real:
+
+  - The parse-time-cap guard was **dead code**. `ceiling` already clamps to
+    `max_field_bytes`, so any body longer than it is truncated and flagged by
+    the ordinary path; the extra branch could never fire. Deleted, and the
+    reasoning folded into the comment on `ceiling`.
+  - `sha256_hex` writing `{b:x}` instead of `{b:02x}` — dropping every leading
+    zero and producing something that is not a sha256 — passed every test,
+    because they all compared the digest against this module's own output.
+    `the_digest_is_a_sha256_in_lower_case_hex` pins a known answer instead.
+
 - [ ] **T19** — Docs. Dependency: T18.
   Files: `docs/adding-a-tool.md`, `README.md`, `docs/telemetry-gaps.md`
 
