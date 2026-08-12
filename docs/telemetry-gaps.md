@@ -4,13 +4,10 @@ Code review of the adapters, extractors, plugin shim, and event model
 (2026-07-11), focused on two questions: what session context and what network
 activity is available at each hook surface but not yet captured.
 
-Items closed since are annotated in place with the task that closed them and
-what the implementation decided where it differed from the fix sketched here.
+Items closed since are annotated in place with what the implementation decided
+where it differed from the fix sketched here.
 Everything without a **Closed** note is still open; [Status](#status) lists
 both sides so a reader does not have to scan for the absence of a label.
-
-The `T<number>` in each note is the task id the commit subject starts with, so
-`git log --oneline --grep '^T29'` finds the change and its reasoning.
 
 ## Network connections
 
@@ -24,7 +21,7 @@ only at the top level of the tool input. Anything nested is missed — MCP tools
 **Fix:** recursively walk every string value in the input and run
 `extract_fqdns` over it. Cost is negligible (inputs are already size-capped).
 
-**Closed (T29).** `extract_net_for_tool` (`src/adapters/net.rs`) walks the
+**Closed.** `extract_net_for_tool` (`src/adapters/net.rs`) walks the
 whole input — objects, arrays and nested strings alike — to a depth of 8.
 `NET_KEYS` is gone; the key names now decide only *how* a string is read, not
 *whether* it is read: a value under `command`/`cmd`/`script` is additionally
@@ -47,7 +44,7 @@ Not captured from Bash/shell commands:
 (curl, wget, git, ssh, scp, rsync, nc, pip, npm, …) plus a generic
 `scheme://host` matcher beyond http.
 
-**Closed (T29), with one deliberate limit.** Both halves are in: any
+**Closed, with one deliberate limit.** Both halves are in: any
 `scheme://host` matches, and a command whose program is one of `NET_BINARIES`
 also contributes its schemeless host arguments plus the values of the registry
 and proxy flags (`--index-url`, `--registry`, `--proxy`, …). `user@host:path`
@@ -70,7 +67,7 @@ distinguish "read docs" from "POST to an unusual port".
 the regex already skips userinfo) next to `fqdns` on `ToolUse`, or store
 `host:port` when a non-default port is present.
 
-**Closed (T29), stopping short of the path.** `ToolUse.endpoints` holds
+**Closed, stopping short of the path.** `ToolUse.endpoints` holds
 `scheme://host[:port]` beside `fqdns`, exported as `net.endpoints`. The port
 is kept only when the command stated one — a default port that was never
 written down is a fact about the scheme, not about the call, and inventing it
@@ -91,7 +88,7 @@ results, resolved hosts in command output.
 into `fqdns` (input-derived and output-derived can be distinguished with a
 separate field if needed).
 
-**Closed (T30), with the separate field, not the merge.**
+**Closed, with the separate field, not the merge.**
 `extract_net_from_output` walks the result value and fills
 `ToolUse.output_fqdns` / `output_endpoints`, exported as `net.output_fqdns`
 and `net.output_endpoints`. Three decisions the parenthetical left open:
@@ -128,7 +125,7 @@ exists.
 **Fix:** call `extract_files_for_tool(tool, &attrs)` and reuse the patch
 extractor on the joined text blob.
 
-**Closed (T31).** Both halves, plus the step that makes them work: OTLP
+**Closed.** Both halves, plus the step that makes them work: OTLP
 attribute values are scalars, so `arguments` arrives as a *string* holding
 JSON. It is parsed back before anything reads it — a call whose arguments
 stayed a string is a call whose `file_path` was never a key, and whose nested
@@ -158,7 +155,7 @@ record `mcp_server` (e.g. in `Meta` or on `ToolUse`). **Fix (richer):** at
 install/ConfigChange time, snapshot configured MCP servers and their URLs as a
 `session`/`file_change` detail — that maps server names to actual endpoints.
 
-**Closed (T32) for the cheap half; the richer half is now T35.**
+**Closed for the cheap half; the richer half is closed below.**
 `Meta.mcp_server`, exported as `mcp.server`, derived in `harness::parse` from
 the tool name — one place for all five sources, on the same argument as `ts`:
 the name is spelled identically wherever it comes from, so five copies of one
@@ -174,7 +171,7 @@ ordinary tool name just as well as an MCP one, and a server invented from
 `write_file` puts something that does not exist into the inventory of what the
 fleet reaches.
 
-**Closed (T35) for the richer half.** `Meta.mcp_endpoint`, exported as
+**Closed for the richer half.** `Meta.mcp_endpoint`, exported as
 `mcp.endpoint`, resolved in `enrich` from the host tools' own config files:
 `.mcp.json` and `opencode.json` beside the project, then `~/.claude.json`
 (including the per-project servers `claude mcp add` writes by default),
@@ -208,7 +205,7 @@ same `FILE_KEYS` path spellings, so a file written through a redirect is not
 merely unnamed — it is the one write whose *contents* no capture mode can
 reach, because nothing in the payload says which file to read.
 
-**Closed (T33).** `adapters::command_files` reads two shapes out of a command
+**Closed.** `adapters::command_files` reads two shapes out of a command
 line and no others: the target of a redirection, and the arguments of the six
 programs whose whole job is moving bytes between paths (`cp`, `mv`, `rm`,
 `tee`, `touch`, and `sed -i`). The commands themselves come from
@@ -243,7 +240,7 @@ spooled while the daemon is down get stamped hours/days late when drained.
 (keep parse time as a secondary field if useful). This is the single biggest
 fidelity fix in this list.
 
-**Closed (T6b).** Not threaded into the adapters: every event an envelope
+**Closed.** Not threaded into the adapters: every event an envelope
 produces has its `ts` overwritten with `envelope.received_at` at the single
 point where parsing returns (`harness/mod.rs`). Threading it through five
 adapters would have made correctness depend on each of them remembering, and
@@ -262,7 +259,7 @@ in the shim, so no adapter change can recover it.
 the plugin; map `modelID` → `meta.model` and add token/cost to a new event
 field or `Session` detail.
 
-**Closed (T13e).** Of the two options in that fix, the new event kind rather
+**Closed.** Of the two options in that fix, the new event kind rather
 than `Session.detail`: a receipt buried in a JSON blob can only be aggregated
 by parsing every row, and cost-per-session is exactly the query that has to be
 cheap for the number to ever get looked at. `EventKind::Usage` carries the five
@@ -274,7 +271,7 @@ what they do with it.
 is served by more than one provider, and which one saw the turn is the whole
 question a policy about third-party models is asking. `messageID` →
 `meta.turn_id`, which is what a turn id is; `callID` already took
-`meta.tool_use_id` in T13d.
+`meta.tool_use_id`.
 
 The filter that keeps this off the hot path lives in the plugin, not the
 adapter: `message.updated` fires on every streamed delta and only the last one
@@ -291,7 +288,7 @@ frames was final.
   pre/post tool events can't be paired (no duration, no output↔input join).
   Map `callID` → `meta.turn_id` (or a dedicated `call_id`).
 
-**Closed (T13d).** The plugin sends `cwd` on every hook, taken from the
+**Closed.** The plugin sends `cwd` on every hook, taken from the
 `directory` opencode hands it at load (`worktree` only as a fallback — the two
 differ inside a git worktree). `callID` maps to `meta.tool_use_id`, the field
 Claude Code's `tool_use_id` already uses, rather than to `turn_id`: a turn and
@@ -305,14 +302,14 @@ capture it. With a call id, tool latency, hung-tool detection, and
 output-to-input joins all become simple queries. Without it, only heuristic
 (same session, adjacent seq) pairing is possible.
 
-**Closed for three of five.** Claude Code carries `tool_use_id` (T10b) and,
-since it reports one directly, `duration_ms` (T10c) — a measured duration
+**Closed for three of five.** Claude Code carries `tool_use_id` and,
+since it reports one directly, `duration_ms` — a measured duration
 beats one subtracted from two timestamps stamped on different sides of a
-socket. opencode maps `callID` (T13d), pi its tool-call id (T14a); opencode's
+socket. opencode maps `callID`, pi its tool-call id; opencode's
 permission events carry the same id, so a prompt joins the call it gated
 rather than being matched by adjacency.
 
-**Closed (T34).** The audit that #16 asked for was done, and the two are not
+**Closed.** The audit that #16 asked for was done, and the two are not
 the same case.
 
 Codex's OTLP attributes carry the ids all along — `call_id`, `turn_id` and
@@ -360,7 +357,7 @@ a version field), the monitor's own version (already on the OTLP scope but not
 in `body`), and parent PID/tty for correlating simultaneous sessions.
 
 **Partly closed.** `meta.model` is carried where the surface reports it, and
-the per-event process spawn behind `host`/`username` is gone (T6a). Tool
+the per-event process spawn behind `host`/`username` is gone. Tool
 version, monitor version in the body, and PID/tty remain open.
 
 ### 15. Codex OTLP: unmapped event names land in `raw`
@@ -379,7 +376,7 @@ envelope. Copilot payloads also carry a per-turn id and timestamps on some
 events; audit a live capture (`raw` rows + spool files) and lift what exists
 into `Meta`.
 
-**Closed (T34).** The premise was wrong: no documented Copilot payload carries
+**Closed.** The premise was wrong: no documented Copilot payload carries
 a turn id or a timestamp, and none carries a call id either. What the envelope
 does carry — `sessionId`, `cwd`, `transcriptPath`, `agentType`/`agentName`,
 `agentId` — the adapter already reads. The call id and turn id are now read
@@ -391,14 +388,14 @@ day pairing stops being a guess; see #11 for what that leaves open.
 - `hostname()` (`src/event.rs:142`) spawns the `hostname` process **per
   event**. Cache it in a `OnceLock`.
 
-  **Closed (T6a).** Host *and* username behind one `OnceLock`, since both were
+  **Closed.** Host *and* username behind one `OnceLock`, since both were
   paying per event and both are constant for the life of a process.
 
 - `extract_files_for_tool` calls `out.dedup()` without sorting — only adjacent
   duplicates are removed (apply_patch touching the same file twice keeps
   both). Sort first or dedup via a set, preserving first-seen order if needed.
 
-  **Closed (T10f).** Sorted before the dedup. First-seen order was not worth
+  **Closed.** Sorted before the dedup. First-seen order was not worth
   preserving: nothing consumes the list positionally, and a sorted list is the
   one that compares equal across two captures of the same call.
 
@@ -416,37 +413,37 @@ day pairing stops being a guess; see #11 for what that leaves open.
 
 Closed:
 
-- **#8** spooled-event timestamps (T6b) — the item this list called its single
+- **#8** spooled-event timestamps — the item this list called its single
   biggest fidelity fix.
-- **#9** opencode model/tokens/cost (T13e), as an `EventKind::Usage` rather
+- **#9** opencode model/tokens/cost, as an `EventKind::Usage` rather
   than a JSON blob on the session.
-- **#10** opencode `cwd` and `callID` (T13d).
-- **#11** call ids, for Claude Code (T10b), opencode (T13d) and pi (T14a),
-  plus a reported tool duration on Claude Code (T10c); Codex (T34) closes the
+- **#10** opencode `cwd` and `callID`.
+- **#11** call ids, for Claude Code, opencode and pi, plus a reported tool
+  duration on Claude Code; Codex closes the
   set, with `call_id`, `turn_id`, `model`, `duration_ms` and a `success = false`
   that finally reads as the error leg.
-- **#16** the Copilot audit (T34), whose answer was "nothing to lift" — both
+- **#16** the Copilot audit, whose answer was "nothing to lift" — both
   ids are read speculatively, so Copilot is the one surface still paired by
   adjacency.
-- **#1/#2/#3** network extraction (T29): the recursive walk, non-HTTP schemes
+- **#1/#2/#3** network extraction: the recursive walk, non-HTTP schemes
   and schemeless command hosts, and `endpoints` carrying scheme and stated
   port. The two limits taken on purpose are in the items themselves — no
   schemeless host outside a network command, and no path or query in an
   endpoint.
-- **#4** tool-output scanning (T30), as `output_fqdns` / `output_endpoints`
+- **#4** tool-output scanning, as `output_fqdns` / `output_endpoints`
   beside the input's own — the redirect that was followed, kept apart from
   the host that was asked for.
-- **#5** Codex file extraction (T31), by parsing the `arguments` attribute
+- **#5** Codex file extraction, by parsing the `arguments` attribute
   back into JSON first, and reading patch headers whatever the tool is called.
-- **#6** both halves: per-call attribution (T32) as `Meta.mcp_server` /
-  `mcp.server`, and the server-to-endpoint inventory (T35) as `mcp.endpoint`,
+- **#6** both halves: per-call attribution as `Meta.mcp_server` /
+  `mcp.server`, and the server-to-endpoint inventory as `mcp.endpoint`,
   resolved per event from the tools' own config files behind
   `capture.mcp_endpoints`.
-- **#7** Bash file activity (T33): redirect targets and six file verbs, and —
+- **#7** Bash file activity: redirect targets and six file verbs, and —
   because each path says whether the command wrote it — the disk capture of
   the write that no payload key names.
-- **#14** in part: the per-event `hostname` spawn (T6a).
-- Both remaining small fixes: the unsorted `dedup` (T10f) and opencode's
+- **#14** in part: the per-event `hostname` spawn.
+- Both remaining small fixes: the unsorted `dedup` and opencode's
   permission action, which turned out to be an adapter bug rather than a stale
   comment.
 

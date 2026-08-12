@@ -312,7 +312,7 @@ impl Harness for Codex {
     /// Settings that leave every hook entry in place and still stop it running.
     ///
     /// Both of argus's config directories are read, not just the user's. The
-    /// machine-wide layer (T15d) outranks the user layer, so a switch set there
+    /// machine-wide layer outranks the user layer, so a switch set there
     /// is the one that decides — and it is invisible from `~/.codex`, which is
     /// the only place this used to look.
     ///

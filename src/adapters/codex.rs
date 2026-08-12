@@ -236,7 +236,7 @@ pub fn existing_token() -> Option<String> {
 /// under any account, can connect to `127.0.0.1` and post — so until this,
 /// anything at all could write fabricated prompts and tool calls into the
 /// audit trail, which is a poor property for the record of what the agents on
-/// this machine did. The per-user port from T8e narrowed *who collides*, not
+/// this machine did. The per-user port narrowed *who collides*, not
 /// who can reach it: a listening port is not a secret, `lsof` lists it.
 ///
 /// Read back rather than regenerated, because `install` copies this same value

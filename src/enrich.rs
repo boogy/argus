@@ -9,7 +9,7 @@
 //! is the wrong way round.
 //!
 //! Stage B runs on the blocking pool, several batches at a time, and is
-//! deliberately synchronous: it is CPU work and (from T18) file reads, not I/O
+//! deliberately synchronous: it is CPU work and file reads, not I/O
 //! the async runtime can interleave.
 
 use crate::config::CaptureCfg;

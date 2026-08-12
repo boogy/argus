@@ -810,7 +810,7 @@ fn escapes_managed_root(root: &Path, a: &Artifact) -> Option<String> {
 /// This is one half of a managed deployment. The other half is not a file:
 /// the argus binary has to be readable and executable by every account the
 /// hooks fire under, and — because the socket, the OTLP port and the buffer
-/// are all per-user (T8) — each of those accounts needs its own running
+/// are all per-user — each of those accounts needs its own running
 /// daemon. A managed layer alone wires every user to a binary they can run and
 /// a daemon that is not there.
 pub fn install_managed(root: &Path, platform: Platform, dry_run: bool) -> Result<()> {
@@ -1888,8 +1888,8 @@ mod tests {
         unsafe { std::env::remove_var(BIN_ENV) };
     }
 
-    /// The plan's own bar for `check --managed`: a flipped enforcement key is a
-    /// finding, not a shrug. Every entry can be byte-perfect and the file still
+    /// The bar for `check --managed`: a flipped enforcement key is a finding,
+    /// not a shrug. Every entry can be byte-perfect and the file still
     /// capture nothing, so this is checked ahead of the hooks and reported with
     /// the value that is wrong.
     #[test]
@@ -2441,7 +2441,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // T3 — `check` proves capture can actually happen
+    // `check` proves capture can actually happen
     // -----------------------------------------------------------------
 
     fn fake_binary(dir: &Path, name: &str) -> PathBuf {
@@ -2841,7 +2841,7 @@ mod tests {
             "install writes no credential Codex can present to our own receiver"
         );
         // And `check` has to ask for it back. Writing the header without
-        // demanding it is the T8e lesson repeated one field along: a restored
+        // demanding it back is the same hole one field along: a restored
         // home directory leaves Codex presenting a token the receiver refuses,
         // and a `check` that only looks at the endpoint calls that intact.
         assert!(

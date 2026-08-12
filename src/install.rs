@@ -282,8 +282,8 @@ mod tests {
     }
 
     /// An upgrade has to reach hosts that are already wired. The entry argus
-    /// writes is versioned with the binary — T11a changed `SessionEnd`'s
-    /// timeout from 10 to 3 — and install used to skip any event that already
+    /// writes is versioned with the binary — `SessionEnd`'s timeout went from
+    /// 10 to 3 — and install used to skip any event that already
     /// had an argus entry, so every host wired before that release kept the
     /// old one with no way short of uninstalling to correct it.
     #[test]
@@ -294,9 +294,9 @@ mod tests {
         let mut doc: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
 
-        // What a pre-T11a install left behind, plus somebody else's hook in
-        // the same array — the case that makes "just overwrite the file" the
-        // wrong fix.
+        // What an install from before that change left behind, plus somebody
+        // else's hook in the same array — the case that makes "just overwrite
+        // the file" the wrong fix.
         // Ahead of ours, not after it: "refresh the entry that is ours" and
         // "refresh the first entry" are the same edit when ours is first, and
         // only one of them is correct.

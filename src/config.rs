@@ -46,8 +46,8 @@ pub struct ExportCfg {
     ///
     /// Off by default, and deliberately: OTLP/HTTP receivers *should* accept a
     /// gzipped body but are not required to, and one that does not answers a
-    /// `4xx` — which, since T9a, is a refusal that drops the batch rather than
-    /// retrying it. Turning this on against the wrong collector trades
+    /// `4xx` — which is a refusal, so the batch is dropped rather than
+    /// retried. Turning this on against the wrong collector trades
     /// bandwidth for audit data, so it is the operator's call, not a default.
     pub gzip: bool,
     pub flush_interval_secs: u64,
