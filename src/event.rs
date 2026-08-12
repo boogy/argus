@@ -186,6 +186,16 @@ pub enum SkipReason {
     Budget,
 }
 
+/// `ToolUse` is much larger than the other variants and is meant to be: it is
+/// the kind that carries the whole record of a call — input, output, files,
+/// hosts, contents — while `Prompt` carries a string. Boxing a field to get
+/// under clippy's 200-byte spread would buy nothing here. An event is
+/// constructed once per hook invocation, moved a handful of times, and
+/// serialised; at that rate the few hundred bytes a `Prompt` wastes by sharing
+/// a layout with `ToolUse` are far cheaper than an indirection on the field
+/// every consumer pattern-matches. Boxing would also hide the growth rather
+/// than stop it — the spread crosses the threshold again a field or two later.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum EventKind {
@@ -228,6 +238,16 @@ pub enum EventKind {
         interrupted: bool,
         files: Vec<String>,
         fqdns: Vec<String>,
+        /// `scheme://host[:port]` for each connection the call named with a
+        /// protocol. `fqdns` answers "which host"; this answers "which
+        /// service, on which port" — the difference between an agent reading
+        /// documentation and one posting to `:8443`.
+        ///
+        /// `serde(default)` for the same reason as `file_contents`: a daemon
+        /// reading its own older buffer must not choke on a row written before
+        /// the field existed.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        endpoints: Vec<String>,
         /// What the files in this call actually contained.
         ///
         /// `serde(default)` is what keeps rows already sitting in a buffer
@@ -432,6 +452,7 @@ pub fn visit_strings(kind: &mut EventKind, f: &mut impl FnMut(&mut String)) {
             // query joins on.
             files: _,
             fqdns: _,
+            endpoints: _,
             file_contents,
         } => {
             visit_json_strings(input, f);
@@ -623,6 +644,7 @@ mod tests {
                 interrupted: false,
                 files: vec!["/repo/a.rs".into()],
                 fqdns: vec![],
+                endpoints: vec![],
                 file_contents: vec![],
             },
         );
@@ -722,6 +744,7 @@ mod tests {
                 interrupted: false,
                 files: vec![],
                 fqdns: vec![],
+                endpoints: vec![],
                 file_contents: vec![captured.clone(), withheld.clone()],
             },
         );
@@ -762,6 +785,7 @@ mod tests {
                 interrupted: false,
                 files: vec![],
                 fqdns: vec![],
+                endpoints: vec![],
                 file_contents: vec![],
             },
         );
@@ -868,6 +892,7 @@ mod tests {
                 interrupted: false,
                 files: vec![],
                 fqdns: vec![],
+                endpoints: vec![],
                 file_contents: vec![],
             },
         );

@@ -173,6 +173,7 @@ mod tests {
                 interrupted: false,
                 files: vec![],
                 fqdns: vec![],
+                endpoints: vec![],
                 file_contents: vec![],
             },
         );
@@ -207,6 +208,7 @@ mod tests {
                 interrupted: false,
                 files: vec![],
                 fqdns: vec![],
+                endpoints: vec![],
                 file_contents: vec![crate::event::FileSnapshot {
                     path: "/repo/deploy.sh".into(),
                     action: crate::event::FileAction::Written,
@@ -312,6 +314,7 @@ mod tests {
                 interrupted: false,
                 files: vec![],
                 fqdns: vec![],
+                endpoints: vec![],
                 file_contents: vec![],
             },
         ];

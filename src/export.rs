@@ -130,6 +130,7 @@ fn record(e: &Event) -> Value {
             phase,
             files,
             fqdns,
+            endpoints,
             error,
             duration_ms,
             interrupted,
@@ -157,6 +158,13 @@ fn record(e: &Event) -> Value {
             }
             if !fqdns.is_empty() {
                 attrs.push(attr("net.fqdns", &fqdns.join(",")));
+            }
+            // Separate from `net.fqdns` rather than replacing it: a query for
+            // "who talked to this host" must not have to know which port it
+            // answered on, and a query for the unusual port must not have to
+            // parse a hostname list.
+            if !endpoints.is_empty() {
+                attrs.push(attr("net.endpoints", &endpoints.join(",")));
             }
             for a in file_snapshot_attrs(file_contents) {
                 attrs.push(a);
@@ -495,6 +503,7 @@ mod tests {
                 interrupted: false,
                 files: vec!["/a.rs".into()],
                 fqdns: vec![],
+                endpoints: vec![],
                 file_contents: vec![],
             },
         );
@@ -521,6 +530,55 @@ mod tests {
         // tool call in a fleet that has capture switched off is pure cost.
         assert_eq!(get("file.snapshots"), None);
         assert_eq!(get("file.sha256"), None);
+        assert_eq!(get("net.fqdns"), None);
+        assert_eq!(get("net.endpoints"), None);
+    }
+
+    /// The endpoint list is only worth extracting if it is indexable. In the
+    /// body alone it answers "which port did this call use" one row at a time.
+    #[test]
+    fn endpoints_are_their_own_attribute_beside_the_hostnames() {
+        let e = Event::new(
+            "claude-code",
+            Some("s1".into()),
+            None,
+            EventKind::ToolUse {
+                tool: "Bash".into(),
+                phase: "pre".into(),
+                input: serde_json::json!({}),
+                output: serde_json::Value::Null,
+                error: None,
+                duration_ms: None,
+                interrupted: false,
+                files: vec![],
+                fqdns: vec!["exfil.example.com".into(), "git.example.org".into()],
+                endpoints: vec![
+                    "https://exfil.example.com:8443".into(),
+                    "ssh://git.example.org".into(),
+                ],
+                file_contents: vec![],
+            },
+        );
+        let body = to_otlp_body(std::slice::from_ref(&e));
+        let attrs = body["resourceLogs"][0]["scopeLogs"][0]["logRecords"][0]["attributes"]
+            .as_array()
+            .unwrap()
+            .clone();
+        let get = |k: &str| {
+            attrs
+                .iter()
+                .find(|a| a["key"] == k)
+                .map(|a| a["value"]["stringValue"].as_str().unwrap().to_string())
+        };
+        assert_eq!(
+            get("net.fqdns").as_deref(),
+            Some("exfil.example.com,git.example.org")
+        );
+        assert_eq!(
+            get("net.endpoints").as_deref(),
+            Some("https://exfil.example.com:8443,ssh://git.example.org"),
+            "the scheme and port never reached an indexable attribute"
+        );
     }
 
     /// "Which agent ran as prod-admin" has to be a group-by, not a body
@@ -627,6 +685,7 @@ mod tests {
                 interrupted: false,
                 files: vec![],
                 fqdns: vec![],
+                endpoints: vec![],
                 file_contents: vec![
                     snap("/repo/a.rs", 100, Some("aaa"), None),
                     snap("/repo/.env", 20, Some("bbb"), Some(SkipReason::Excluded)),
@@ -675,6 +734,7 @@ mod tests {
                 interrupted: true,
                 files: vec![],
                 fqdns: vec![],
+                endpoints: vec![],
                 file_contents: vec![],
             },
         );

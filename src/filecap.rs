@@ -770,6 +770,7 @@ mod tests {
             interrupted: false,
             files: vec![],
             fqdns: vec![],
+            endpoints: vec![],
             file_contents: vec![],
         };
         let mut event = Event::new("claude-code", None, cwd.map(str::to_string), kind);

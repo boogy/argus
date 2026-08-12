@@ -67,7 +67,7 @@ argus captures everything each surface offers.
 | Tool outputs                |             Y              |           Y           |            Y            |         Y         |     Y (text parts)    |
 | Tool failures               |             Y              |           —           | Y (post incl. non-zero) |         Y         |      Y (isError)      |
 | File paths touched          |             Y              |           Y           |     Y (apply_patch)     |         Y         |           Y           |
-| FQDNs contacted             |             Y              |           Y           |            Y            |         Y         |           Y           |
+| FQDNs + endpoints contacted |             Y              |           Y           |            Y            |         Y         |           Y           |
 | Skill/command invocations   |             Y              | Y (command.executed)  |            —            |         —         |           —           |
 | Slash-command expansion     |     Y (expanded text)      |           —           |            —            |         —         |           —           |
 | Subagent runs               |       Y (start+stop)       |           —           |            Y            | Y (start+stop)    |           —           |
@@ -275,6 +275,43 @@ name says it read the file. A `Grep`'s `path` is a directory to search and a
 `Bash`'s `command` is not a path at all, so neither produces anything to
 capture in any mode. Opening those would mean spending I/O on strings that were
 never claimed to be files, chosen by the agent being monitored.
+
+## Network extraction
+
+Every tool call is scanned for the connections it names, and the answer lands
+in two arrays on the event: `fqdns`, the bare hostnames, and `endpoints`,
+`scheme://host[:port]` for each one that came with a protocol. They are
+exported as `net.fqdns` and `net.endpoints`.
+
+The scan walks the whole input rather than a fixed list of keys, because an MCP
+tool's arguments are arbitrary nested JSON and the URL is as likely to be in a
+header, a body, or the third element of an `argv` array as in a top-level
+`url`. Any `scheme://host` matches, not only `http(s)`: `ssh://`, `ftp://`,
+`postgres://`, `git+ssh://` are the same question with a different prefix.
+
+A value under `command`, `cmd` or `script` is read a second way — as a shell
+command — because a command names hosts without ever writing a scheme. If the
+program is one argus knows to be a network client (`curl`, `git`, `ssh`,
+`psql`, `kubectl`, …) then its dotted arguments are hosts, `user@host:path` is
+an scp target, and the value of a registry or proxy flag (`--index-url`,
+`--registry`, `--proxy`, …) is the host the fetch was redirected to — which is
+the security-relevant half of a `pip install`.
+
+Two limits are deliberate:
+
+- **A schemeless host is only believed inside a network command.** Prose,
+  diffs and error messages are full of dotted tokens — `crates.io`, `main.rs`,
+  `v1.2.3` — and a `|` or `&&` starts a new command whose own first word has to
+  earn it again. A hostname invented from prose is a connection the agent never
+  made, sitting in the one field a reviewer trusts to be literal.
+- **An endpoint keeps the scheme and the stated port, and nothing else.** A
+  port is recorded only when the call wrote one down, so `:443` always means
+  "the agent chose 443" rather than "the scheme's default". The path and query
+  are dropped rather than sanitized: a presigned URL carries its credential in
+  the query string, so a field that holds paths is a field that eventually
+  holds a secret.
+
+IPv6 literals are out of scope.
 
 ## Cloud identity
 

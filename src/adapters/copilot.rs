@@ -103,7 +103,7 @@ pub fn parse(env: &Envelope, capture: &CaptureCfg) -> Vec<Event> {
                 .cloned()
                 .unwrap_or(Value::Null);
             let files = extract_files_for_tool(&tool, &args);
-            let fqdns = extract_net_for_tool(&tool, &args);
+            let net = extract_net_for_tool(&tool, &args);
             let phase = match name.as_str() {
                 "preToolUse" => "pre",
                 "postToolUse" => "post",
@@ -136,7 +136,8 @@ pub fn parse(env: &Envelope, capture: &CaptureCfg) -> Vec<Event> {
                 duration_ms: None,
                 interrupted: false,
                 files,
-                fqdns,
+                fqdns: net.fqdns,
+                endpoints: net.endpoints,
                 file_contents: vec![],
             })]
         }

@@ -57,7 +57,7 @@ pub fn parse(env: &Envelope, capture: &CaptureCfg) -> Vec<Event> {
                 .to_string();
             let args = p.get("args").cloned().unwrap_or(Value::Null);
             let files = crate::adapters::extract_files_for_tool(&tool, &args);
-            let fqdns = crate::adapters::extract_net_for_tool(&tool, &args);
+            let net = crate::adapters::extract_net_for_tool(&tool, &args);
             let phase = if event.ends_with("before") {
                 "pre"
             } else {
@@ -84,7 +84,8 @@ pub fn parse(env: &Envelope, capture: &CaptureCfg) -> Vec<Event> {
                 duration_ms: None,
                 interrupted: false,
                 files,
-                fqdns,
+                fqdns: net.fqdns,
+                endpoints: net.endpoints,
                 file_contents: vec![],
             });
             // The plugin has always sent this and the adapter has always
@@ -196,7 +197,7 @@ pub fn parse(env: &Envelope, capture: &CaptureCfg) -> Vec<Event> {
                 }
                 s
             };
-            let fqdns = crate::adapters::extract_net_for_tool(
+            let net = crate::adapters::extract_net_for_tool(
                 "pty",
                 &serde_json::json!({
                     "command": line,
@@ -223,7 +224,8 @@ pub fn parse(env: &Envelope, capture: &CaptureCfg) -> Vec<Event> {
                 duration_ms: None,
                 interrupted: false,
                 files: vec![],
-                fqdns,
+                fqdns: net.fqdns,
+                endpoints: net.endpoints,
                 file_contents: vec![],
             });
             ev.meta.tool_use_id = props.get("id").and_then(Value::as_str).map(String::from);

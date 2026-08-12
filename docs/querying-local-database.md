@@ -90,7 +90,7 @@ builds use `json_extract(body, '$.path')` — they are equivalent.
 | ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `prompt`            | `text`                                                                                                                                                |
 | `assistant_message` | `text`                                                                                                                                                |
-| `tool_use`          | `tool`, `phase` (`pre`/`post`/`error`), `input` (JSON), `output` (JSON, post only), `error` (string, failures only), `duration_ms` (post legs only), `interrupted` (present only when a human stopped the call), `files` (array), `fqdns` (array) |
+| `tool_use`          | `tool`, `phase` (`pre`/`post`/`error`), `input` (JSON), `output` (JSON, post only), `error` (string, failures only), `duration_ms` (post legs only), `interrupted` (present only when a human stopped the call), `files` (array), `fqdns` (array), `endpoints` (array of `scheme://host[:port]`) |
 | `skill`             | `name`, `args`                                                                                                                                        |
 | `agent`             | `agent_type`, `description`                                                                                                                           |
 | `permission`        | `tool`, `action` (`requested`/`denied`/`replied`/`updated`), `input`                                                                                  |
@@ -170,6 +170,22 @@ ORDER BY hits DESC;
 ```
 
 (Filtering on `phase = 'pre'` avoids double-counting the matching post event.)
+
+### Network: connections on an unusual scheme or port
+
+`fqdns` answers "who", `endpoints` answers "how" — the same host reached over
+`https` and over `ssh` is two different findings. A port appears only when the
+call stated one, so this returns the calls that chose a port rather than every
+call that had one by default:
+
+```sql
+SELECT e.value AS endpoint, COUNT(*) AS hits
+FROM events, json_each(events.body, '$.endpoints') AS e
+WHERE body->>'$.type' = 'tool_use' AND body->>'$.phase' = 'pre'
+  AND (e.value NOT LIKE 'http%' OR e.value GLOB '*:[0-9]*')
+GROUP BY 1
+ORDER BY hits DESC;
+```
 
 ### Network: which session/command contacted a given host
 

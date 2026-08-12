@@ -1,4 +1,3 @@
-use crate::adapters::extract_fqdns;
 use crate::config::{CaptureCfg, Config};
 use crate::event::{Envelope, Event, EventKind};
 use crate::ipc::Ingress;
@@ -46,13 +45,18 @@ pub fn parse(env: &Envelope, capture: &CaptureCfg) -> Vec<Event> {
                 .get("tool_name")
                 .and_then(Value::as_str)
                 .unwrap_or("unknown")
-                .into();
-            let text_blob = [attrs.get("command"), attrs.get("arguments")]
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_str)
-                .collect::<Vec<_>>()
-                .join(" ");
+                .to_string();
+            // Kept as the two fields rather than one joined blob: `command` is
+            // a shell command, which is read as one — a `curl example.com`
+            // there names a host no URL scan would see — while `arguments` is
+            // a tool's own JSON, where only a stated protocol counts.
+            let blob_net = crate::adapters::extract_net_for_tool(
+                &tool,
+                &serde_json::json!({
+                    "command": attrs.get("command").cloned().unwrap_or(Value::Null),
+                    "arguments": attrs.get("arguments").cloned().unwrap_or(Value::Null),
+                }),
+            );
             let phase = if name.ends_with("decision") {
                 "pre"
             } else {
@@ -77,7 +81,8 @@ pub fn parse(env: &Envelope, capture: &CaptureCfg) -> Vec<Event> {
                 duration_ms: None,
                 interrupted: false,
                 files: vec![],
-                fqdns: extract_fqdns(&text_blob),
+                fqdns: blob_net.fqdns,
+                endpoints: blob_net.endpoints,
                 file_contents: vec![],
             })]
         }

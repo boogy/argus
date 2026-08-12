@@ -21,6 +21,12 @@ only at the top level of the tool input. Anything nested is missed — MCP tools
 **Fix:** recursively walk every string value in the input and run
 `extract_fqdns` over it. Cost is negligible (inputs are already size-capped).
 
+**Closed (T29).** `extract_net_for_tool` (`src/adapters/net.rs`) walks the
+whole input — objects, arrays and nested strings alike — to a depth of 8.
+`NET_KEYS` is gone; the key names now decide only *how* a string is read, not
+*whether* it is read: a value under `command`/`cmd`/`script` is additionally
+parsed as a shell command (see #2), everything else is scanned for URLs.
+
 ### 2. Scheme-required regex misses most non-HTTP egress
 
 `extract_fqdns` (`src/adapters/mod.rs:117`) only matches `http(s)://` URLs.
@@ -38,6 +44,19 @@ Not captured from Bash/shell commands:
 (curl, wget, git, ssh, scp, rsync, nc, pip, npm, …) plus a generic
 `scheme://host` matcher beyond http.
 
+**Closed (T29), with one deliberate limit.** Both halves are in: any
+`scheme://host` matches, and a command whose program is one of `NET_BINARIES`
+also contributes its schemeless host arguments plus the values of the registry
+and proxy flags (`--index-url`, `--registry`, `--proxy`, …). `user@host:path`
+is read as an scp/rsync target.
+
+The limit: a schemeless host is only believed inside a command string whose
+*first word* is a known network binary, and a `|`/`&&`/`;` resets that word.
+Prose is full of dotted tokens (`crates.io`, `foo.rs`, `v1.2.3`) and a
+hostname invented from prose is worse than a hostname missed — it is a
+connection the agent never made, in the one field a reviewer trusts. IPv6
+literals remain out of scope.
+
 ### 3. Only the hostname survives — port, scheme, and path are dropped
 
 `https://exfil.example.com:8443/upload?d=...` is stored as
@@ -47,6 +66,17 @@ distinguish "read docs" from "POST to an unusual port".
 **Fix:** add a `urls` field (full sanitized URL, credentials stripped —
 the regex already skips userinfo) next to `fqdns` on `ToolUse`, or store
 `host:port` when a non-default port is present.
+
+**Closed (T29), stopping short of the path.** `ToolUse.endpoints` holds
+`scheme://host[:port]` beside `fqdns`, exported as `net.endpoints`. The port
+is kept only when the command stated one — a default port that was never
+written down is a fact about the scheme, not about the call, and inventing it
+would make `:443` and "the agent chose 443" indistinguishable.
+
+The path and query are dropped rather than sanitized: a presigned S3 URL
+carries its credential *in the query string*, so a field holding paths is a
+field that eventually holds a secret. `fqdns` stays as it was, so every
+existing query still works; `endpoints` is the additive half.
 
 ### 4. Tool outputs are never scanned
 
@@ -256,6 +286,11 @@ Closed:
 - **#10** opencode `cwd` and `callID` (T13d).
 - **#11** call ids, for Claude Code (T10b), opencode (T13d) and pi (T14a),
   plus a reported tool duration on Claude Code (T10c).
+- **#1/#2/#3** network extraction (T29): the recursive walk, non-HTTP schemes
+  and schemeless command hosts, and `endpoints` carrying scheme and stated
+  port. The two limits taken on purpose are in the items themselves — no
+  schemeless host outside a network command, and no path or query in an
+  endpoint.
 - **#14** in part: the per-event `hostname` spawn (T6a).
 - Both remaining small fixes: the unsorted `dedup` (T10f) and opencode's
   permission action, which turned out to be an adapter bug rather than a stale
@@ -263,11 +298,11 @@ Closed:
 
 Open, in the order this list would still do them:
 
-1. **#1/#2/#3 network extraction** — recursive scan of nested strings,
-   non-HTTP schemes and schemeless hosts, and port/scheme retention. Untouched,
-   and still the group that answers "what did the agent talk to".
-2. **#4** output scanning, **#5** Codex file extraction (`files: vec![]` is
-   still literal in `codex.rs`), **#6** MCP server tagging.
+1. **#4** output scanning — now the remaining half of "what did the agent talk
+   to": the input says what was asked for, the output says where it was
+   redirected to.
+2. **#5** Codex file extraction (`files: vec![]` is still literal in
+   `codex.rs`), **#6** MCP server tagging.
 3. **#7** Bash file activity — now also the one write file capture cannot see.
 4. **#11** for Codex and Copilot, and **#16**, which is the audit that would
    tell us whether their payloads carry an id at all.

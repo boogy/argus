@@ -2317,13 +2317,40 @@ commit gated on `make verify`, and none needs another to be done first.
   cap lifted, every INI section treated as the wanted one, the ADC document
   copied wholesale, and the plugin's read disabled.
 
-- [ ] **T29** — network extraction: recursive scan, non-HTTP schemes,
-  port/scheme retention. Dependency: none. Files: `src/adapters/mod.rs`,
-  `README.md`, `docs/telemetry-gaps.md` (#1, #2, #3)
+- [x] **T29** — network extraction: recursive scan, non-HTTP schemes,
+  port/scheme retention. Dependency: none. Files: `src/adapters/net.rs` (new),
+  `src/adapters/mod.rs`, `src/event.rs`, `src/export.rs`, the five adapters,
+  `README.md`, `docs/telemetry-gaps.md`, `docs/querying-local-database.md`
+  (#1, #2, #3)
 
   Still the group that answers "what did the agent talk to": FQDN extraction
   reads three top-level keys, requires a scheme, and drops everything but the
   hostname.
+
+  Done: extraction moved to its own module, `src/adapters/net.rs`. `NET_KEYS`
+  is gone — the walk visits every string in the input to a depth of 8, and a
+  key name now decides only *how* a string is read: a value under
+  `command`/`cmd`/`script` is additionally parsed as a shell command, and an
+  argv array under one is joined into a single command line first. Any
+  `scheme://host` matches, not just http, plus `user@host:path` for the
+  scp/rsync form. `ToolUse.endpoints` carries `scheme://host[:port]` beside
+  `fqdns` and exports as `net.endpoints`.
+
+  Two limits taken on purpose, both documented in the README: a schemeless
+  host is only believed inside a command whose first word is a known network
+  binary (a `|`/`&&`/`;` makes the next word earn it again), because a
+  hostname invented from prose is a connection that never happened; and an
+  endpoint keeps the scheme and the *stated* port only — no default is
+  invented, and the path and query are dropped rather than sanitized, since a
+  presigned URL carries its credential in the query string. `fqdns` keeps its
+  old meaning, so existing queries are unaffected.
+
+  Twelve mutants killed: the object recursion stopped at the root, the scheme
+  class narrowed back to http, the port dropped from the rendered endpoint, a
+  default port invented, the network-binary gate removed, the separator reset
+  disabled, the registry/proxy flag list broken, the argv join skipped, every
+  key treated as a command, the depth bound lifted, the export attribute
+  dropped, and an adapter keeping `fqdns` while discarding `endpoints`.
 
 - [ ] **T30** — scan tool *outputs* for network activity, not only inputs.
   Dependency: T29. Files: `src/adapters/mod.rs`, `docs/telemetry-gaps.md` (#4)

@@ -84,7 +84,7 @@ pub(crate) fn parse_hook(source: &'static str, p: &Value, capture: &CaptureCfg) 
             let tool = s(p, "tool_name").unwrap_or_else(|| "unknown".into());
             let input = p.get("tool_input").cloned().unwrap_or(Value::Null);
             let files = extract_files_for_tool(&tool, &input);
-            let fqdns = extract_net_for_tool(&tool, &input);
+            let net = extract_net_for_tool(&tool, &input);
             let phase = match hook {
                 "PreToolUse" => "pre",
                 "PostToolUse" => "post",
@@ -129,7 +129,8 @@ pub(crate) fn parse_hook(source: &'static str, p: &Value, capture: &CaptureCfg) 
                     .and_then(Value::as_bool)
                     .unwrap_or(false),
                 files,
-                fqdns,
+                fqdns: net.fqdns,
+                endpoints: net.endpoints,
                 file_contents: vec![],
             })];
             if hook == "PreToolUse" {
@@ -397,11 +398,19 @@ mod tests {
             })),
             &CaptureCfg::default(),
         );
-        let EventKind::ToolUse { fqdns, .. } = &events[0].kind else {
+        let EventKind::ToolUse {
+            fqdns, endpoints, ..
+        } = &events[0].kind
+        else {
             panic!()
         };
         assert!(fqdns.contains(&"evil.example.com".to_string()));
         assert!(fqdns.contains(&"cdn.foo.io".to_string()));
+        // The adapter has to carry both halves out of the extractor; keeping
+        // only `fqdns` loses the scheme silently, and nothing else here would
+        // notice.
+        assert!(endpoints.contains(&"https://evil.example.com".to_string()));
+        assert!(endpoints.contains(&"http://cdn.foo.io".to_string()));
 
         let events = adapters::parse(
             env(json!({

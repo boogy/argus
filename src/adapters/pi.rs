@@ -56,9 +56,11 @@ pub fn parse(env: &Envelope, capture: &CaptureCfg) -> Vec<Event> {
                 "command": p.get("command").cloned().unwrap_or(Value::Null),
                 "excludeFromContext": p.get("excludeFromContext").cloned().unwrap_or(Value::Null),
             });
+            let user_bash_net = crate::adapters::extract_net_for_tool("user_bash", &args);
             vec![mk(EventKind::ToolUse {
                 files: crate::adapters::extract_files_for_tool("user_bash", &args),
-                fqdns: crate::adapters::extract_net_for_tool("user_bash", &args),
+                fqdns: user_bash_net.fqdns,
+                endpoints: user_bash_net.endpoints,
                 file_contents: vec![],
                 tool: "user_bash".into(),
                 phase: "pre".into(),
@@ -87,7 +89,7 @@ pub fn parse(env: &Envelope, capture: &CaptureCfg) -> Vec<Event> {
                 .to_string();
             let args = p.get("input").cloned().unwrap_or(Value::Null);
             let files = crate::adapters::extract_files_for_tool(&tool, &args);
-            let fqdns = crate::adapters::extract_net_for_tool(&tool, &args);
+            let net = crate::adapters::extract_net_for_tool(&tool, &args);
             // pi reports failure as a boolean and puts the message in the
             // content, so the message is the tool's output. With output
             // capture off the failure still has to be recorded — losing the
@@ -122,7 +124,8 @@ pub fn parse(env: &Envelope, capture: &CaptureCfg) -> Vec<Event> {
                 duration_ms: None,
                 interrupted: false,
                 files,
-                fqdns,
+                fqdns: net.fqdns,
+                endpoints: net.endpoints,
                 file_contents: vec![],
             });
             ev.meta.tool_use_id = p
