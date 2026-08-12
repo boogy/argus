@@ -2381,11 +2381,30 @@ commit gated on `make verify`, and none needs another to be done first.
   hosts and endpoints, opencode, copilot, pi); each of the two export
   attributes dropped.
 
-- [ ] **T31** — Codex adapter: extract files and FQDNs. Dependency: none.
+- [x] **T31** — Codex adapter: extract files and FQDNs. Dependency: none.
   Files: `src/adapters/codex.rs`, `docs/telemetry-gaps.md` (#5)
 
   `files: vec![]` is still literal there, so Codex tool events name no file at
   all — and file-content capture keys off that same list.
+
+  Done: the step that makes the rest work is parsing `arguments` back into
+  JSON — OTLP attribute values are scalars, so a tool's arguments arrive as a
+  *string*, and a call whose arguments stayed a string is one whose
+  `file_path` was never a key and whose nested `command` array was never a
+  command. `extract_files_for_tool` then runs over the flat attributes (which
+  are this leg's tool input) and over the parsed arguments, and
+  `extract_patch_files` over `command` and `arguments`. The patch scan drops
+  the tool-name gate the shared extractor keeps, because Codex applies patches
+  through `shell` with the patch on stdin as well as through `apply_patch`,
+  and that is the case that rewrites files while naming none; a bare
+  `cat /etc/passwd` still names nothing. Parsing also widened the network side
+  for free: a nested `{"command": ["bash","-lc","curl mirror.example.org/x"]}`
+  is now read as a command, so its schemeless host is found.
+
+  Mutants killed (6/6): `arguments` left as a string; the parsed value kept
+  from the net extractor; the flat-attribute file read removed; the
+  parsed-arguments file read removed; the patch-header scan removed; the event
+  carrying `files: vec![]`.
 
 - [ ] **T32** — MCP server inventory and per-call tagging. Dependency: none.
   Files: `src/adapters/mod.rs`, `docs/telemetry-gaps.md` (#6)

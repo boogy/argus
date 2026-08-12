@@ -125,6 +125,25 @@ exists.
 **Fix:** call `extract_files_for_tool(tool, &attrs)` and reuse the patch
 extractor on the joined text blob.
 
+**Closed (T31).** Both halves, plus the step that makes them work: OTLP
+attribute values are scalars, so `arguments` arrives as a *string* holding
+JSON. It is parsed back before anything reads it — a call whose arguments
+stayed a string is a call whose `file_path` was never a key, and whose nested
+`command` array was never a command. `extract_files_for_tool` then runs over
+the flat attributes and over the parsed arguments, and `extract_patch_files`
+over `command` and `arguments` directly.
+
+The patch scan deliberately drops the tool-name gate the shared extractor
+keeps. Codex applies patches two ways — the `apply_patch` tool and a `shell`
+call with the patch on stdin — and the second is the one that rewrites files
+while naming none. `*** Update File:` at the head of a line is not a shape
+ordinary arguments take, so believing it costs nothing that guessing at paths
+would; a bare `cat /etc/passwd` still contributes no file.
+
+Parsing the arguments also widened the network side for free: a nested
+`{"command": ["bash", "-lc", "curl mirror.example.org/x"]}` is now read as a
+command, so its schemeless host is found.
+
 ### 6. MCP server inventory
 
 Tool names like `mcp__github__create_issue` identify the MCP server, and
@@ -321,6 +340,8 @@ Closed:
 - **#4** tool-output scanning (T30), as `output_fqdns` / `output_endpoints`
   beside the input's own — the redirect that was followed, kept apart from
   the host that was asked for.
+- **#5** Codex file extraction (T31), by parsing the `arguments` attribute
+  back into JSON first, and reading patch headers whatever the tool is called.
 - **#14** in part: the per-event `hostname` spawn (T6a).
 - Both remaining small fixes: the unsorted `dedup` (T10f) and opencode's
   permission action, which turned out to be an adapter bug rather than a stale
@@ -328,8 +349,7 @@ Closed:
 
 Open, in the order this list would still do them:
 
-1. **#5** Codex file extraction (`files: vec![]` is still literal in
-   `codex.rs`), **#6** MCP server tagging.
+1. **#6** MCP server tagging.
 2. **#7** Bash file activity — now also the one write file capture cannot see.
 3. **#11** for Codex and Copilot, and **#16**, which is the audit that would
    tell us whether their payloads carry an id at all.

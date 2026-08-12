@@ -46,6 +46,17 @@ pub fn parse(env: &Envelope, capture: &CaptureCfg) -> Vec<Event> {
                 .and_then(Value::as_str)
                 .unwrap_or("unknown")
                 .to_string();
+            // OTLP attribute values are scalars, so a tool's arguments arrive
+            // as a *string* holding JSON. Parsed back, because everything that
+            // reads a tool input — path keys, nested `command` arrays — reads
+            // structure, and a call whose arguments stayed a string is a call
+            // whose file was never named.
+            let args = attrs
+                .get("arguments")
+                .and_then(Value::as_str)
+                .and_then(|s| serde_json::from_str::<Value>(s).ok())
+                .or_else(|| attrs.get("arguments").cloned())
+                .unwrap_or(Value::Null);
             // Kept as the two fields rather than one joined blob: `command` is
             // a shell command, which is read as one — a `curl example.com`
             // there names a host no URL scan would see — while `arguments` is
@@ -54,9 +65,27 @@ pub fn parse(env: &Envelope, capture: &CaptureCfg) -> Vec<Event> {
                 &tool,
                 &serde_json::json!({
                     "command": attrs.get("command").cloned().unwrap_or(Value::Null),
-                    "arguments": attrs.get("arguments").cloned().unwrap_or(Value::Null),
+                    "arguments": args.clone(),
                 }),
             );
+            let mut files = crate::adapters::extract_files_for_tool(&tool, &attrs);
+            files.extend(crate::adapters::extract_files_for_tool(&tool, &args));
+            // Patch headers are read whatever the tool is called, unlike in
+            // the shared extractor, which gates them on the name. Codex
+            // applies patches two ways — the `apply_patch` tool, and a `shell`
+            // call with the patch on stdin — and the second is the one that
+            // rewrites files while naming none. `*** Update File:` at the head
+            // of a line is not a shape ordinary arguments take, so believing
+            // it costs nothing that guessing at paths would.
+            for s in [attrs.get("command"), attrs.get("arguments")]
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+            {
+                files.extend(crate::adapters::extract_patch_files(s));
+            }
+            files.sort();
+            files.dedup();
             let phase = if name.ends_with("decision") {
                 "pre"
             } else {
@@ -86,7 +115,7 @@ pub fn parse(env: &Envelope, capture: &CaptureCfg) -> Vec<Event> {
                 // both fields when they are present.
                 duration_ms: None,
                 interrupted: false,
-                files: vec![],
+                files,
                 fqdns: blob_net.fqdns,
                 endpoints: blob_net.endpoints,
                 file_contents: vec![],
@@ -506,6 +535,71 @@ mod tests {
         };
         assert_eq!(tool, "shell");
         assert_eq!(fqdns, &vec!["pypi.org".to_string()]);
+    }
+
+    /// The OTLP leg named no file at all, so a Codex session's edits were
+    /// invisible to every "what did this touch" query — and to file-content
+    /// capture, which keys off the same list.
+    #[test]
+    fn codex_otlp_tool_calls_name_the_files_they_touch() {
+        let files = |attrs: serde_json::Value| {
+            let events = adapters::parse(
+                env(json!({"event_name": "codex.tool_decision", "attributes": attrs})),
+                &CaptureCfg::default(),
+            );
+            let EventKind::ToolUse { files, .. } = &events[0].kind else {
+                panic!()
+            };
+            files.clone()
+        };
+        // The attribute map *is* this leg's tool input — it is what lands in
+        // `input` — so a path key sitting in it names a file, on the same
+        // terms as everywhere else.
+        assert_eq!(
+            files(json!({"tool_name": "read_file", "path": "/repo/src/d.rs"})),
+            vec!["/repo/src/d.rs".to_string()]
+        );
+        // `arguments` is a string over OTLP, and the path is inside it.
+        assert_eq!(
+            files(json!({"tool_name": "read_file",
+                         "arguments": r#"{"file_path": "/repo/src/a.rs"}"#})),
+            vec!["/repo/src/a.rs".to_string()]
+        );
+        // The patch tool, named as such.
+        assert_eq!(
+            files(json!({"tool_name": "apply_patch",
+                         "arguments": r#"{"input": "*** Begin Patch\n*** Update File: src/b.rs\n@@\n*** End Patch"}"#})),
+            vec!["src/b.rs".to_string()]
+        );
+        // The same patch applied through the shell, which is the case the
+        // tool-name gate in the shared extractor cannot see.
+        assert_eq!(
+            files(json!({"tool_name": "shell",
+                         "command": "apply_patch <<'EOF'\n*** Add File: docs/c.md\nEOF"})),
+            vec!["docs/c.md".to_string()]
+        );
+        // And a command that merely mentions paths still names none: `files`
+        // is what a reviewer reads as "the tool opened this".
+        assert!(files(json!({"tool_name": "shell", "command": "cat /etc/passwd"})).is_empty());
+    }
+
+    /// Parsing `arguments` back into JSON is what lets the nested `command`
+    /// be read as a command rather than as prose — the schemeless host in it
+    /// is invisible to a URL scan.
+    #[test]
+    fn a_command_nested_in_the_arguments_json_still_names_its_hosts() {
+        let events = adapters::parse(
+            env(json!({
+                "event_name": "codex.tool_decision",
+                "attributes": {"tool_name": "shell",
+                               "arguments": r#"{"command": ["bash", "-lc", "curl mirror.example.org/x"]}"#}
+            })),
+            &CaptureCfg::default(),
+        );
+        let EventKind::ToolUse { fqdns, .. } = &events[0].kind else {
+            panic!()
+        };
+        assert_eq!(fqdns, &vec!["mirror.example.org".to_string()]);
     }
 
     #[test]

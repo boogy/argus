@@ -66,7 +66,7 @@ argus captures everything each surface offers.
 | Tool use (pre/post)         |             Y              |           Y           |            Y            |         Y         |           Y           |
 | Tool outputs                |             Y              |           Y           |            Y            |         Y         |     Y (text parts)    |
 | Tool failures               |             Y              |           —           | Y (post incl. non-zero) |         Y         |      Y (isError)      |
-| File paths touched          |             Y              |           Y           |     Y (apply_patch)     |         Y         |           Y           |
+| File paths touched          |             Y              |           Y           |  Y (incl. shell patches) |         Y         |           Y           |
 | FQDNs + endpoints contacted |             Y              |           Y           |            Y            |         Y         |           Y           |
 | Skill/command invocations   |             Y              | Y (command.executed)  |            —            |         —         |           —           |
 | Slash-command expansion     |     Y (expanded text)      |           —           |            —            |         —         |           —           |
