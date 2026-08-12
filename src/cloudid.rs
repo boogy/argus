@@ -847,10 +847,16 @@ role_arn = arn:aws:iam::999999999999:role/staging
             std::env::remove_var("CLOUDSDK_CONFIG");
         }
         assert_eq!(aws_config_path(home), home.join(".aws").join("config"));
+        // Not `starts_with(home)`: where gcloud keeps this is platform
+        // business — `%APPDATA%\gcloud` on Windows, `~/.config/gcloud`
+        // elsewhere — and the empty override is caught either way, since
+        // falling for it returns the bare `""`.
+        let adc = gcp_adc_path(home);
         assert!(
-            gcp_adc_path(home).starts_with(home),
-            "{:?}",
-            gcp_adc_path(home)
+            adc.ends_with(
+                std::path::Path::new("gcloud").join("application_default_credentials.json")
+            ),
+            "{adc:?}"
         );
         unsafe {
             std::env::remove_var("AWS_CONFIG_FILE");
