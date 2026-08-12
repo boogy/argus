@@ -2428,12 +2428,41 @@ commit gated on `make verify`, and none needs another to be done first.
   server; the stamp removed; `tool_name()` narrowed to `ToolUse` only; narrowed
   to `Permission` only; the `mcp.server` export attribute removed.
 
-- [ ] **T33** — Bash file activity. Dependency: T31. Files:
+- [x] **T33** — Bash file activity. Dependency: T31. Files:
   `src/adapters/mod.rs`, `src/filecap.rs`, `docs/telemetry-gaps.md` (#7)
 
   A `>` redirect or a `sed -i` names its file only inside a command string, so
   it is the one write no capture mode can see — and since file capture keys off
   the same path list, closing this closes both.
+
+  Done: `adapters::command_files` reads two shapes out of a command line and no
+  others — a redirection target, and the arguments of the six programs whose
+  whole job is moving bytes between paths (`cp`, `mv`, `rm`, `tee`, `touch`,
+  `sed -i`). The verb list stays short deliberately: most programs take a file
+  argument, and a table of them would fill `files` with whichever argument was
+  spelled like a path, in a field read as "what this session touched", where a
+  guess is worse than a gap. Descriptors (`2>&1`), `/dev/null`, globs and
+  unexpanded variables are refused — nothing downstream could open them. The
+  commands come from a new `net::commands_in`, which reuses the network walk's
+  key list, depth bound and argv-join, so a command whose hosts are read cannot
+  be a command whose files are not. Each path carries `written`, which is what
+  closes the second half: written paths are disk-capture candidates (a redirect
+  target is as explicit a claim as a `Write`'s `file_path`, and the
+  include/exclude filter still gates it), while a `cp` source and an `rm`
+  argument are recorded as touched but never opened. The old
+  `a_shell_command_is_not_a_file_path` test asserted the opposite stance and was
+  rewritten rather than deleted, as was the filecap test that pinned the blind
+  spot. Mutants killed (24/24): the command scan removed from
+  `extract_files_for_tool`; nesting and argv-join dropped from `commands_in`;
+  the redirect check removed; a following target not awaited; an attached target
+  ignored; the fd prefix not skipped; `&1`, globs/variables and `/dev/null`
+  accepted as paths; `cp`'s destination demoted to touched; `cp`'s sources
+  dropped; `rm` promoted to a write; `tee`/`touch` silenced; `sed` writing
+  without `-i`; the sed script counted as a file; the pipeline not split; a
+  non-verb lending its arguments; `sudo` and a leading assignment taken as the
+  program; the capture arm removed; capture filtering to unwritten files;
+  capture inventing payload content; the capture arm removed against the
+  exclusion test.
 
 - [ ] **T34** — pre/post correlation for Codex and Copilot, and the payload
   audit that decides whether it is possible. Dependency: none. Files:

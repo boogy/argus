@@ -149,6 +149,26 @@ pub fn candidates(tool: &str, input: &Value) -> Vec<Candidate> {
     if t == "apply_patch" || t == "applypatch" {
         return patch_candidates(input);
     }
+    // A shell command names its files inside a string, so a redirect is the one
+    // write whose path no key in the payload carries — and, since this is where
+    // contents are read, the one write no capture mode could reach.
+    //
+    // Only the files the command *writes*, and only from disk: there is no
+    // payload to snapshot, a `cp` source was read by the shell rather than by
+    // the tool, and an `rm`'s file is gone before anything could open it.
+    let written: Vec<Candidate> = crate::adapters::net::commands_in(input)
+        .iter()
+        .flat_map(|c| crate::adapters::command_files(c))
+        .filter(|f| f.written)
+        .map(|f| Candidate {
+            path: f.path,
+            action: FileAction::Written,
+            content: None,
+        })
+        .collect();
+    if !written.is_empty() {
+        return written;
+    }
     let Some(path) = crate::adapters::FILE_KEYS
         .iter()
         .find_map(|k| input.get(k).and_then(Value::as_str))
@@ -1509,25 +1529,21 @@ mod tests {
     /// where "no content in the payload" is answer enough. Disk mode is the
     /// one that would have to go looking.
     ///
-    /// A shell redirect writes a file no key in the payload names, and a
-    /// `Grep`'s `path` is a directory to search rather than a file it read.
-    /// Both files exist on disk here, so what the test pins is that nothing
-    /// goes looking for them: `FILE_KEYS` gaining `command`, or the read gate
-    /// widening to any tool that mentions a path, would start opening paths
-    /// taken from an untrusted string, and this is where that shows up.
+    /// A `Grep`'s `path` is a directory to search, or a file it searched
+    /// without reading out — neither is a claim that the tool holds the file's
+    /// bytes. Both paths exist on disk here, so what the test pins is that
+    /// nothing goes looking for them: a read gate widening to any tool that
+    /// mentions a path would start opening paths taken from an untrusted
+    /// string, and this is where that shows up.
     #[test]
     fn a_call_that_does_not_claim_to_have_read_a_file_opens_nothing() {
         let dir = tempfile::tempdir().unwrap();
-        let redirected = dir.path().join("out.txt");
-        std::fs::write(&redirected, "written by a redirect").unwrap();
         let searched = dir.path().join("hay.rs");
         std::fs::write(&searched, "needle").unwrap();
-        let cmd = format!("echo hi > {}", redirected.display());
 
         for capture in [on(|_| {}), disk(), on(|fc| fc.mode = ContentMode::Both)] {
             let mode = capture.file_contents.mode;
             for (tool, input) in [
-                ("Bash", serde_json::json!({ "command": cmd })),
                 (
                     "Grep",
                     serde_json::json!({ "path": dir.path().to_string_lossy() }),
@@ -1536,6 +1552,12 @@ mod tests {
                     "Grep",
                     serde_json::json!({ "path": searched.to_string_lossy() }),
                 ),
+                // A command that writes nothing names nothing to read, however
+                // many paths it mentions.
+                (
+                    "Bash",
+                    serde_json::json!({ "command": format!("grep -r needle {}", dir.path().display()) }),
+                ),
             ] {
                 assert!(
                     snaps(tool, input, &capture).is_empty(),
@@ -1543,5 +1565,54 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The blind spot that was documented for so long: a shell redirect writes
+    /// a file no key in the payload names, so its contents were the one write
+    /// no capture mode could reach. Disk mode reaches it now — the redirect is
+    /// as explicit a claim about a named file as a `Write` tool's `file_path`,
+    /// and the same include/exclude filter still decides whether it may be
+    /// opened.
+    ///
+    /// Payload mode reads nothing, because there is nothing in the payload to
+    /// read: the bytes went to the file, not into the tool call.
+    #[test]
+    fn a_shell_redirect_is_captured_from_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("out.txt");
+        std::fs::write(&out, "written by a redirect").unwrap();
+        let input = serde_json::json!({ "command": format!("echo hi > {}", out.display()) });
+
+        let payload = snaps("Bash", input.clone(), &on(|_| {}));
+        assert!(payload.is_empty(), "payload mode invented content");
+
+        for capture in [disk(), on(|fc| fc.mode = ContentMode::Both)] {
+            let mode = capture.file_contents.mode;
+            let got = snaps("Bash", input.clone(), &capture);
+            assert_eq!(got.len(), 1, "{mode:?}");
+            assert_eq!(got[0].action, FileAction::Written, "{mode:?}");
+            assert_eq!(
+                got[0].content.as_deref(),
+                Some("written by a redirect"),
+                "{mode:?}"
+            );
+            assert_eq!(got[0].source, SnapshotSource::Disk, "{mode:?}");
+        }
+    }
+
+    /// The filter is not bypassed by the new path into capture: a redirect into
+    /// an excluded file is still reported as touched and still never shipped.
+    #[test]
+    fn an_excluded_redirect_target_is_not_shipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let secret = dir.path().join(".env");
+        std::fs::write(&secret, "TOKEN=live").unwrap();
+        let input =
+            serde_json::json!({ "command": format!("echo TOKEN=live > {}", secret.display()) });
+
+        let got = snaps("Bash", input, &disk());
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].content, None);
+        assert_eq!(got[0].skipped, Some(SkipReason::Excluded));
     }
 }

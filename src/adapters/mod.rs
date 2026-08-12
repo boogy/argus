@@ -43,8 +43,9 @@ pub fn mcp_server(tool: &str) -> Option<&str> {
     (!server.is_empty() && !rest.is_empty()).then_some(server)
 }
 
-/// File paths from a tool input: known path keys plus apply_patch-style
-/// patch headers embedded in any string value for patch-shaped tools.
+/// File paths from a tool input: known path keys, apply_patch-style patch
+/// headers embedded in any string value for patch-shaped tools, and the files
+/// a shell command names ([`command_files`]).
 pub fn extract_files_for_tool(tool: &str, input: &Value) -> Vec<String> {
     let mut out: Vec<String> = FILE_KEYS
         .iter()
@@ -61,6 +62,12 @@ pub fn extract_files_for_tool(tool: &str, input: &Value) -> Vec<String> {
             out.extend(extract_patch_files(s));
         }
     }
+    // A shell command carries its files in a string, so they are read out of
+    // the command line — for every tool, because which key holds a command is a
+    // property of the payload rather than of the tool's name.
+    for cmd in net::commands_in(input) {
+        out.extend(command_files(&cmd).into_iter().map(|f| f.path));
+    }
     // Sort before dedup: `dedup` only drops *adjacent* duplicates, and the two
     // sources here interleave — an `apply_patch` naming `a.rs` in `file_path`
     // and again in a patch header that also touches `b.rs` yields
@@ -69,6 +76,185 @@ pub fn extract_files_for_tool(tool: &str, input: &Value) -> Vec<String> {
     out.sort();
     out.dedup();
     out
+}
+
+/// A path a shell command names, and whether the command writes it.
+///
+/// The flag is what file capture keys off. A redirect target and a `cp`
+/// destination are files this call produced, so their contents are worth
+/// reading; a `cp` source is a file the shell read on its own, and an `rm`
+/// argument is gone before anything could look. Both still belong in `files` —
+/// the question "what did this session touch" does not care which direction
+/// the bytes went.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandFile {
+    pub path: String,
+    pub written: bool,
+}
+
+/// Files a shell command names, which no path key in the payload does.
+///
+/// Two shapes, and the same restraint as [`net::command_hosts`]: a redirection
+/// target, and the arguments of the handful of programs whose whole job is to
+/// move bytes between paths (`cp`, `mv`, `rm`, `tee`, `touch`, and `sed` when
+/// it edits in place). Everything else is left alone. Most programs take a file
+/// argument, and a table of them would end up recording whichever argument
+/// happened to be spelled like a path — `files` is read as "what this session
+/// touched", so a guess in it is worse than a gap.
+///
+/// This is the one write no other extractor can see: a `>` names its file
+/// inside a command string, and file capture keys off the same list.
+pub fn command_files(command: &str) -> Vec<CommandFile> {
+    let mut out: Vec<CommandFile> = Vec::new();
+    let mut seg: Vec<&str> = Vec::new();
+    for raw in command.split_whitespace() {
+        let token = raw.trim_matches(|c: char| "'\"`".contains(c));
+        if net::COMMAND_SEPARATORS.contains(&token) {
+            segment_files(&seg, &mut out);
+            seg.clear();
+            continue;
+        }
+        seg.push(token);
+    }
+    segment_files(&seg, &mut out);
+    // Sorted written-first so the dedup keeps the stronger claim: `cp a b && rm
+    // a` names `a` twice, and a file that was written anywhere in the command
+    // was written.
+    out.sort_by(|a, b| a.path.cmp(&b.path).then(b.written.cmp(&a.written)));
+    out.dedup_by(|a, b| a.path == b.path);
+    out
+}
+
+/// One command out of a pipeline: everything up to the next separator.
+fn segment_files(seg: &[&str], out: &mut Vec<CommandFile>) {
+    #[derive(PartialEq)]
+    enum Kind {
+        Unknown,
+        Other,
+        Copy,
+        Remove,
+        Write,
+        Sed,
+    }
+    let write = |p: &str| CommandFile {
+        path: p.to_string(),
+        written: true,
+    };
+    let touch = |p: &&str| CommandFile {
+        path: p.to_string(),
+        written: false,
+    };
+
+    let mut kind = Kind::Unknown;
+    let mut expect_target = false;
+    let mut args: Vec<&str> = Vec::new();
+    let mut in_place = false;
+    for token in seg {
+        // A redirection is checked first and everywhere: it can precede the
+        // program (`> out.txt cat x`) as well as follow its arguments, and it
+        // is the one shape that names a file whatever the program is.
+        if expect_target {
+            expect_target = false;
+            if let Some(p) = as_path(token) {
+                out.push(write(p));
+            }
+            continue;
+        }
+        if let Some(target) = redirect(token) {
+            match target {
+                Some(t) => {
+                    if let Some(p) = as_path(t) {
+                        out.push(write(p));
+                    }
+                }
+                None => expect_target = true,
+            }
+            continue;
+        }
+        if kind == Kind::Unknown {
+            // `sudo rm …`, `/bin/rm …`, `rm.exe …`: the program is the last
+            // path segment, and a leading `VAR=value` assignment is not the
+            // program at all.
+            let bare = token
+                .rsplit(['/', '\\'])
+                .next()
+                .unwrap_or(token)
+                .trim_end_matches(".exe");
+            kind = match bare {
+                "cp" | "mv" => Kind::Copy,
+                "rm" => Kind::Remove,
+                "tee" | "touch" => Kind::Write,
+                "sed" => Kind::Sed,
+                // Keep looking: the real program follows.
+                "sudo" | "env" | "time" | "nohup" => Kind::Unknown,
+                _ if token.contains('=') => Kind::Unknown,
+                _ => Kind::Other,
+            };
+            continue;
+        }
+        if let Some(p) = as_path(token) {
+            args.push(p);
+        } else if token.starts_with("-i") {
+            in_place = true;
+        }
+    }
+    match kind {
+        Kind::Write => out.extend(args.iter().map(|p| write(p))),
+        Kind::Remove => out.extend(args.iter().map(touch)),
+        // The last path is the destination; everything before it is a source
+        // the command read.
+        Kind::Copy => {
+            if let Some((dest, sources)) = args.split_last() {
+                out.extend(sources.iter().map(touch));
+                out.push(write(dest));
+            }
+        }
+        // A `sed` that does not edit in place writes nothing and names nothing:
+        // its file is read and the result goes to stdout. The first non-flag
+        // argument is the script rather than a file — `''` on BSD `sed -i ''`
+        // drops out earlier, as an empty token.
+        Kind::Sed => {
+            if in_place {
+                out.extend(args.iter().skip(1).map(|p| write(p)));
+            }
+        }
+        Kind::Unknown | Kind::Other => {}
+    }
+}
+
+/// A token read as a path, or nothing if it is not one.
+fn as_path(token: &str) -> Option<&str> {
+    if token.is_empty() || token.starts_with('-') || token.starts_with('&') {
+        return None;
+    }
+    // A path the shell would have expanded is not the path that was touched,
+    // and neither a glob nor an unexpanded variable can be opened by anything
+    // reading this field later.
+    if token.contains(['$', '*', '?']) {
+        return None;
+    }
+    // `> /dev/null` is the most common redirect there is, and it writes to a
+    // device rather than a file: recording it would put a write nobody
+    // performed at the top of every "most touched files" query.
+    if token == "/dev/null" || token.starts_with("/dev/std") {
+        return None;
+    }
+    Some(token)
+}
+
+/// A redirection's target: `Some(Some(path))` when the path is attached
+/// (`>out.txt`), `Some(None)` when it is the next token, `None` when the token
+/// opens no redirection at all.
+///
+/// The file-descriptor prefix is skipped, so `2> err.log` is a write like any
+/// other, while `2>&1` yields `&1` — a descriptor, which [`as_path`] refuses.
+fn redirect(token: &str) -> Option<Option<&str>> {
+    let rest = token.trim_start_matches(|c: char| c.is_ascii_digit());
+    let rest = rest.strip_prefix('&').unwrap_or(rest);
+    let rest = rest.strip_prefix('>')?;
+    let rest = rest.strip_prefix('>').unwrap_or(rest);
+    let rest = rest.strip_prefix('|').unwrap_or(rest);
+    Some((!rest.is_empty()).then_some(rest))
 }
 
 pub fn extract_patch_files(patch: &str) -> Vec<String> {
@@ -311,16 +497,151 @@ mod tests {
     }
 
     /// A command is not a file, and `files` is what a reviewer reads to answer
-    /// "what did this session touch". A shell command mentions paths in a
-    /// dozen shapes, none of them a claim that the tool opened one, so a key
-    /// carrying a command must never join `FILE_KEYS` — the list would fill
-    /// with strings that only look like paths, and file capture keys off the
-    /// same list.
+    /// "what did this session touch". A shell command mentions paths in a dozen
+    /// shapes, so a key carrying one must never join `FILE_KEYS` — the list
+    /// would fill with strings that only look like paths, and file capture keys
+    /// off the same list. What is read out of a command is the two shapes that
+    /// *are* a claim about a specific file: the redirect target, and the
+    /// argument of a program whose job is to move bytes between paths.
+    /// `/etc/passwd` here is neither — `cat` reads it, and `cat` is not on the
+    /// list.
     #[test]
-    fn a_shell_command_is_not_a_file_path() {
+    fn a_shell_command_is_not_a_file_path_but_its_redirect_target_is() {
         let input = serde_json::json!({"command": "cat /etc/passwd > /tmp/out.txt"});
-        assert!(extract_files_for_tool("Bash", &input).is_empty());
-        assert!(extract_files_for_tool("shell", &input).is_empty());
+        assert_eq!(
+            extract_files_for_tool("Bash", &input),
+            vec!["/tmp/out.txt".to_string()]
+        );
+        assert_eq!(
+            extract_files_for_tool("shell", &input),
+            vec!["/tmp/out.txt".to_string()]
+        );
+        let plain = serde_json::json!({"command": "cat /etc/passwd | grep root"});
+        assert!(extract_files_for_tool("Bash", &plain).is_empty());
+    }
+
+    /// The shapes a redirect comes in, and the ones that look like a redirect
+    /// without naming a file.
+    #[test]
+    fn a_redirect_names_its_file_however_it_is_spelled() {
+        let f =
+            |cmd: &str| -> Vec<String> { command_files(cmd).into_iter().map(|f| f.path).collect() };
+        assert_eq!(f("echo hi > a.txt"), vec!["a.txt".to_string()]);
+        assert_eq!(f("echo hi >a.txt"), vec!["a.txt".to_string()]);
+        assert_eq!(f("echo hi >> a.txt"), vec!["a.txt".to_string()]);
+        assert_eq!(f("make 2> err.log"), vec!["err.log".to_string()]);
+        assert_eq!(f("make &>build.log"), vec!["build.log".to_string()]);
+        assert_eq!(f("echo hi >| a.txt"), vec!["a.txt".to_string()]);
+        // A descriptor, a device, a glob, an unexpanded variable: none of them
+        // is a path anything downstream could open.
+        assert!(f("make > /dev/null 2>&1").is_empty());
+        assert!(f("cat x > $OUT").is_empty());
+        assert!(f("cat x > out-*.txt").is_empty());
+        assert!(f("echo a->b").is_empty());
+        assert!(f("echo hi >").is_empty());
+    }
+
+    /// The file verbs, and which of their arguments the command wrote — the
+    /// distinction file capture reads.
+    #[test]
+    fn a_file_verb_names_its_arguments_and_says_which_it_wrote() {
+        let f = command_files;
+        assert_eq!(
+            f("cp -r src/a.rs src/b.rs"),
+            vec![
+                CommandFile {
+                    path: "src/a.rs".into(),
+                    written: false
+                },
+                CommandFile {
+                    path: "src/b.rs".into(),
+                    written: true
+                },
+            ]
+        );
+        assert_eq!(
+            f("mv old.txt new.txt"),
+            vec![
+                CommandFile {
+                    path: "new.txt".into(),
+                    written: true
+                },
+                CommandFile {
+                    path: "old.txt".into(),
+                    written: false
+                },
+            ]
+        );
+        assert_eq!(
+            f("rm -rf build/x"),
+            vec![CommandFile {
+                path: "build/x".into(),
+                written: false
+            }]
+        );
+        assert_eq!(
+            f("echo hi | tee -a log.txt"),
+            vec![CommandFile {
+                path: "log.txt".into(),
+                written: true
+            }]
+        );
+        assert_eq!(
+            f("touch stamp"),
+            vec![CommandFile {
+                path: "stamp".into(),
+                written: true
+            }]
+        );
+        // `sed` writes a file only in place, and its script is not a file —
+        // including the empty argument BSD `sed -i` takes.
+        assert_eq!(
+            f("sed -i 's/a/b/' src/c.rs"),
+            vec![CommandFile {
+                path: "src/c.rs".into(),
+                written: true
+            }]
+        );
+        assert_eq!(
+            f("sed -i '' -e 's/a/b/' src/c.rs"),
+            vec![CommandFile {
+                path: "src/c.rs".into(),
+                written: true
+            }]
+        );
+        assert!(f("sed 's/a/b/' src/c.rs").is_empty());
+    }
+
+    /// A pipeline is several commands, and only the first word of each says
+    /// what its arguments are. A program that is not a file verb lends its
+    /// arguments to nothing — including the one that follows it.
+    #[test]
+    fn each_command_in_a_pipeline_is_read_on_its_own() {
+        let f =
+            |cmd: &str| -> Vec<String> { command_files(cmd).into_iter().map(|f| f.path).collect() };
+        assert_eq!(
+            f("grep -r x src | tee hits.txt && rm stale.txt"),
+            vec!["hits.txt".to_string(), "stale.txt".to_string()]
+        );
+        // `sudo` and a leading assignment are not the program.
+        assert_eq!(f("sudo rm /etc/hosts"), vec!["/etc/hosts".to_string()]);
+        assert_eq!(f("TZ=UTC touch a"), vec!["a".to_string()]);
+        // `cargo` takes a path argument like everything else does.
+        assert!(f("cargo build --manifest-path Cargo.toml").is_empty());
+    }
+
+    /// A file named by both a path key and the command is listed once, and a
+    /// command nested where the network walk finds one is read there too.
+    #[test]
+    fn a_command_names_its_files_wherever_it_sits() {
+        let input = serde_json::json!({
+            "file_path": "src/a.rs",
+            "params": {"command": ["cp", "src/a.rs", "src/b.rs"]},
+        });
+        assert_eq!(
+            extract_files_for_tool("someTool", &input),
+            vec!["src/a.rs".to_string(), "src/b.rs".to_string()]
+        );
     }
 
     /// The same path reached through both sources — a path key and a patch

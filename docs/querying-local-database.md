@@ -241,6 +241,18 @@ WHERE body->>'$.type' = 'tool_use' AND body->>'$.phase' = 'pre'
 GROUP BY 1, 2, 3;
 ```
 
+`files` includes what a shell command named — a redirect target, a `cp`/`mv`/
+`rm`/`tee`/`touch` argument, a `sed -i` file — so this query covers writes that
+never went through a file tool:
+
+```sql
+SELECT body->>'$.session_id' AS session, f.value AS path, body->>'$.input' AS cmd
+FROM events, json_each(events.body, '$.files') AS f
+WHERE body->>'$.type' = 'tool_use' AND body->>'$.phase' = 'pre'
+  AND body->>'$.tool' IN ('Bash', 'shell', 'bash')
+ORDER BY seq DESC;
+```
+
 Also include `file_change` events (opencode edits, Claude Code config changes):
 
 ```sql

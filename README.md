@@ -108,6 +108,22 @@ file-path keys the adapters already agree on, an `apply_patch` body, an `edits`
 array — so a surface gets file capture by carrying a path, not by being on a
 list. See [File-content capture](#file-content-capture); it is off by default.
 
+The file-paths row includes the files a **shell command** names, on every
+surface, because a `>` redirect writes a file that no path key in the payload
+mentions. Two shapes are read out of a command line and no others: the target
+of a redirection (`> out.txt`, `>> log`, `2> err.log`), and the arguments of
+the few programs whose whole job is to move bytes between paths — `cp`, `mv`,
+`rm`, `tee`, `touch`, and `sed` when it edits in place. `cat /etc/passwd` names
+nothing; a longer verb table would fill `files` with whichever argument
+happened to look like a path, and that field is read as *what this session
+touched*. Descriptors (`2>&1`), `/dev/null`, globs and unexpanded variables are
+not paths and are dropped. The files such a command **writes** — a redirect
+target, a `cp` destination — are also capture candidates in `disk` mode; a `cp`
+source and an `rm` argument are listed as touched but never opened, the first
+because the shell read it rather than the tool, the second because it is gone.
+
+
+
 A row saying `Y` means the event is recorded, not that every field in it is.
 Four that used to be read past are now kept, because each is the part of its
 event a reviewer would actually look for. A compaction's `custom_instructions`
@@ -953,9 +969,10 @@ directory; none are needed for an ordinary install.
 - No OS service management (`launchd`/`systemd`/Windows service) — the daemon
   is autospawned by the first hook invocation instead.
 - Remote config is trusted over HTTPS; no detached-signature verification yet.
-- Bash tool parsing only extracts FQDNs, not file writes via `>`/`tee`. A file
-  written that way is invisible to file-content capture too — nothing names it,
-  so there is no candidate to read.
+- Bash tool parsing reads redirection targets and the arguments of six file
+  verbs, not the file argument of every program. `python build.py -o dist/x`
+  writes a file argus does not name — see the shell paragraph in
+  [Per-tool fidelity](#per-tool-fidelity) for why the list is short.
 - No Claude Code transcript-path mining for token/model usage stats.
 - The hand-off spool holds un-redacted payloads while the daemon is down — see
   [The spool holds un-redacted payloads on disk](#the-spool-holds-un-redacted-payloads-on-disk).

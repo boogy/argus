@@ -187,6 +187,28 @@ same `FILE_KEYS` path spellings, so a file written through a redirect is not
 merely unnamed — it is the one write whose *contents* no capture mode can
 reach, because nothing in the payload says which file to read.
 
+**Closed (T33).** `adapters::command_files` reads two shapes out of a command
+line and no others: the target of a redirection, and the arguments of the six
+programs whose whole job is moving bytes between paths (`cp`, `mv`, `rm`,
+`tee`, `touch`, and `sed -i`). The commands themselves come from
+`net::commands_in`, which applies the same key list and depth bound the network
+walk does — asking "which strings are commands" twice with two answers would
+produce a command whose hosts are read but whose files are not.
+
+The verb list stays short on purpose. Most programs take a file argument, and a
+table of them would fill `files` with whichever argument happened to be spelled
+like a path, in a field read as *what this session touched*; a gap there is
+better than a guess. Descriptors (`2>&1`), `/dev/null`, globs and unexpanded
+variables are refused for the same reason — nothing downstream could open them.
+
+The second half of the cost is closed too. Each path carries whether the
+command *wrote* it, and the written ones are capture candidates in `disk` mode:
+a redirect target is as explicit a claim about a named file as a `Write` tool's
+`file_path`, and the include/exclude filter still decides whether it may be
+opened. A `cp` source and an `rm` argument are reported as touched but never
+opened — the first was read by the shell rather than by the tool, the second is
+gone before anything could look.
+
 ## Session context
 
 ### 8. Event timestamps are wrong for spooled events
@@ -365,6 +387,9 @@ Closed:
   back into JSON first, and reading patch headers whatever the tool is called.
 - **#6** MCP per-call attribution (T32), as `Meta.mcp_server` / `mcp.server`;
   the server *inventory* half is open as T35.
+- **#7** Bash file activity (T33): redirect targets and six file verbs, and —
+  because each path says whether the command wrote it — the disk capture of
+  the write that no payload key names.
 - **#14** in part: the per-event `hostname` spawn (T6a).
 - Both remaining small fixes: the unsorted `dedup` (T10f) and opencode's
   permission action, which turned out to be an adapter bug rather than a stale
@@ -372,12 +397,11 @@ Closed:
 
 Open, in the order this list would still do them:
 
-1. **#7** Bash file activity — now also the one write file capture cannot see.
-2. **#11** for Codex and Copilot, and **#16**, which is the audit that would
+1. **#11** for Codex and Copilot, and **#16**, which is the audit that would
    tell us whether their payloads carry an id at all.
-3. **#6**'s richer half (T35): the server-to-endpoint inventory, which needs
+2. **#6**'s richer half (T35): the server-to-endpoint inventory, which needs
    the same opt-in and redaction file capture has.
-4. **#12** transcript mining, **#13** git enrichment, **#15** Codex `raw`
+3. **#12** transcript mining, **#13** git enrichment, **#15** Codex `raw`
    inventory, and the rest of **#14**.
 
 Not on this list because it postdates it: file-content capture, which answers

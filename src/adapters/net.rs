@@ -78,7 +78,8 @@ const HOST_FLAGS: &[&str] = &[
 /// Where one command ends and the next begins. `curl a.example | grep x &&
 /// wget b.example` is three commands, and only the first word of each says
 /// whether its arguments are hosts.
-const COMMAND_SEPARATORS: &[&str] = &["|", "||", "&&", ";", "&", "(", ")", "{", "}", "\n"];
+pub(crate) const COMMAND_SEPARATORS: &[&str] =
+    &["|", "||", "&&", ";", "&", "(", ")", "{", "}", "\n"];
 
 /// How deep into a tool input the walk goes. Matches the cap the input itself
 /// was already trimmed to; past it a document is a payload, not an argument.
@@ -368,6 +369,51 @@ fn walk_content(v: &Value, depth: usize, refs: &mut NetRefs) {
         Value::Object(o) => {
             for x in o.values() {
                 walk_content(x, depth + 1, refs);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Every string in a tool input that is a command line.
+///
+/// The same rules [`walk`] applies — the `command`/`cmd`/`script` keys, the
+/// same depth bound, an argv array read as one line — exposed on its own
+/// because the network is not the only thing a command says. Which strings are
+/// commands is one question with one answer: a second traversal that decided
+/// differently would produce a command whose hosts are read but whose files are
+/// not, and nothing would say which of the two was wrong.
+pub fn commands_in(input: &Value) -> Vec<String> {
+    let mut out = Vec::new();
+    collect_commands(input, false, 0, &mut out);
+    out
+}
+
+fn collect_commands(v: &Value, is_command: bool, depth: usize, out: &mut Vec<String>) {
+    if depth > MAX_DEPTH {
+        return;
+    }
+    match v {
+        Value::String(s) => {
+            if is_command {
+                out.push(s.clone());
+            }
+        }
+        Value::Array(a) => {
+            if is_command {
+                let line: Vec<&str> = a.iter().filter_map(Value::as_str).collect();
+                if !line.is_empty() {
+                    out.push(line.join(" "));
+                }
+            }
+            for x in a {
+                collect_commands(x, is_command, depth + 1, out);
+            }
+        }
+        Value::Object(o) => {
+            for (k, x) in o {
+                let cmd = COMMAND_KEYS.iter().any(|c| k.eq_ignore_ascii_case(c));
+                collect_commands(x, cmd, depth + 1, out);
             }
         }
         _ => {}
