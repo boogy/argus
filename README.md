@@ -290,6 +290,7 @@ audit log:
 ```
 cloud.aws.role_arn        = arn:aws:iam::123456789012:role/prod-admin
 cloud.aws.account_id      = 123456789012
+cloud.aws.sso_role_name   = AdministratorAccess
 cloud.aws.region          = eu-west-1
 cloud.azure.subscription_id, cloud.azure.tenant_id, cloud.azure.client_id
 cloud.gcp.project, cloud.gcp.account, cloud.gcp.credentials_file
@@ -315,6 +316,26 @@ machine holds their entire shell, and a monitoring tool that shipped it
 wholesale would be the largest thing it had to defend. The allowlist is
 deliberately not exhaustive and no heuristic ever inspects a *value*: a provider
 argus does not know yet is a missing attribute, never a leaked one.
+
+**The files behind the variables.** `AWS_PROFILE=prod` says which profile, not
+which role — the role lives in `~/.aws/config` under `[profile prod]`. So the
+same two files an SDK beside the agent would resolve are read as well:
+
+- `~/.aws/config` (or `AWS_CONFIG_FILE`), the section the environment selects,
+  defaulting to `[default]` exactly as the SDKs do → `role_arn`,
+  `role_session_name`, `sso_account_id`, `sso_role_name`, `region`.
+- gcloud's application-default credentials — `GOOGLE_APPLICATION_CREDENTIALS`,
+  else `CLOUDSDK_CONFIG`, else the well-known path → `client_email`,
+  `project_id`, `quota_project_id`, `type` (service account, user, federated).
+
+Same rule as the environment: an explicit list of identifying fields, and no
+credential. The ADC document's `private_key` and `refresh_token` are not on the
+list, and `~/.aws/credentials` — the file holding the secret access key — is
+never opened at all. A variable always outranks a file, because a variable is
+what the agent's process was told and a file is only what would be resolved from
+it. The reads are capped at 256 KiB, happen once per process, and are silent on
+failure: this is the agent's hot path, so a missing or unreadable file costs an
+attribute, never an event.
 
 The read happens as close to the agent as possible, because that is the only
 place the agent's environment exists — the daemon was started from somewhere

@@ -2289,8 +2289,10 @@ commit gated on `make verify`, and none needs another to be done first.
 
 ### Open — each independent, none started
 
-- [ ] **T28** — cloud identity from the files an SDK reads, not only the
-  environment. Dependency: T27. Files: `src/cloudid.rs`, `README.md`
+- [x] **T28** — cloud identity from the files an SDK reads, not only the
+  environment. Dependency: T27. Files: `src/cloudid.rs`,
+  `plugins/shared/transport.ts`, `tests/plugin/opencode_payload.mjs`,
+  `README.md`
 
   `AWS_PROFILE=prod` alone says which profile, not which role or account —
   those live in `~/.aws/config` under `[profile prod]` (`role_arn`,
@@ -2300,6 +2302,20 @@ commit gated on `make verify`, and none needs another to be done first.
   `~/.aws/credentials` secret key is out of scope entirely). Cost is the
   constraint — this runs in the hook shim on the agent's hot path, so it must
   be bounded (size cap, one read per process, failure is silence).
+
+  Done: `AWS_PROFILE_KEYS` (role_arn, role_session_name, sso_account_id,
+  sso_role_name, region) parsed out of the profile the environment selects,
+  `[default]` when it names none; `GCP_ADC_KEYS` (client_email, project_id,
+  quota_project_id, type) out of the ADC document. `~/.aws/credentials` is
+  never opened, and the ADC private key and refresh token are not on the list.
+  Environment wins over file (`or_insert`), reads are capped at 256 KiB and
+  silent on failure. Implemented on both sides — the plugin writes its own
+  envelope, so the TS half reads the same files, behind its own try/catch so a
+  filesystem error loses an attribute rather than the event; both new lists are
+  pinned to the Rust ones by the existing transport test. Six mutants killed:
+  the call dropped from `current()`, the file overwriting the environment, the
+  cap lifted, every INI section treated as the wanted one, the ADC document
+  copied wholesale, and the plugin's read disabled.
 
 - [ ] **T29** — network extraction: recursive scan, non-HTTP schemes,
   port/scheme retention. Dependency: none. Files: `src/adapters/mod.rs`,

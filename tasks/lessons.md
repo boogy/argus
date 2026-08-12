@@ -47,3 +47,12 @@ correction; keep entries terse.
   pushed in T18e before `make verify` was read. Two rules follow: write the
   full output to a file and read *that*, and read the verify exit code before
   running `git commit`, never in the same `;`-joined line.
+
+- **Restore a mutant with `shutil.copy` (or `cp`), never `copy2`.** `copy2`
+  copies the *metadata*, so the restored file carries the pre-mutation mtime —
+  older than the artifact cargo just built from the mutated source. Cargo then
+  rebuilds nothing, and the next `make verify` runs the mutant against the
+  correct tree. In T28 that showed up as the opencode plugin test failing on a
+  file no diff could explain. The content check (`restored == backup`) passes
+  and proves nothing about this. `touch` every restored file, or copy without
+  metadata.

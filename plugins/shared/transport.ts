@@ -11,6 +11,7 @@
 // shim's frame format (newline-delimited Envelope JSON). Fallback: spawn the
 // shim binary, which handles spooling and daemon autospawn.
 import { spawn } from "node:child_process";
+import { closeSync, openSync, readSync } from "node:fs";
 import { createConnection, type Socket } from "node:net";
 
 let sock: Socket | null = null;
@@ -188,6 +189,127 @@ const CREDENTIAL_MARKERS = [
 ];
 // argus:markers:end
 
+// The identifying settings read out of the files those variables point at —
+// `~/.aws/config`, which is where a profile's role actually lives, and the
+// gcloud application-default credentials. Pinned to `AWS_PROFILE_KEYS` and
+// `GCP_ADC_KEYS` in src/cloudid.rs by the same test. Never `~/.aws/credentials`,
+// and never a key from an ADC document that is not on this list.
+// argus:aws-profile:begin
+const AWS_PROFILE_KEYS: [string, string][] = [
+  ["role_arn", "aws.role_arn"],
+  ["role_session_name", "aws.role_session_name"],
+  ["sso_account_id", "aws.account_id"],
+  ["sso_role_name", "aws.sso_role_name"],
+  ["region", "aws.region"],
+];
+// argus:aws-profile:end
+// argus:gcp-adc:begin
+const GCP_ADC_KEYS: [string, string][] = [
+  ["client_email", "gcp.account"],
+  ["project_id", "gcp.project"],
+  ["quota_project_id", "gcp.quota_project"],
+  ["type", "gcp.credentials_type"],
+];
+// argus:gcp-adc:end
+
+// Matches MAX_IDENTITY_FILE_BYTES in src/cloudid.rs.
+const MAX_IDENTITY_FILE_BYTES = 256 * 1024;
+
+function readCapped(path: string): string | null {
+  let fd: number | null = null;
+  try {
+    fd = openSync(path, "r");
+    const buf = Buffer.alloc(MAX_IDENTITY_FILE_BYTES);
+    const read = readSync(fd, buf, 0, MAX_IDENTITY_FILE_BYTES, 0);
+    return buf.subarray(0, read).toString("utf8");
+  } catch {
+    // A file that is absent, unreadable, or a directory is silence.
+    return null;
+  } finally {
+    if (fd !== null) try { closeSync(fd); } catch {}
+  }
+}
+
+function awsProfileAttrs(text: string, profile: string): [string, string][] {
+  const wanted = profile === "default" ? "default" : `profile ${profile}`;
+  const found: [string, string][] = [];
+  let inSection = false;
+  for (const raw of text.split("\n")) {
+    const line = raw.trim();
+    if (line.startsWith("#") || line.startsWith(";")) continue;
+    if (line.startsWith("[") && line.endsWith("]")) {
+      inSection = line.slice(1, -1).split(/\s+/).join(" ") === wanted;
+      continue;
+    }
+    if (!inSection) continue;
+    const eq = line.indexOf("=");
+    if (eq < 0) continue;
+    const key = line.slice(0, eq).trim();
+    const value = line.slice(eq + 1).trim();
+    if (!value) continue;
+    const hit = AWS_PROFILE_KEYS.find(([k]) => k === key);
+    if (hit && !found.some(([a]) => a === hit[1])) found.push([hit[1], value]);
+  }
+  return found;
+}
+
+function gcpAdcAttrs(text: string): [string, string][] {
+  let doc: Record<string, unknown>;
+  try {
+    doc = JSON.parse(text);
+  } catch {
+    return [];
+  }
+  if (!doc || typeof doc !== "object") return [];
+  const found: [string, string][] = [];
+  for (const [key, attribute] of GCP_ADC_KEYS) {
+    const value = doc[key];
+    // Strings only: a field that is an object is not an identity.
+    if (typeof value === "string" && value) found.push([attribute, value]);
+  }
+  return found;
+}
+
+function homeDir(): string {
+  return (
+    process.env.ARGUS_HOME ||
+    process.env.HOME ||
+    process.env.USERPROFILE ||
+    "."
+  );
+}
+
+function awsConfigPath(home: string): string {
+  return process.env.AWS_CONFIG_FILE || `${home}/.aws/config`;
+}
+
+function gcpAdcPath(home: string): string {
+  const adc = "application_default_credentials.json";
+  if (process.env.GOOGLE_APPLICATION_CREDENTIALS)
+    return process.env.GOOGLE_APPLICATION_CREDENTIALS;
+  if (process.env.CLOUDSDK_CONFIG)
+    return `${process.env.CLOUDSDK_CONFIG}/${adc}`;
+  if (process.platform === "win32" && process.env.APPDATA)
+    return `${process.env.APPDATA}\\gcloud\\${adc}`;
+  return `${home}/.config/gcloud/${adc}`;
+}
+
+// The environment always wins: a variable is what this process was told, a file
+// is only what an SDK would resolve from it.
+function enrichFromFiles(id: CloudIdentity): void {
+  const home = homeDir();
+  const awsConfig = readCapped(awsConfigPath(home));
+  if (awsConfig !== null) {
+    const profile = id.attributes["aws.profile"] ?? "default";
+    for (const [attribute, value] of awsProfileAttrs(awsConfig, profile))
+      if (!(attribute in id.attributes)) id.attributes[attribute] = value;
+  }
+  const adc = readCapped(gcpAdcPath(home));
+  if (adc !== null)
+    for (const [attribute, value] of gcpAdcAttrs(adc))
+      if (!(attribute in id.attributes)) id.attributes[attribute] = value;
+}
+
 type CloudIdentity = {
   attributes: Record<string, string>;
   credentials: string[];
@@ -217,6 +339,14 @@ function cloudIdentity(): CloudIdentity {
     const upper = name.toUpperCase();
     if (CREDENTIAL_MARKERS.some((m) => upper.includes(m)))
       id.credentials.push(name);
+  }
+  // Its own guard, not `send`'s: the whole body of `send` is one try/catch, so
+  // a filesystem error thrown here would drop the event rather than lose an
+  // attribute. Reading the files is best-effort; reporting the event is not.
+  try {
+    enrichFromFiles(id);
+  } catch {
+    // an identity from the environment alone is still an identity
   }
   identity = id;
   return id;

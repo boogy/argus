@@ -28,9 +28,20 @@
 //! The allowlist is deliberately not exhaustive — it cannot be, and a
 //! catch-all heuristic over values is exactly what must not exist here. A
 //! provider it does not know yet is a missing attribute, never a leaked one.
+//!
+//! # The files behind the variables
+//!
+//! `AWS_PROFILE=prod` says which profile, not which role: that lives in
+//! `~/.aws/config` under `[profile prod]`, and gcloud's application-default
+//! credentials name the service account the same way. Those two files are read
+//! as well, under the same rule — the identifying fields, never a credential.
+//! `~/.aws/credentials`, the file holding the secret access key, is never
+//! opened at all. The reads are bounded and silent on failure, because they
+//! happen in the hook shim while the agent waits.
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
 /// `(variable, attribute)`. Several variables map to one attribute where a
 /// provider offers aliases; first hit in this order wins, which follows each
@@ -189,14 +200,205 @@ where
     id
 }
 
+/// Identifying settings of one AWS shared-config profile.
+///
+/// `AWS_PROFILE=prod` says which profile, not which role — the role lives in
+/// `~/.aws/config` under `[profile prod]`, and an agent that assumed it through
+/// a profile would otherwise be recorded with no role at all. Same rule as the
+/// environment allowlist: every key here is one the provider logs against the
+/// call it authorizes.
+///
+/// The *config* file only. `~/.aws/credentials` is the file holding
+/// `aws_secret_access_key`, and nothing in argus opens it.
+// argus:aws-profile:begin
+const AWS_PROFILE_KEYS: &[(&str, &str)] = &[
+    ("role_arn", "aws.role_arn"),
+    ("role_session_name", "aws.role_session_name"),
+    ("sso_account_id", "aws.account_id"),
+    // The permission set the SSO login grants — "which role in that account",
+    // for the profiles that name a role no other way.
+    ("sso_role_name", "aws.sso_role_name"),
+    ("region", "aws.region"),
+];
+// argus:aws-profile:end
+
+/// Identifying fields of a Google application-default-credentials file.
+///
+/// The file also holds a private key or a refresh token. They are not on this
+/// list, so they are not read out of the parsed document and cannot reach an
+/// event — see [`gcp_adc_attrs`], which copies these keys and nothing else.
+// argus:gcp-adc:begin
+const GCP_ADC_KEYS: &[(&str, &str)] = &[
+    ("client_email", "gcp.account"),
+    ("project_id", "gcp.project"),
+    ("quota_project_id", "gcp.quota_project"),
+    // `service_account`, `authorized_user`, `external_account`: whether the
+    // agent was acting as a robot, as a person, or through federation.
+    ("type", "gcp.credentials_type"),
+];
+// argus:gcp-adc:end
+
+/// Ceiling on an identity file. A shared config is a few kilobytes and an ADC
+/// document is a few hundred bytes; anything past this is not one of them, and
+/// the read happens on the hook path where the agent is waiting.
+const MAX_IDENTITY_FILE_BYTES: u64 = 256 * 1024;
+
+fn read_capped(path: &Path) -> Option<String> {
+    use std::io::Read;
+    let mut buf = Vec::new();
+    std::fs::File::open(path)
+        .ok()?
+        .take(MAX_IDENTITY_FILE_BYTES)
+        .read_to_end(&mut buf)
+        .ok()?;
+    Some(String::from_utf8_lossy(&buf).into_owned())
+}
+
+/// Pull one profile's identifying settings out of an AWS shared config.
+///
+/// A deliberately small INI reader rather than a dependency: the file's own
+/// format is `[profile name]` for every profile but `[default]`, nested
+/// settings are indented under a parent key, and both `#` and `;` start a
+/// comment. Unknown keys — including every nested one — are simply not looked
+/// up, so the parse cannot be widened by what a file happens to contain.
+fn aws_profile_attrs(text: &str, profile: &str) -> Vec<(&'static str, String)> {
+    let wanted = if profile == "default" {
+        "default".to_string()
+    } else {
+        format!("profile {profile}")
+    };
+    let mut in_section = false;
+    let mut found: Vec<(&'static str, String)> = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with('#') || line.starts_with(';') {
+            continue;
+        }
+        if let Some(name) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
+            // Section names are whitespace-normalised: `[profile  prod]` and
+            // `[profile prod]` are the same profile to the SDK.
+            in_section = name.split_whitespace().collect::<Vec<_>>().join(" ") == wanted;
+            continue;
+        }
+        if !in_section {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let (key, value) = (key.trim(), value.trim());
+        if value.is_empty() {
+            continue;
+        }
+        if let Some((_, attribute)) = AWS_PROFILE_KEYS.iter().find(|(k, _)| *k == key)
+            && !found.iter().any(|(a, _)| *a == *attribute)
+        {
+            // First occurrence wins, matching the SDK: a key repeated inside
+            // one section is not two identities.
+            found.push((attribute, value.to_string()));
+        }
+    }
+    found
+}
+
+/// Pull the identifying fields out of an ADC document.
+fn gcp_adc_attrs(text: &str) -> Vec<(&'static str, String)> {
+    let Ok(doc) = serde_json::from_str::<serde_json::Value>(text) else {
+        return vec![];
+    };
+    GCP_ADC_KEYS
+        .iter()
+        .filter_map(|(key, attribute)| {
+            // `as_str` and not `to_string`: a field that is an object — the
+            // `service_account_impersonation` block, say — is not an identity
+            // and must not be flattened into one.
+            let value = doc.get(*key)?.as_str()?;
+            (!value.is_empty()).then(|| (*attribute, value.to_string()))
+        })
+        .collect()
+}
+
+/// Fill in what the environment named but did not say.
+///
+/// The environment always wins: a variable is what the agent's own process was
+/// told, while a file is what an SDK *would* resolve from it. Where both
+/// answer, the first is the stronger claim.
+fn enrich_from_files(id: &mut CloudIdentity, aws_config: Option<&Path>, gcp_adc: Option<&Path>) {
+    if let Some(path) = aws_config {
+        // `default` when nothing named a profile, because that is the profile
+        // an SDK in this environment would use.
+        let profile = id
+            .attributes
+            .get("aws.profile")
+            .cloned()
+            .unwrap_or_else(|| "default".into());
+        if let Some(text) = read_capped(path) {
+            for (attribute, value) in aws_profile_attrs(&text, &profile) {
+                id.attributes.entry(attribute.to_string()).or_insert(value);
+            }
+        }
+    }
+    if let Some(path) = gcp_adc
+        && let Some(text) = read_capped(path)
+    {
+        for (attribute, value) in gcp_adc_attrs(&text) {
+            id.attributes.entry(attribute.to_string()).or_insert(value);
+        }
+    }
+}
+
+/// Where the AWS SDKs look for the shared config, in their own order.
+fn aws_config_path(home: &Path) -> PathBuf {
+    std::env::var_os("AWS_CONFIG_FILE")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".aws").join("config"))
+}
+
+/// Where gcloud writes application-default credentials.
+///
+/// `GOOGLE_APPLICATION_CREDENTIALS` first because every Google SDK honours it,
+/// then `CLOUDSDK_CONFIG`, then the well-known location — the file `gcloud auth
+/// application-default login` writes, which is what an agent on a developer's
+/// machine is actually holding.
+fn gcp_adc_path(home: &Path) -> PathBuf {
+    const ADC: &str = "application_default_credentials.json";
+    if let Some(explicit) = std::env::var_os("GOOGLE_APPLICATION_CREDENTIALS")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+    {
+        return explicit;
+    }
+    if let Some(dir) = std::env::var_os("CLOUDSDK_CONFIG").filter(|v| !v.is_empty()) {
+        return PathBuf::from(dir).join(ADC);
+    }
+    if cfg!(windows)
+        && let Some(appdata) = std::env::var_os("APPDATA")
+    {
+        return PathBuf::from(appdata).join("gcloud").join(ADC);
+    }
+    home.join(".config").join("gcloud").join(ADC)
+}
+
 /// The identity of the process this is called in.
 ///
 /// Called from the hook shim, which the host agent spawned and which therefore
 /// holds the agent's environment. Nothing calls it in the daemon: the daemon
 /// is a long-lived process started from somewhere else entirely, and its
 /// environment describes whoever started it rather than any agent.
+///
+/// Two file reads at most, both short and both on a path an SDK in this same
+/// environment would read. A machine with neither file pays two failed opens
+/// per hook, against a process spawn that already cost milliseconds.
 pub fn current() -> CloudIdentity {
-    from_vars(std::env::vars())
+    let mut id = from_vars(std::env::vars());
+    let home = crate::install::home();
+    enrich_from_files(
+        &mut id,
+        Some(&aws_config_path(&home)),
+        Some(&gcp_adc_path(&home)),
+    );
+    id
 }
 
 #[cfg(test)]
@@ -322,15 +524,19 @@ mod tests {
             line.split('"').skip(1).step_by(2).collect()
         }
 
-        let ts_ids: Vec<(&str, &str)> = block("identifiers")
-            .lines()
-            .map(quoted)
-            .filter(|q| !q.is_empty())
-            .map(|q| {
-                assert_eq!(q.len(), 2, "{q:?} is not a (variable, attribute) pair");
-                (q[0], q[1])
-            })
-            .collect();
+        fn pairs<'a>(name: &str) -> Vec<(&'a str, &'a str)> {
+            block(name)
+                .lines()
+                .map(quoted)
+                .filter(|q| !q.is_empty())
+                .map(|q| {
+                    assert_eq!(q.len(), 2, "{q:?} is not a (variable, attribute) pair");
+                    (q[0], q[1])
+                })
+                .collect()
+        }
+
+        let ts_ids = pairs("identifiers");
         assert_eq!(
             ts_ids,
             IDENTIFIERS.to_vec(),
@@ -340,6 +546,20 @@ mod tests {
 
         let ts_markers: Vec<&str> = block("markers").lines().flat_map(quoted).collect();
         assert_eq!(ts_markers, CREDENTIAL_MARKERS.to_vec());
+
+        // The file half, pinned the same way and for the same reason: a key
+        // added on one side only means opencode and pi resolve a different
+        // identity from the same `~/.aws/config`.
+        assert_eq!(
+            pairs("aws-profile"),
+            AWS_PROFILE_KEYS.to_vec(),
+            "the plugin reads different settings out of the shared config"
+        );
+        assert_eq!(
+            pairs("gcp-adc"),
+            GCP_ADC_KEYS.to_vec(),
+            "the plugin reads different fields out of the ADC document"
+        );
     }
 
     #[test]
@@ -408,5 +628,233 @@ mod tests {
             id.attributes.get("aws.region").map(String::as_str),
             Some("us-east-1")
         );
+    }
+
+    const SHARED_CONFIG: &str = "\
+[default]
+region = eu-west-1
+
+# the profile the agent is using
+[profile prod]
+role_arn = arn:aws:iam::123456789012:role/prod-admin
+sso_account_id = 123456789012
+sso_role_name = AdministratorAccess
+region = us-east-1
+; a nested setting, indented under its parent
+s3 =
+  addressing_style = path
+
+[profile staging]
+role_arn = arn:aws:iam::999999999999:role/staging
+";
+
+    fn config_file(dir: &std::path::Path, text: &str) -> PathBuf {
+        let path = dir.join("config");
+        std::fs::write(&path, text).unwrap();
+        path
+    }
+
+    #[test]
+    fn a_profile_names_the_role_the_variable_did_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut id = ids(&[("AWS_PROFILE", "prod")]);
+        enrich_from_files(&mut id, Some(&config_file(dir.path(), SHARED_CONFIG)), None);
+        assert_eq!(
+            id.attributes.get("aws.role_arn").map(String::as_str),
+            Some("arn:aws:iam::123456789012:role/prod-admin"),
+            "{:?}",
+            id.attributes
+        );
+        assert_eq!(
+            id.attributes.get("aws.account_id").map(String::as_str),
+            Some("123456789012")
+        );
+        assert_eq!(
+            id.attributes.get("aws.sso_role_name").map(String::as_str),
+            Some("AdministratorAccess")
+        );
+        // The profile the agent named, not the one above it or the one below.
+        assert_eq!(
+            id.attributes.get("aws.region").map(String::as_str),
+            Some("us-east-1")
+        );
+    }
+
+    #[test]
+    fn no_profile_named_means_the_one_an_sdk_would_use() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut id = CloudIdentity::default();
+        enrich_from_files(&mut id, Some(&config_file(dir.path(), SHARED_CONFIG)), None);
+        assert_eq!(
+            id.attributes.get("aws.region").map(String::as_str),
+            Some("eu-west-1"),
+            "an unset AWS_PROFILE is the default profile, not no profile"
+        );
+        assert_eq!(
+            id.attributes.get("aws.role_arn"),
+            None,
+            "a role from some other profile: {:?}",
+            id.attributes
+        );
+    }
+
+    #[test]
+    fn the_environment_outranks_the_file_it_points_at() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut id = ids(&[
+            ("AWS_PROFILE", "prod"),
+            (
+                "AWS_ROLE_ARN",
+                "arn:aws:iam::123456789012:role/actually-assumed",
+            ),
+        ]);
+        enrich_from_files(&mut id, Some(&config_file(dir.path(), SHARED_CONFIG)), None);
+        assert_eq!(
+            id.attributes.get("aws.role_arn").map(String::as_str),
+            Some("arn:aws:iam::123456789012:role/actually-assumed"),
+            "what the file would resolve to displaced what the process was told"
+        );
+    }
+
+    #[test]
+    fn a_private_key_stays_in_the_file_it_came_from() {
+        let dir = tempfile::tempdir().unwrap();
+        let secret = "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BEXAMPLE\n";
+        let adc = serde_json::json!({
+            "type": "service_account",
+            "project_id": "acme-prod",
+            "quota_project_id": "acme-billing",
+            "client_email": "agent@acme-prod.iam.gserviceaccount.com",
+            "client_id": "1234567890",
+            "private_key_id": "0123456789abcdef",
+            "private_key": secret,
+            "refresh_token": "1//refresh-me",
+            "client_secret": "gcp-client-secret",
+            "service_account_impersonation": { "target_principal": "someone@acme.iam" },
+        })
+        .to_string();
+        let path = dir.path().join("adc.json");
+        std::fs::write(&path, &adc).unwrap();
+
+        let mut id = CloudIdentity::default();
+        enrich_from_files(&mut id, None, Some(&path));
+        assert_eq!(
+            id.attributes.get("gcp.account").map(String::as_str),
+            Some("agent@acme-prod.iam.gserviceaccount.com")
+        );
+        assert_eq!(
+            id.attributes.get("gcp.project").map(String::as_str),
+            Some("acme-prod")
+        );
+        assert_eq!(
+            id.attributes
+                .get("gcp.credentials_type")
+                .map(String::as_str),
+            Some("service_account")
+        );
+        let rendered = serde_json::to_string(&id).unwrap();
+        for leaked in [
+            secret,
+            "1//refresh-me",
+            "gcp-client-secret",
+            "0123456789abcdef",
+        ] {
+            assert!(
+                !rendered.contains(leaked),
+                "credential material left the file: {rendered}"
+            );
+        }
+        // Nothing beyond the four identifying fields, so a document that grows
+        // a new secret does not grow a new attribute.
+        assert_eq!(id.attributes.len(), 4, "{:?}", id.attributes);
+    }
+
+    #[test]
+    fn an_identity_file_that_is_missing_or_absurd_is_simply_silence() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut id = CloudIdentity::default();
+        enrich_from_files(
+            &mut id,
+            Some(&dir.path().join("no-such-config")),
+            Some(&dir.path().join("no-such-adc.json")),
+        );
+        assert!(id.is_empty(), "{id:?}");
+
+        // A file far past the cap is read only up to it — a role hiding beyond
+        // that boundary is a missing attribute, never an unbounded read.
+        let mut huge = "[default]\n".to_string();
+        while huge.len() < (MAX_IDENTITY_FILE_BYTES as usize) + 4096 {
+            huge.push_str("# padding padding padding padding padding padding\n");
+        }
+        huge.push_str("role_arn = arn:aws:iam::123456789012:role/beyond-the-cap\n");
+        let mut id = CloudIdentity::default();
+        enrich_from_files(&mut id, Some(&config_file(dir.path(), &huge)), None);
+        assert!(id.is_empty(), "read past the cap: {id:?}");
+
+        // Not JSON at all, and not even UTF-8.
+        let path = dir.path().join("junk.json");
+        std::fs::write(&path, [0xff, 0xfe, 0x00, 0x01]).unwrap();
+        let mut id = CloudIdentity::default();
+        enrich_from_files(&mut id, None, Some(&path));
+        assert!(id.is_empty(), "{id:?}");
+    }
+
+    #[test]
+    fn the_shim_reads_the_files_a_sibling_sdk_would() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".aws")).unwrap();
+        std::fs::write(
+            dir.path().join(".aws").join("config"),
+            "[default]\nrole_arn = arn:aws:iam::123456789012:role/from-the-home-directory\n",
+        )
+        .unwrap();
+        unsafe {
+            std::env::set_var("ARGUS_HOME", dir.path());
+            std::env::remove_var("AWS_CONFIG_FILE");
+            std::env::remove_var("AWS_PROFILE");
+            std::env::remove_var("AWS_ROLE_ARN");
+        }
+        let id = current();
+        unsafe {
+            std::env::remove_var("ARGUS_HOME");
+        }
+        assert_eq!(
+            id.attributes.get("aws.role_arn").map(String::as_str),
+            Some("arn:aws:iam::123456789012:role/from-the-home-directory"),
+            "{:?}",
+            id.attributes
+        );
+    }
+
+    #[test]
+    fn an_explicit_path_wins_over_the_place_the_file_usually_lives() {
+        let home = std::path::Path::new("/home/dev");
+        unsafe {
+            std::env::set_var("AWS_CONFIG_FILE", "/etc/argus/aws-config");
+            std::env::set_var("GOOGLE_APPLICATION_CREDENTIALS", "/etc/argus/adc.json");
+        }
+        assert_eq!(
+            aws_config_path(home),
+            PathBuf::from("/etc/argus/aws-config")
+        );
+        assert_eq!(gcp_adc_path(home), PathBuf::from("/etc/argus/adc.json"));
+
+        // An exported-but-empty override is not a path; falling for it would
+        // read `/application_default_credentials.json`.
+        unsafe {
+            std::env::set_var("AWS_CONFIG_FILE", "");
+            std::env::set_var("GOOGLE_APPLICATION_CREDENTIALS", "");
+            std::env::remove_var("CLOUDSDK_CONFIG");
+        }
+        assert_eq!(aws_config_path(home), home.join(".aws").join("config"));
+        assert!(
+            gcp_adc_path(home).starts_with(home),
+            "{:?}",
+            gcp_adc_path(home)
+        );
+        unsafe {
+            std::env::remove_var("AWS_CONFIG_FILE");
+            std::env::remove_var("GOOGLE_APPLICATION_CREDENTIALS");
+        }
     }
 }
