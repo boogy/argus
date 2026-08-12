@@ -28,6 +28,9 @@ fn meta_of(p: &Value) -> Meta {
             .pointer("/effort/level")
             .and_then(Value::as_str)
             .map(String::from),
+        // Derived from the tool's name by `harness::parse`, for every source
+        // at once — nothing in the payload says it.
+        mcp_server: None,
     }
 }
 

@@ -155,6 +155,27 @@ record `mcp_server` (e.g. in `Meta` or on `ToolUse`). **Fix (richer):** at
 install/ConfigChange time, snapshot configured MCP servers and their URLs as a
 `session`/`file_change` detail — that maps server names to actual endpoints.
 
+**Closed (T32) for the cheap half; the richer half is now T35.**
+`Meta.mcp_server`, exported as `mcp.server`, derived in `harness::parse` from
+the tool name — one place for all five sources, on the same argument as `ts`:
+the name is spelled identically wherever it comes from, so five copies of one
+`strip_prefix` would only be five chances to omit it, and an omission looks
+like a fleet with no MCP servers.
+
+Two decisions. It is stamped on permission events as well as tool calls,
+because a call that was asked about and refused is the same third-party reach
+as one that ran, and a server appearing only in denials is the more
+interesting of the two. And only `mcp__<server>__<tool>` is believed: the
+looser conventions (a `-` or a single `_` between server and tool) split an
+ordinary tool name just as well as an MCP one, and a server invented from
+`write_file` puts something that does not exist into the inventory of what the
+fleet reaches.
+
+The richer half is held back rather than skipped: `.mcp.json` routinely
+carries credentials in its `env` block, so snapshotting it needs the opt-in,
+the redaction pass and the size caps that file capture has — a feature, not a
+line in this one. See T35 in `tasks/todo.md`.
+
 ### 7. Bash file activity (known limitation, worth closing)
 
 Writes via `>`, `>>`, `tee`, and `cp/mv/rm` targets are invisible to
@@ -342,6 +363,8 @@ Closed:
   the host that was asked for.
 - **#5** Codex file extraction (T31), by parsing the `arguments` attribute
   back into JSON first, and reading patch headers whatever the tool is called.
+- **#6** MCP per-call attribution (T32), as `Meta.mcp_server` / `mcp.server`;
+  the server *inventory* half is open as T35.
 - **#14** in part: the per-event `hostname` spawn (T6a).
 - Both remaining small fixes: the unsorted `dedup` (T10f) and opencode's
   permission action, which turned out to be an adapter bug rather than a stale
@@ -349,10 +372,11 @@ Closed:
 
 Open, in the order this list would still do them:
 
-1. **#6** MCP server tagging.
-2. **#7** Bash file activity — now also the one write file capture cannot see.
-3. **#11** for Codex and Copilot, and **#16**, which is the audit that would
+1. **#7** Bash file activity — now also the one write file capture cannot see.
+2. **#11** for Codex and Copilot, and **#16**, which is the audit that would
    tell us whether their payloads carry an id at all.
+3. **#6**'s richer half (T35): the server-to-endpoint inventory, which needs
+   the same opt-in and redaction file capture has.
 4. **#12** transcript mining, **#13** git enrichment, **#15** Codex `raw`
    inventory, and the rest of **#14**.
 

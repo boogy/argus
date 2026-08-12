@@ -26,6 +26,23 @@ pub fn parse(envelope: Envelope, capture: &CaptureCfg) -> Vec<Event> {
 
 pub(crate) const FILE_KEYS: &[&str] = &["file_path", "filePath", "notebook_path", "path"];
 
+/// The MCP server named by a tool name of the form `mcp__<server>__<tool>`.
+///
+/// Only that spelling is believed. It is what the agents that namespace MCP
+/// tools at all emit, and it cannot be produced by accident — a built-in tool
+/// is not called `mcp__anything`. The looser conventions (a `-` or a single
+/// `_` between server and tool) are not matched, because under them an
+/// ordinary tool name splits just as well as an MCP one, and a `server` field
+/// invented from `write_file` is worse than an empty one: it puts a server
+/// that does not exist into the inventory of what the fleet reaches.
+///
+/// A tool name with no `__` after the prefix yields nothing rather than
+/// guessing that the whole remainder is a server.
+pub fn mcp_server(tool: &str) -> Option<&str> {
+    let (server, rest) = tool.strip_prefix("mcp__")?.split_once("__")?;
+    (!server.is_empty() && !rest.is_empty()).then_some(server)
+}
+
 /// File paths from a tool input: known path keys plus apply_patch-style
 /// patch headers embedded in any string value for patch-shaped tools.
 pub fn extract_files_for_tool(tool: &str, input: &Value) -> Vec<String> {
@@ -220,6 +237,27 @@ fn cap_leaves(v: Value, max: usize, depth: usize) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_mcp_tool_name_names_its_server() {
+        assert_eq!(mcp_server("mcp__github__create_issue"), Some("github"));
+        // The tool half may itself contain the separator; the server is the
+        // first segment, not the last.
+        assert_eq!(mcp_server("mcp__jira__issue__update"), Some("jira"));
+        // Nothing else is a server. A name that only looks splittable — an
+        // ordinary tool with an underscore, a prefix with no tool after it —
+        // must yield nothing rather than a server that does not exist.
+        for not_mcp in [
+            "Bash",
+            "write_file",
+            "mcp__github",
+            "mcp____tool",
+            "mcp__server__",
+            "notmcp__github__x",
+        ] {
+            assert_eq!(mcp_server(not_mcp), None, "{not_mcp} was read as a server");
+        }
+    }
 
     #[test]
     fn registry_dispatches_and_unknown_source_is_raw() {

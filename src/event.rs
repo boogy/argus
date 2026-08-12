@@ -80,6 +80,16 @@ pub struct Meta {
     /// thing worth being able to see.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
+    /// The MCP server a tool call went to, when the tool's name says so.
+    ///
+    /// An MCP tool is code the agent's own vendor did not write, reached over
+    /// a connection nothing else in this record describes — so "which server"
+    /// is a different question from "which tool", and the one an inventory of
+    /// third-party reach is asking. Without it every `mcp__*` call is an
+    /// ordinary tool row and the servers are countable only by string
+    /// surgery in the query.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_server: Option<String>,
 }
 
 impl Meta {
@@ -400,6 +410,21 @@ pub enum EventKind {
         count: u64,
         detail: String,
     },
+}
+
+impl EventKind {
+    /// The tool this event is about, for the two kinds that name one.
+    ///
+    /// A permission prompt is included on purpose: an MCP call that was asked
+    /// about and refused is the same third-party reach as one that ran, and a
+    /// server that only ever appears in denials is the more interesting of
+    /// the two.
+    pub fn tool_name(&self) -> Option<&str> {
+        match self {
+            EventKind::ToolUse { tool, .. } | EventKind::Permission { tool, .. } => Some(tool),
+            _ => None,
+        }
+    }
 }
 
 impl Event {

@@ -83,6 +83,7 @@ builds use `json_extract(body, '$.path')` — they are equivalent.
 | `$.meta.transcript_path` | path to the tool's transcript file |
 | `$.meta.tool_use_id`     | id of one tool call; the `pre` and `post` rows of the same call share it |
 | `$.meta.effort`          | reasoning effort asked of the model this turn (e.g. `high`) |
+| `$.meta.mcp_server`      | the MCP server a tool call or permission prompt went to, from a `mcp__<server>__<tool>` name |
 
 ### Per-kind fields (flattened at top level, discriminated by `$.type`)
 
@@ -213,6 +214,22 @@ ORDER BY hits DESC;
 
 Swap `json_each` to `'$.output_endpoints'` for the scheme and port, on the same
 terms as `endpoints` above.
+
+### MCP: which third-party servers this machine reaches
+
+Present on tool calls and on the permission prompts that gated them, so a
+server that only ever appears in denials still shows up:
+
+```sql
+SELECT body->>'$.meta.mcp_server' AS server,
+       body->>'$.source'          AS source,
+       COUNT(*)                   AS calls,
+       COUNT(DISTINCT body->>'$.session_id') AS sessions
+FROM events
+WHERE server IS NOT NULL
+GROUP BY 1, 2
+ORDER BY calls DESC;
+```
 
 ### Files: everything touched, by session
 

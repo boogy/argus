@@ -327,6 +327,25 @@ what the request did not say. They are filled even when `tool_outputs` capture
 is off: which hosts a call touched is metadata, and switching off the payload
 is a decision about storing text.
 
+## MCP servers
+
+An MCP tool is code the agent's vendor did not write, reached over a connection
+nothing else in the record describes — so a call to one is recorded with the
+server it went to, as `mcp.server` (`mcp_server` in the event body). The name
+is read off the tool: `mcp__github__create_issue` is the `github` server. It is
+stamped on permission prompts as well as on calls, because a call that was
+asked about and refused is the same third-party reach as one that ran, and a
+server that appears only in denials is the more interesting of the two.
+
+Only the `mcp__<server>__<tool>` spelling is believed. The looser conventions —
+a `-` or a single `_` between server and tool — split an ordinary tool name
+just as cleanly as an MCP one, and a server invented from `write_file` would
+put something that does not exist into the inventory of what the fleet reaches.
+
+What this does not do is map a server name to an endpoint; that needs reading
+the MCP config files, which routinely hold credentials, and so it needs the
+opt-in and the redaction that file capture has.
+
 ## Cloud identity
 
 An event says an agent ran `terraform apply`. The question an incident actually

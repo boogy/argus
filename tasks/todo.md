@@ -2406,11 +2406,27 @@ commit gated on `make verify`, and none needs another to be done first.
   parsed-arguments file read removed; the patch-header scan removed; the event
   carrying `files: vec![]`.
 
-- [ ] **T32** — MCP server inventory and per-call tagging. Dependency: none.
+- [x] **T32** — MCP server inventory and per-call tagging. Dependency: none.
   Files: `src/adapters/mod.rs`, `docs/telemetry-gaps.md` (#6)
 
   Nothing anywhere matches `mcp__`, so a call into an MCP server is recorded as
   an ordinary tool with no server attribution.
+
+  Done: the server is read off the tool name — `adapters::mcp_server` accepts
+  only the unambiguous `mcp__<server>__<tool>` spelling, with both halves
+  non-empty, and takes the *first* segment as the server so a tool name that is
+  itself split (`mcp__jira__issue__update`) still attributes to `jira`. It is
+  stamped centrally in `harness::parse`, next to `ts` and `cloud_identity`, via
+  a new `EventKind::tool_name()` that covers `Permission` as well as `ToolUse`:
+  five adapters each doing their own `strip_prefix` would be five chances to
+  omit it, and an omission reads as a fleet with no MCP servers rather than as a
+  bug. Permission prompts are tagged on purpose — an MCP call a human was asked
+  about is exactly the one worth counting. Carried as `Meta.mcp_server` and
+  exported as `mcp.server`. Server→endpoint mapping is deliberately *not* here;
+  it is T35. Mutants killed (8/8): the `mcp__` prefix not required; the `__`
+  separator not required; empty halves accepted; the *last* segment taken as the
+  server; the stamp removed; `tool_name()` narrowed to `ToolUse` only; narrowed
+  to `Permission` only; the `mcp.server` export attribute removed.
 
 - [ ] **T33** — Bash file activity. Dependency: T31. Files:
   `src/adapters/mod.rs`, `src/filecap.rs`, `docs/telemetry-gaps.md` (#7)
@@ -2425,6 +2441,17 @@ commit gated on `make verify`, and none needs another to be done first.
 
   Claude Code, opencode and pi carry a call id and therefore a duration; the
   other two have not been audited for one.
+
+- [ ] **T35** — MCP server → endpoint inventory. Dependency: T32. Files:
+  `src/filecap.rs`, `src/adapters/mod.rs`, `docs/telemetry-gaps.md` (#6)
+
+  T32 says *which* server a call went to; nothing says where that server is —
+  a command and args for a stdio server, a URL for an HTTP one. That mapping
+  lives in the config files (`.mcp.json`, `~/.claude.json`, the per-adapter
+  equivalents), which is why it is its own task: those files routinely carry
+  credentials in their `env` block, so reading them needs the opt-in, the
+  redaction pass and the size caps that file capture already has, not a plain
+  read.
 
 ## Dependency graph (from the plan)
 
@@ -2445,5 +2472,6 @@ T20a  T20b  T20c  T21  T22  T23  T24  T25  T26   (landed, no dependencies)
 T27 ─► T28                                        (identity: env, then files)
 T29 ─► T30                                        (hosts, then outputs)
 T31 ─► T33                                        (codex files, then bash)
-T32   T34                                         (independent)
+T32 ─► T35                                        (which server, then where)
+T34                                               (independent)
 ```

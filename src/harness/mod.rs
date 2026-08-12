@@ -1566,6 +1566,17 @@ pub fn parse(envelope: Envelope, capture: &CaptureCfg) -> Vec<Event> {
     }
     for e in &mut events {
         e.ts = received_at;
+        // Derived here rather than in each adapter, and for the same reason
+        // `ts` is: the name is spelled identically wherever it comes from, so
+        // five copies of one `strip_prefix` would only create five chances to
+        // omit it — and an omission looks like a fleet with no MCP servers.
+        if e.meta.mcp_server.is_none() {
+            e.meta.mcp_server = e
+                .kind
+                .tool_name()
+                .and_then(crate::adapters::mcp_server)
+                .map(String::from);
+        }
         // Every event from this envelope, the loss records included: "the
         // agent that lost these was holding prod credentials" is the half of a
         // gap report that decides how much it matters.
@@ -2160,6 +2171,63 @@ mod tests {
                 .any(|e| matches!(e.kind, crate::event::EventKind::Loss { .. })),
             "an intact payload must not claim a gap"
         );
+    }
+
+    /// An MCP call is code the agent's vendor did not write, reached over a
+    /// connection nothing else in the record describes — so the server is
+    /// stamped here, once, for every source and for both the call and the
+    /// permission prompt that gated it.
+    #[test]
+    fn an_mcp_call_carries_the_server_it_went_to() {
+        let env = |source: &str, payload: serde_json::Value| Envelope {
+            cloud_identity: Default::default(),
+            source: source.into(),
+            received_at: chrono::Utc::now(),
+            truncated: false,
+            dropped: 0,
+            event: None,
+            payload,
+        };
+        let server = |e: &Envelope| {
+            parse(e.clone(), &CaptureCfg::default())[0]
+                .meta
+                .mcp_server
+                .clone()
+        };
+
+        let claude = env(
+            "claude-code",
+            serde_json::json!({"hook_event_name": "PreToolUse",
+                               "tool_name": "mcp__github__create_issue",
+                               "tool_input": {"title": "x"}}),
+        );
+        assert_eq!(server(&claude), Some("github".to_string()));
+
+        // A different source, the same name, the same answer — the derivation
+        // is not per-adapter.
+        let oc = env(
+            "opencode",
+            serde_json::json!({"event": "tool.execute.before",
+                               "tool": "mcp__jira__create", "args": {}}),
+        );
+        assert_eq!(server(&oc), Some("jira".to_string()));
+
+        // The prompt that gated the call, which is the row that survives when
+        // the call was refused.
+        let perm = env(
+            "claude-code",
+            serde_json::json!({"hook_event_name": "PermissionRequest",
+                               "tool_name": "mcp__jira__create", "tool_input": {}}),
+        );
+        assert_eq!(server(&perm), Some("jira".to_string()));
+
+        // And an ordinary tool names no server at all.
+        let bash = env(
+            "claude-code",
+            serde_json::json!({"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                               "tool_input": {"command": "ls"}}),
+        );
+        assert_eq!(server(&bash), None);
     }
 
     /// The shim deletes the files; only the daemon can say so. The count is
