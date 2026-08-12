@@ -90,7 +90,7 @@ builds use `json_extract(body, '$.path')` — they are equivalent.
 | ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `prompt`            | `text`                                                                                                                                                |
 | `assistant_message` | `text`                                                                                                                                                |
-| `tool_use`          | `tool`, `phase` (`pre`/`post`/`error`), `input` (JSON), `output` (JSON, post only), `error` (string, failures only), `duration_ms` (post legs only), `interrupted` (present only when a human stopped the call), `files` (array), `fqdns` (array), `endpoints` (array of `scheme://host[:port]`) |
+| `tool_use`          | `tool`, `phase` (`pre`/`post`/`error`), `input` (JSON), `output` (JSON, post only), `error` (string, failures only), `duration_ms` (post legs only), `interrupted` (present only when a human stopped the call), `files` (array), `fqdns` (array), `endpoints` (array of `scheme://host[:port]`), `output_fqdns` / `output_endpoints` (the same two read out of the *result*, post legs only, minus whatever the input already named) |
 | `skill`             | `name`, `args`                                                                                                                                        |
 | `agent`             | `agent_type`, `description`                                                                                                                           |
 | `permission`        | `tool`, `action` (`requested`/`denied`/`replied`/`updated`), `input`                                                                                  |
@@ -195,6 +195,24 @@ SELECT body->>'$.ts', body->>'$.source', body->>'$.session_id',
 FROM events, json_each(events.body, '$.fqdns') AS f
 WHERE f.value = 'evil.example.com';
 ```
+
+### Network: hosts that only the result named
+
+A host in `output_fqdns` was never asked for — it is where a fetch was
+redirected, or what a search result or an error message pointed at. Keeping it
+out of `fqdns` is deliberate (a tool result is content, not an instruction), so
+this is its own query rather than a wider one:
+
+```sql
+SELECT body->>'$.tool' AS tool, o.value AS host, COUNT(*) AS hits
+FROM events, json_each(events.body, '$.output_fqdns') AS o
+WHERE body->>'$.type' = 'tool_use'
+GROUP BY 1, 2
+ORDER BY hits DESC;
+```
+
+Swap `json_each` to `'$.output_endpoints'` for the scheme and port, on the same
+terms as `endpoints` above.
 
 ### Files: everything touched, by session
 

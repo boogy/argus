@@ -2,7 +2,9 @@
 //! explicit `--event <name>` hint because Copilot's native camelCase payloads
 //! carry no event-name field. PascalCase/snake_case payloads (VS Code
 //! compatible style, with `hook_event_name`) are also accepted.
-use crate::adapters::{cap_text, cap_value, extract_files_for_tool, extract_net_for_tool};
+use crate::adapters::{
+    cap_text, cap_value, extract_files_for_tool, extract_net_for_tool, extract_net_from_output,
+};
 use crate::config::CaptureCfg;
 use crate::event::{Envelope, Event, EventKind, Meta};
 use serde_json::{Value, json};
@@ -109,13 +111,12 @@ pub fn parse(env: &Envelope, capture: &CaptureCfg) -> Vec<Event> {
                 "postToolUse" => "post",
                 _ => "error",
             };
+            let raw_output = field(p, "toolResult", "tool_result")
+                .cloned()
+                .unwrap_or(Value::Null);
+            let out_net = extract_net_from_output(&raw_output).minus(&net);
             let output = if name == "postToolUse" && capture.tool_outputs {
-                cap_value(
-                    field(p, "toolResult", "tool_result")
-                        .cloned()
-                        .unwrap_or(Value::Null),
-                    max,
-                )
+                cap_value(raw_output, max)
             } else {
                 Value::Null
             };
@@ -138,6 +139,8 @@ pub fn parse(env: &Envelope, capture: &CaptureCfg) -> Vec<Event> {
                 files,
                 fqdns: net.fqdns,
                 endpoints: net.endpoints,
+                output_fqdns: out_net.fqdns,
+                output_endpoints: out_net.endpoints,
                 file_contents: vec![],
             })]
         }
@@ -350,7 +353,8 @@ mod tests {
                 "postToolUse",
                 json!({"sessionId": "cp1", "toolName": "create",
                        "toolArgs": {"path": "/repo/new.ts"},
-                       "toolResult": {"resultType": "success", "textResultForLlm": "created"}}),
+                       "toolResult": {"resultType": "success",
+                                      "textResultForLlm": "created, pushed to https://ghcr.example.io/img"}}),
             ),
             &CaptureCfg::default(),
         );
@@ -358,6 +362,7 @@ mod tests {
             phase,
             files,
             output,
+            output_fqdns,
             ..
         } = &events[0].kind
         else {
@@ -365,7 +370,13 @@ mod tests {
         };
         assert_eq!(phase, "post");
         assert_eq!(files, &vec!["/repo/new.ts".to_string()]);
-        assert_eq!(output["textResultForLlm"], "created");
+        assert!(
+            output["textResultForLlm"]
+                .as_str()
+                .unwrap()
+                .starts_with("created")
+        );
+        assert_eq!(output_fqdns, &vec!["ghcr.example.io".to_string()]);
 
         let events = adapters::parse(
             env(

@@ -2352,11 +2352,34 @@ commit gated on `make verify`, and none needs another to be done first.
   key treated as a command, the depth bound lifted, the export attribute
   dropped, and an adapter keeping `fqdns` while discarding `endpoints`.
 
-- [ ] **T30** — scan tool *outputs* for network activity, not only inputs.
+- [x] **T30** — scan tool *outputs* for network activity, not only inputs.
   Dependency: T29. Files: `src/adapters/mod.rs`, `docs/telemetry-gaps.md` (#4)
 
   `extract_fqdns` runs on input only, so a redirect followed, or a host named
   in a command's output, is invisible.
+
+  Done: `extract_net_from_output` (`net.rs`) walks the result value and fills
+  `ToolUse.output_fqdns` / `output_endpoints`, exported as `net.output_fqdns`
+  and `net.output_endpoints`. Three decisions, against the gap doc's suggestion
+  to merge into `fqdns`: (1) separate fields, because a result is content the
+  agent fetched rather than an instruction it issued — merged, any page with a
+  link on it would put hostnames into the field that answers "what did this
+  call connect to"; (2) `walk_content` scans for URLs only, so the
+  command-shaped reading (network binaries, `--index-url`, `user@host:path`) is
+  never applied to output — a result quoting a `curl` line is quoting, not
+  running; (3) `NetRefs::minus` subtracts what the input already named, so the
+  echoed request is not a second finding and the redirect stands out. Scanned
+  before the `capture.tool_outputs` check, on the rule that hosts touched are
+  metadata while the payload is text. opencode's pty, pi's `user_bash` and
+  Codex's OTLP `tool_result` record nothing here because the tool sends
+  nothing; Codex hook payloads go through the shared parser, which does scan.
+
+  Mutants killed (14/14): output not scanned at all; output read as a command;
+  `walk_content` not recursing; its depth bound lifted; `minus` not subtracting
+  hosts; not subtracting endpoints; scanning made conditional on
+  `tool_outputs`; each of the four adapters dropping `out_net` (claude-code
+  hosts and endpoints, opencode, copilot, pi); each of the two export
+  attributes dropped.
 
 - [ ] **T31** — Codex adapter: extract files and FQDNs. Dependency: none.
   Files: `src/adapters/codex.rs`, `docs/telemetry-gaps.md` (#5)

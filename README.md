@@ -313,6 +313,20 @@ Two limits are deliberate:
 
 IPv6 literals are out of scope.
 
+The result of a call is scanned too, into its own pair of fields —
+`output_fqdns` and `output_endpoints`, exported as `net.output_fqdns` and
+`net.output_endpoints`. That is where the redirect that was actually followed
+shows up, and the host a search result pointed at. They stay separate from
+`fqdns` because a result is content the agent fetched, not an instruction it
+issued: merged, any page with a link on it would put hostnames into the field
+that is supposed to answer "what did this call connect to". For the same
+reason, a result is only scanned for URLs — the command-shaped reading is not
+applied to it, since a result quoting a `curl` line is quoting, not running.
+Hosts the input already named are subtracted, so these two fields hold only
+what the request did not say. They are filled even when `tool_outputs` capture
+is off: which hosts a call touched is metadata, and switching off the payload
+is a decision about storing text.
+
 ## Cloud identity
 
 An event says an agent ran `terraform apply`. The question an incident actually

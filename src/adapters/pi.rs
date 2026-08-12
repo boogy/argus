@@ -70,6 +70,10 @@ pub fn parse(env: &Envelope, capture: &CaptureCfg) -> Vec<Event> {
                     Value::Null
                 },
                 output: Value::Null,
+                // Only a `pre` leg exists: pi never reports what the command
+                // produced, so there is no result to read hosts out of.
+                output_fqdns: vec![],
+                output_endpoints: vec![],
                 error: None,
                 // pi reports neither on this event.
                 duration_ms: None,
@@ -105,6 +109,8 @@ pub fn parse(env: &Envelope, capture: &CaptureCfg) -> Vec<Event> {
             } else {
                 None
             };
+            let raw_output = p.get("output").cloned().unwrap_or(Value::Null);
+            let out_net = crate::adapters::extract_net_from_output(&raw_output).minus(&net);
             let mut ev = mk(EventKind::ToolUse {
                 tool,
                 phase: if post { "post" } else { "pre" }.into(),
@@ -114,7 +120,7 @@ pub fn parse(env: &Envelope, capture: &CaptureCfg) -> Vec<Event> {
                     Value::Null
                 },
                 output: if post && capture.tool_outputs {
-                    crate::adapters::cap_value(p.get("output").cloned().unwrap_or(Value::Null), max)
+                    crate::adapters::cap_value(raw_output, max)
                 } else {
                     Value::Null
                 },
@@ -126,6 +132,8 @@ pub fn parse(env: &Envelope, capture: &CaptureCfg) -> Vec<Event> {
                 files,
                 fqdns: net.fqdns,
                 endpoints: net.endpoints,
+                output_fqdns: out_net.fqdns,
+                output_endpoints: out_net.endpoints,
                 file_contents: vec![],
             });
             ev.meta.tool_use_id = p
@@ -339,20 +347,30 @@ mod tests {
         let events = parse(json!({
             "event": "tool_result", "sessionID": "pi1", "toolCallId": "tc_7",
             "toolName": "bash", "input": {"command": "false"},
-            "output": "exit status 1", "isError": true
+            "output": "exit status 1: could not reach https://registry.example.org", "isError": true
         }));
         let EventKind::ToolUse {
             phase,
             output,
             error,
+            output_fqdns,
             ..
         } = &events[0].kind
         else {
             panic!()
         };
         assert_eq!(phase, "post");
-        assert_eq!(output, "exit status 1");
-        assert_eq!(error.as_deref(), Some("exit status 1"));
+        assert_eq!(
+            output,
+            "exit status 1: could not reach https://registry.example.org"
+        );
+        assert_eq!(
+            error.as_deref(),
+            Some("exit status 1: could not reach https://registry.example.org")
+        );
+        // The host an error message named is exactly the kind of thing only
+        // the result knows.
+        assert_eq!(output_fqdns, &vec!["registry.example.org".to_string()]);
 
         // A call that succeeded is not an error, whatever it printed.
         let events = parse(json!({

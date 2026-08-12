@@ -1,4 +1,6 @@
-use crate::adapters::{cap_text, cap_value, extract_files_for_tool, extract_net_for_tool};
+use crate::adapters::{
+    cap_text, cap_value, extract_files_for_tool, extract_net_for_tool, extract_net_from_output,
+};
 use crate::config::CaptureCfg;
 use crate::event::{Envelope, Event, EventKind, Meta};
 use serde_json::{Value, json};
@@ -91,14 +93,18 @@ pub(crate) fn parse_hook(source: &'static str, p: &Value, capture: &CaptureCfg) 
                 _ => "error",
             }
             .to_string();
+            let raw_output = p
+                .get("tool_response")
+                .or_else(|| p.get("tool_result"))
+                .cloned()
+                .unwrap_or(Value::Null);
+            // Scanned before the `tool_outputs` check and before the cap, for
+            // the same reason the input is: which hosts a call touched is
+            // metadata, and switching off the payload is a decision about
+            // storing text, not about going blind.
+            let out_net = extract_net_from_output(&raw_output).minus(&net);
             let output = if hook == "PostToolUse" && capture.tool_outputs {
-                cap_value(
-                    p.get("tool_response")
-                        .or_else(|| p.get("tool_result"))
-                        .cloned()
-                        .unwrap_or(Value::Null),
-                    max,
-                )
+                cap_value(raw_output, max)
             } else {
                 Value::Null
             };
@@ -131,6 +137,8 @@ pub(crate) fn parse_hook(source: &'static str, p: &Value, capture: &CaptureCfg) 
                 files,
                 fqdns: net.fqdns,
                 endpoints: net.endpoints,
+                output_fqdns: out_net.fqdns,
+                output_endpoints: out_net.endpoints,
                 file_contents: vec![],
             })];
             if hook == "PreToolUse" {
@@ -423,6 +431,59 @@ mod tests {
             panic!()
         };
         assert_eq!(fqdns, &vec!["docs.rs".to_string()]);
+    }
+
+    /// A fetch that was redirected reached a host the input never named, and
+    /// the input is the only place anything looked before now.
+    #[test]
+    fn a_result_names_the_host_the_request_did_not() {
+        let payload = json!({
+            "hook_event_name": "PostToolUse", "tool_name": "WebFetch",
+            "tool_input": {"url": "https://docs.example.com/guide"},
+            "tool_response": {
+                "finalUrl": "https://cdn.exfil.example.net:8443/guide",
+                "text": "see also https://docs.example.com/guide",
+            }
+        });
+        let events = adapters::parse(env(payload.clone()), &CaptureCfg::default());
+        let EventKind::ToolUse {
+            fqdns,
+            output_fqdns,
+            output_endpoints,
+            ..
+        } = &events[0].kind
+        else {
+            panic!()
+        };
+        assert_eq!(fqdns, &vec!["docs.example.com".to_string()]);
+        assert_eq!(
+            output_fqdns,
+            &vec!["cdn.exfil.example.net".to_string()],
+            "the redirect target is the finding, and the echoed request is not"
+        );
+        assert_eq!(
+            output_endpoints,
+            &vec!["https://cdn.exfil.example.net:8443".to_string()]
+        );
+
+        // Switching off output capture is a decision about storing text. Which
+        // hosts a call reached is metadata, and it survives — the same rule
+        // `capture.tool_inputs` has always followed for `files` and `fqdns`.
+        let capture = CaptureCfg {
+            tool_outputs: false,
+            ..CaptureCfg::default()
+        };
+        let events = adapters::parse(env(payload), &capture);
+        let EventKind::ToolUse {
+            output,
+            output_fqdns,
+            ..
+        } = &events[0].kind
+        else {
+            panic!()
+        };
+        assert!(output.is_null(), "the payload was stored anyway");
+        assert_eq!(output_fqdns, &vec!["cdn.exfil.example.net".to_string()]);
     }
 
     #[test]

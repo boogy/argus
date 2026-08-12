@@ -69,8 +69,10 @@ pub fn parse(env: &Envelope, capture: &CaptureCfg) -> Vec<Event> {
             } else {
                 Value::Null
             };
+            let raw_output = p.get("result").cloned().unwrap_or(Value::Null);
+            let out_net = crate::adapters::extract_net_from_output(&raw_output).minus(&net);
             let output = if event.ends_with("after") && capture.tool_outputs {
-                crate::adapters::cap_value(p.get("result").cloned().unwrap_or(Value::Null), max)
+                crate::adapters::cap_value(raw_output, max)
             } else {
                 Value::Null
             };
@@ -86,6 +88,8 @@ pub fn parse(env: &Envelope, capture: &CaptureCfg) -> Vec<Event> {
                 files,
                 fqdns: net.fqdns,
                 endpoints: net.endpoints,
+                output_fqdns: out_net.fqdns,
+                output_endpoints: out_net.endpoints,
                 file_contents: vec![],
             });
             // The plugin has always sent this and the adapter has always
@@ -219,6 +223,10 @@ pub fn parse(env: &Envelope, capture: &CaptureCfg) -> Vec<Event> {
                     Value::Null
                 },
                 output: Value::Null,
+                // A pty event reports the command and its exit code; the
+                // terminal's own output never passes through the plugin.
+                output_fqdns: vec![],
+                output_endpoints: vec![],
                 error,
                 // opencode reports neither the duration nor an interrupt.
                 duration_ms: None,
@@ -533,15 +541,24 @@ mod tests {
         let events = adapters::parse(
             env(json!({
                 "event": "tool.execute.after", "sessionID": "oc1", "tool": "bash",
-                "result": {"title": "ls", "output": "a.ts\nb.ts", "metadata": {}}
+                "result": {"title": "ls", "output": "a.ts\nb.ts fetched from https://mirror.example.net/x", "metadata": {}}
             })),
             &CaptureCfg::default(),
         );
-        let EventKind::ToolUse { phase, output, .. } = &events[0].kind else {
+        let EventKind::ToolUse {
+            phase,
+            output,
+            output_fqdns,
+            ..
+        } = &events[0].kind
+        else {
             panic!()
         };
         assert_eq!(phase, "post");
-        assert_eq!(output["output"], "a.ts\nb.ts");
+        assert!(output["output"].as_str().unwrap().starts_with("a.ts\nb.ts"));
+        // What the call printed is scanned too, not just what it was asked to
+        // do — the adapter has to carry that half out of the extractor.
+        assert_eq!(output_fqdns, &vec!["mirror.example.net".to_string()]);
     }
 
     #[test]

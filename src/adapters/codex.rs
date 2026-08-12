@@ -73,6 +73,12 @@ pub fn parse(env: &Envelope, capture: &CaptureCfg) -> Vec<Event> {
                 phase,
                 input,
                 output: Value::Null,
+                // `codex.tool_result` reports `success` and `duration_ms` and
+                // no result text, so this leg has nothing to read hosts out
+                // of. Codex's hook payloads do carry one, and they leave for
+                // the shared parser several lines above, which scans it.
+                output_fqdns: vec![],
+                output_endpoints: vec![],
                 error: None,
                 // Codex's OTLP attributes carry neither. This arm is the
                 // receiver's path only — a payload with `hook_event_name`

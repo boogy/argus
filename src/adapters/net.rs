@@ -122,6 +122,22 @@ impl NetRefs {
         self.endpoints.dedup();
         self
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.fqdns.is_empty() && self.endpoints.is_empty()
+    }
+
+    /// What this set says that `other` did not.
+    ///
+    /// Used to keep the output-derived side down to what is actually news. A
+    /// tool's result usually echoes the URL it was given, and a field that
+    /// repeats the request tells a reader nothing while making the one entry
+    /// that *is* a redirect hard to spot.
+    pub fn minus(mut self, other: &NetRefs) -> Self {
+        self.fqdns.retain(|h| !other.fqdns.contains(h));
+        self.endpoints.retain(|e| !other.endpoints.contains(e));
+        self
+    }
 }
 
 /// `scheme://[user:pass@]host[:port]`, for any scheme rather than http alone.
@@ -309,6 +325,53 @@ pub fn extract_net_for_tool(_tool: &str, input: &Value) -> NetRefs {
     let mut refs = NetRefs::default();
     walk(input, false, 0, &mut refs);
     refs.finish()
+}
+
+/// Everything a tool *result* says about the network.
+///
+/// Separate from [`extract_net_for_tool`] because a result is content, not an
+/// instruction. Two differences follow from that:
+///
+/// * No command parsing. A schemeless host in output is a word on a page — a
+///   fetched document, a search result, a `--help` text — and the rule that
+///   makes `curl example.com` a connection does not survive the trip. A
+///   `command` key echoed back in a result was already read from the input.
+/// * The caller subtracts what the input already said ([`NetRefs::minus`]), so
+///   this field holds the hosts the call *revealed* rather than the ones it was
+///   given.
+///
+/// What it is for: the redirect that was followed, the host a search result
+/// pointed at, the endpoint an error message named. What it is not: proof the
+/// agent connected to any of them.
+pub fn extract_net_from_output(output: &Value) -> NetRefs {
+    let mut refs = NetRefs::default();
+    walk_content(output, 0, &mut refs);
+    refs.finish()
+}
+
+fn walk_content(v: &Value, depth: usize, refs: &mut NetRefs) {
+    if depth > MAX_DEPTH {
+        return;
+    }
+    match v {
+        Value::String(s) => {
+            for e in scan_urls(s) {
+                refs.fqdns.push(e.host.clone());
+                refs.endpoints.push(e.render());
+            }
+        }
+        Value::Array(a) => {
+            for x in a {
+                walk_content(x, depth + 1, refs);
+            }
+        }
+        Value::Object(o) => {
+            for x in o.values() {
+                walk_content(x, depth + 1, refs);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn walk(v: &Value, is_command: bool, depth: usize, refs: &mut NetRefs) {
@@ -521,6 +584,45 @@ mod tests {
             v = serde_json::json!([v]);
         }
         assert!(extract_net_for_tool("x", &v).fqdns.is_empty());
+        // A result is attacker-shaped in a way an input is not: it is whatever
+        // a fetched page contained, so its nesting is bounded by the same rule.
+        assert!(extract_net_from_output(&v).fqdns.is_empty());
+    }
+
+    #[test]
+    fn a_result_is_read_as_content_not_as_a_command() {
+        // The shape a `Bash` result arrives in: the command echoed back beside
+        // what it printed. The echo is the input again, and the printed text
+        // is prose — neither makes `example.com` a connection this way.
+        let out = serde_json::json!({
+            "command": "curl schemeless.example.com",
+            "stdout": "usage: try example.org for the docs",
+        });
+        assert!(
+            extract_net_from_output(&out).fqdns.is_empty(),
+            "a schemeless host was invented from a result"
+        );
+        // A stated protocol still counts, wherever in the result it sits.
+        let out =
+            serde_json::json!({"result": [{"redirected_to": "https://elsewhere.example.net/x"}]});
+        let refs = extract_net_from_output(&out);
+        assert_eq!(refs.fqdns, vec!["elsewhere.example.net".to_string()]);
+        assert_eq!(
+            refs.endpoints,
+            vec!["https://elsewhere.example.net".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_result_that_only_repeats_the_request_says_nothing_new() {
+        let input = serde_json::json!({"url": "https://docs.example.com/a"});
+        let out = serde_json::json!({"finalUrl": "https://docs.example.com/a", "status": 200});
+        let asked = extract_net_for_tool("WebFetch", &input);
+        let seen = extract_net_from_output(&out).minus(&asked);
+        assert!(
+            seen.is_empty(),
+            "the echoed request became a second finding: {seen:?}"
+        );
     }
 
     #[test]

@@ -5,7 +5,9 @@ pub mod net;
 pub mod opencode;
 pub mod pi;
 
-pub use net::{NetRefs, extract_fqdns, extract_net_for_tool, extract_net_text};
+pub use net::{
+    NetRefs, extract_fqdns, extract_net_for_tool, extract_net_from_output, extract_net_text,
+};
 
 use crate::config::CaptureCfg;
 use crate::event::{Envelope, Event};

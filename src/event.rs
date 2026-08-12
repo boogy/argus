@@ -248,6 +248,24 @@ pub enum EventKind {
         /// the field existed.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         endpoints: Vec<String>,
+        /// Hosts the call's *result* named that its input did not — the
+        /// redirect that was followed, the host a search result pointed at,
+        /// the endpoint an error message quoted.
+        ///
+        /// Kept apart from `fqdns` rather than merged into it, because the two
+        /// are different claims. `fqdns` is what the agent asked for;
+        /// `output_fqdns` is what came back, and what comes back includes every
+        /// link on a page the agent merely read. Merging them would let a
+        /// fetched document put hostnames into the field a reviewer uses to
+        /// answer "what did this agent connect to".
+        ///
+        /// Present on `post` legs only, and only for what the input did not
+        /// already say — a result usually echoes the URL it was handed.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        output_fqdns: Vec<String>,
+        /// `scheme://host[:port]` for the same, on the same terms.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        output_endpoints: Vec<String>,
         /// What the files in this call actually contained.
         ///
         /// `serde(default)` is what keeps rows already sitting in a buffer
@@ -453,6 +471,8 @@ pub fn visit_strings(kind: &mut EventKind, f: &mut impl FnMut(&mut String)) {
             files: _,
             fqdns: _,
             endpoints: _,
+            output_fqdns: _,
+            output_endpoints: _,
             file_contents,
         } => {
             visit_json_strings(input, f);
@@ -645,6 +665,8 @@ mod tests {
                 files: vec!["/repo/a.rs".into()],
                 fqdns: vec![],
                 endpoints: vec![],
+                output_fqdns: vec![],
+                output_endpoints: vec![],
                 file_contents: vec![],
             },
         );
@@ -745,6 +767,8 @@ mod tests {
                 files: vec![],
                 fqdns: vec![],
                 endpoints: vec![],
+                output_fqdns: vec![],
+                output_endpoints: vec![],
                 file_contents: vec![captured.clone(), withheld.clone()],
             },
         );
@@ -786,6 +810,8 @@ mod tests {
                 files: vec![],
                 fqdns: vec![],
                 endpoints: vec![],
+                output_fqdns: vec![],
+                output_endpoints: vec![],
                 file_contents: vec![],
             },
         );
@@ -893,6 +919,8 @@ mod tests {
                 files: vec![],
                 fqdns: vec![],
                 endpoints: vec![],
+                output_fqdns: vec![],
+                output_endpoints: vec![],
                 file_contents: vec![],
             },
         );

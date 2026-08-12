@@ -131,6 +131,8 @@ fn record(e: &Event) -> Value {
             files,
             fqdns,
             endpoints,
+            output_fqdns,
+            output_endpoints,
             error,
             duration_ms,
             interrupted,
@@ -165,6 +167,16 @@ fn record(e: &Event) -> Value {
             // parse a hostname list.
             if !endpoints.is_empty() {
                 attrs.push(attr("net.endpoints", &endpoints.join(",")));
+            }
+            // Their own attributes, never folded into the two above: a host
+            // the agent asked for and a host that came back in a document it
+            // read are different claims, and an alert that cannot tell them
+            // apart fires on every page with a link on it.
+            if !output_fqdns.is_empty() {
+                attrs.push(attr("net.output_fqdns", &output_fqdns.join(",")));
+            }
+            if !output_endpoints.is_empty() {
+                attrs.push(attr("net.output_endpoints", &output_endpoints.join(",")));
             }
             for a in file_snapshot_attrs(file_contents) {
                 attrs.push(a);
@@ -504,6 +516,8 @@ mod tests {
                 files: vec!["/a.rs".into()],
                 fqdns: vec![],
                 endpoints: vec![],
+                output_fqdns: vec![],
+                output_endpoints: vec![],
                 file_contents: vec![],
             },
         );
@@ -556,6 +570,8 @@ mod tests {
                     "https://exfil.example.com:8443".into(),
                     "ssh://git.example.org".into(),
                 ],
+                output_fqdns: vec!["redirect.example.net".into()],
+                output_endpoints: vec!["https://redirect.example.net".into()],
                 file_contents: vec![],
             },
         );
@@ -578,6 +594,16 @@ mod tests {
             get("net.endpoints").as_deref(),
             Some("https://exfil.example.com:8443,ssh://git.example.org"),
             "the scheme and port never reached an indexable attribute"
+        );
+        // What the result revealed is its own pair of attributes. Folded into
+        // the two above it would read as "the agent connected here".
+        assert_eq!(
+            get("net.output_fqdns").as_deref(),
+            Some("redirect.example.net")
+        );
+        assert_eq!(
+            get("net.output_endpoints").as_deref(),
+            Some("https://redirect.example.net")
         );
     }
 
@@ -686,6 +712,8 @@ mod tests {
                 files: vec![],
                 fqdns: vec![],
                 endpoints: vec![],
+                output_fqdns: vec![],
+                output_endpoints: vec![],
                 file_contents: vec![
                     snap("/repo/a.rs", 100, Some("aaa"), None),
                     snap("/repo/.env", 20, Some("bbb"), Some(SkipReason::Excluded)),
@@ -735,6 +763,8 @@ mod tests {
                 files: vec![],
                 fqdns: vec![],
                 endpoints: vec![],
+                output_fqdns: vec![],
+                output_endpoints: vec![],
                 file_contents: vec![],
             },
         );

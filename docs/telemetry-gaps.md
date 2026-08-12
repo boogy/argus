@@ -88,6 +88,33 @@ results, resolved hosts in command output.
 into `fqdns` (input-derived and output-derived can be distinguished with a
 separate field if needed).
 
+**Closed (T30), with the separate field, not the merge.**
+`extract_net_from_output` walks the result value and fills
+`ToolUse.output_fqdns` / `output_endpoints`, exported as `net.output_fqdns`
+and `net.output_endpoints`. Three decisions the parenthetical left open:
+
+- *Separate, not merged.* A tool result is content the agent fetched, not an
+  instruction it issued. Merging would let any page the agent read put
+  hostnames into the field a reviewer reads as "hosts this call connected
+  to" — an alert on `net.fqdns` would then fire on every document with a link
+  in it.
+- *Content, not command.* `walk_content` only scans for URLs. The
+  command-shaped reading of the input — network binaries, `--index-url`, bare
+  `host:path` — is not applied to output, because a result that quotes a
+  `curl` line is quoting, not running.
+- *Only what the input did not say.* `NetRefs::minus` drops hosts the input
+  already named, so a result echoing back the URL it was given adds nothing.
+  What survives is the redirect that was followed, the host a search result
+  pointed at, the registry an error message named.
+
+Scanned before the `capture.tool_outputs` check: which hosts a call touched
+is metadata, and turning the payload off is a decision about storing text,
+not about going blind. Two adapters record nothing here, and both because the
+tool never sends it — opencode's pty (the terminal's output does not pass
+through the plugin) and pi's `user_bash`. Codex's OTLP `tool_result` carries
+only `success` and `duration_ms`; its hook payloads go through the shared
+parser, which does scan.
+
 ### 5. Codex OTLP tool events extract no files and few FQDNs
 
 `codex.rs:64-72`: `files: vec![]` always; FQDNs come only from
@@ -291,6 +318,9 @@ Closed:
   port. The two limits taken on purpose are in the items themselves — no
   schemeless host outside a network command, and no path or query in an
   endpoint.
+- **#4** tool-output scanning (T30), as `output_fqdns` / `output_endpoints`
+  beside the input's own — the redirect that was followed, kept apart from
+  the host that was asked for.
 - **#14** in part: the per-event `hostname` spawn (T6a).
 - Both remaining small fixes: the unsorted `dedup` (T10f) and opencode's
   permission action, which turned out to be an adapter bug rather than a stale
@@ -298,15 +328,12 @@ Closed:
 
 Open, in the order this list would still do them:
 
-1. **#4** output scanning — now the remaining half of "what did the agent talk
-   to": the input says what was asked for, the output says where it was
-   redirected to.
-2. **#5** Codex file extraction (`files: vec![]` is still literal in
+1. **#5** Codex file extraction (`files: vec![]` is still literal in
    `codex.rs`), **#6** MCP server tagging.
-3. **#7** Bash file activity — now also the one write file capture cannot see.
-4. **#11** for Codex and Copilot, and **#16**, which is the audit that would
+2. **#7** Bash file activity — now also the one write file capture cannot see.
+3. **#11** for Codex and Copilot, and **#16**, which is the audit that would
    tell us whether their payloads carry an id at all.
-5. **#12** transcript mining, **#13** git enrichment, **#15** Codex `raw`
+4. **#12** transcript mining, **#13** git enrichment, **#15** Codex `raw`
    inventory, and the rest of **#14**.
 
 Not on this list because it postdates it: file-content capture, which answers
