@@ -57,6 +57,17 @@ pub fn parse(env: &Envelope, capture: &CaptureCfg) -> Vec<Event> {
             .or_else(|| sfield(p, "agentName", "agent_name")),
         agent_id: sfield(p, "agentId", "agent_id"),
         transcript_path: sfield(p, "transcriptPath", "transcript_path"),
+        // No documented Copilot payload carries either of these today — the
+        // audit that asked found `sessionId`, `cwd`, `transcriptPath` and the
+        // per-event fields, and no call id, no turn id and no timestamps. They
+        // are read anyway, under the spellings Copilot uses for everything
+        // else, because the alternative to a call id is pairing `pre` with
+        // `post` by adjacency, and a build that starts sending one should
+        // start being paired properly the same day rather than the next time
+        // somebody re-audits the payloads.
+        tool_use_id: sfield(p, "toolCallId", "tool_call_id")
+            .or_else(|| sfield(p, "toolUseId", "tool_use_id")),
+        turn_id: sfield(p, "turnId", "turn_id"),
         ..Meta::default()
     };
     let mk = |kind| {
@@ -327,6 +338,40 @@ mod tests {
         };
         assert_eq!(original, "[not captured]");
         assert_eq!(transformed, "[not captured]");
+    }
+
+    /// Pairing a `pre` with its `post` by adjacency is a guess that two
+    /// concurrent tool calls break. Copilot does not send a call id today, so
+    /// the id is read under every spelling it uses elsewhere: the day a build
+    /// starts sending one, the pairing stops being a guess.
+    #[test]
+    fn a_copilot_call_id_is_read_under_whichever_spelling_arrives() {
+        for (key, id) in [
+            ("toolCallId", "c1"),
+            ("tool_call_id", "c2"),
+            ("toolUseId", "c3"),
+            ("tool_use_id", "c4"),
+        ] {
+            let events = adapters::parse(
+                env(
+                    "preToolUse",
+                    json!({"sessionId": "cp1", "toolName": "bash", key: id,
+                           "turnId": "t9"}),
+                ),
+                &CaptureCfg::default(),
+            );
+            assert_eq!(events[0].meta.tool_use_id.as_deref(), Some(id), "{key}");
+            assert_eq!(events[0].meta.turn_id.as_deref(), Some("t9"), "{key}");
+        }
+        let events = adapters::parse(
+            env(
+                "preToolUse",
+                json!({"sessionId": "cp1", "toolName": "bash", "turn_id": "t8"}),
+            ),
+            &CaptureCfg::default(),
+        );
+        assert_eq!(events[0].meta.tool_use_id, None);
+        assert_eq!(events[0].meta.turn_id.as_deref(), Some("t8"));
     }
 
     #[test]

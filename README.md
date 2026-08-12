@@ -66,6 +66,8 @@ argus captures everything each surface offers.
 | Tool use (pre/post)         |             Y              |           Y           |            Y            |         Y         |           Y           |
 | Tool outputs                |             Y              |           Y           |            Y            |         Y         |     Y (text parts)    |
 | Tool failures               |             Y              |           —           | Y (post incl. non-zero) |         Y         |      Y (isError)      |
+| Call id (pairs pre with post) |             Y              |      Y (callID)       |     Y (call_id)         |   — (adjacency)   |           Y           |
+| Tool duration reported      |             Y              |           —           |    Y (duration_ms)      |         —         |           —           |
 | File paths touched          |             Y              |           Y           |  Y (incl. shell patches) |         Y         |           Y           |
 | FQDNs + endpoints contacted |             Y              |           Y           |            Y            |         Y         |           Y           |
 | Skill/command invocations   |             Y              | Y (command.executed)  |            —            |         —         |           —           |
@@ -100,6 +102,17 @@ for the model, tokens, cost and stop reason. The `!`-prefixed shell command is
 pi's answer to opencode's pty — a command the user runs directly, which never
 passes through `tool_call`, and whose `!!` form the transcript itself never
 records either.
+
+The call-id row is what makes a `pre` and a `post` the same tool call rather
+than two events that happen to be adjacent. Two `bash` calls in one turn are
+otherwise indistinguishable, so a call that hung — a `pre` whose `post` never
+came — reads exactly like one that finished. Copilot's dash is an absence in
+Copilot: no documented payload carries a call id, so its pairing is adjacency
+within a session, and argus reads the field anyway under the spellings Copilot
+uses elsewhere, so a build that starts sending one is paired properly that day.
+Where a duration is reported, it is the tool's own measurement rather than one
+subtracted from two timestamps stamped on either side of a socket; the other
+three surfaces report none, and argus does not invent one.
 
 The file-contents row is uniform across all five because it is the one feature
 that does not read a tool's vocabulary. Enrichment runs on every tool event

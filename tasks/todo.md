@@ -2464,12 +2464,41 @@ commit gated on `make verify`, and none needs another to be done first.
   capture inventing payload content; the capture arm removed against the
   exclusion test.
 
-- [ ] **T34** — pre/post correlation for Codex and Copilot, and the payload
+- [x] **T34** — pre/post correlation for Codex and Copilot, and the payload
   audit that decides whether it is possible. Dependency: none. Files:
-  `src/adapters/{codex,copilot}.rs`, `docs/telemetry-gaps.md` (#11, #16)
+  `src/adapters/{codex,copilot}.rs`, `docs/telemetry-gaps.md` (#11, #16),
+  `README.md`
 
   Claude Code, opencode and pi carry a call id and therefore a duration; the
   other two have not been audited for one.
+
+  Done: the audit's answer is that the two are not one case. Codex's OTLP
+  attributes carried `call_id`, `turn_id`, `model`, `duration_ms` and `success`
+  all along, next to the `tool_name` the adapter already read — the comment
+  saying `codex.tool_result` reports no duration was simply wrong. All are read
+  now, and `success = false` makes the result the `error` leg instead of a
+  `post` with the failure buried in `input`, where no "what failed" query looks.
+  Copilot carries none of it: no documented payload has a call id, a turn id or
+  a timestamp, so its pairing stays adjacency-based and the fields are read
+  speculatively under Copilot's own camelCase/snake_case spellings — a build
+  that starts sending one is paired properly that day rather than the next time
+  somebody re-audits.
+
+  Three helpers rather than three `as_str` calls, because an OTLP attribute is a
+  scalar of whichever type the *producer* declared and Codex's own stream
+  already sends `success` as the string `"true"`: `attr_str` (first non-empty
+  spelling — a present-but-empty `call_id` next to a filled `tool_call_id` does
+  not stop the search), `attr_u64` (number, float, or string holding one;
+  negative rejected, because a wrong duration is worse than a missing one) and
+  `attr_bool` (`true`/`True`/`1` and their negatives). A `success` nobody can
+  read is not a failure, so anything unparseable leaves the phase where it was.
+  Mutants killed (20/20): each of the three helpers' fallback arms dropped, and
+  each of their guards inverted; `attr_str` stopping at the first spelling or
+  at an empty one; an unreadable `success` treated as failure; the error leg
+  turned back into `post` and a decision turned into an error; `duration_ms`,
+  the call id, the turn id and the model each never read; `mk` dropping the meta
+  it was handed; the notify payload's hyphenated and snake_case turn ids each
+  dropped; and, on Copilot, each call-id spelling and the turn id dropped.
 
 - [ ] **T35** — MCP server → endpoint inventory. Dependency: T32. Files:
   `src/filecap.rs`, `src/adapters/mod.rs`, `docs/telemetry-gaps.md` (#6)

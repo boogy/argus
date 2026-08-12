@@ -291,9 +291,29 @@ socket. opencode maps `callID` (T13d), pi its tool-call id (T14a); opencode's
 permission events carry the same id, so a prompt joins the call it gated
 rather than being matched by adjacency.
 
-Still open for Codex and Copilot, whose payloads have not been audited for an
-id — see #16. Neither reports a duration either, so those two are the pairs
-that remain heuristic.
+**Closed (T34).** The audit that #16 asked for was done, and the two are not
+the same case.
+
+Codex's OTLP attributes carry the ids all along — `call_id`, `turn_id` and
+`model` were sitting next to the `tool_name` the adapter already read, and the
+comment claiming `codex.tool_result` reports no duration was wrong: it reports
+`duration_ms` and `success`. All four are now read, under each spelling of the
+attribute (`tool_call_id`, `gen_ai.request.model`, …), and a value is taken
+whether it arrives as a number, a boolean or a string — Codex's own stream
+sends `success` as `"true"`, so a consumer that trusts the declared type of an
+attribute drops fields on the build that spells them differently. `success =
+false` now makes the result the `error` leg; it used to be a `post` with the
+failure buried in `input`, where no "what failed" query looks. The `notify`
+payload's `turn-id` joins the turn-complete notification to the calls of that
+turn.
+
+Copilot is the real gap: no documented payload carries a call id, a turn id or
+a timestamp — the envelope has `sessionId`, `cwd`, `transcriptPath` and the
+per-event fields, and that is all. Both ids are read anyway, under the
+camelCase/snake_case spellings Copilot uses for everything else, so a build
+that starts sending one is paired properly that day rather than the next time
+somebody re-audits. Until then Copilot pre/post pairing stays adjacency-based,
+and it is the only surface of the five where it is.
 
 ### 12. Transcript mining (already a known limitation, high value)
 
@@ -338,6 +358,13 @@ envelope. Copilot payloads also carry a per-turn id and timestamps on some
 events; audit a live capture (`raw` rows + spool files) and lift what exists
 into `Meta`.
 
+**Closed (T34).** The premise was wrong: no documented Copilot payload carries
+a turn id or a timestamp, and none carries a call id either. What the envelope
+does carry — `sessionId`, `cwd`, `transcriptPath`, `agentType`/`agentName`,
+`agentId` — the adapter already reads. The call id and turn id are now read
+speculatively under Copilot's own spellings so the day a build sends one is the
+day pairing stops being a guess; see #11 for what that leaves open.
+
 ## Small correctness/efficiency fixes found on the way
 
 - `hostname()` (`src/event.rs:142`) spawns the `hostname` process **per
@@ -374,7 +401,12 @@ Closed:
   than a JSON blob on the session.
 - **#10** opencode `cwd` and `callID` (T13d).
 - **#11** call ids, for Claude Code (T10b), opencode (T13d) and pi (T14a),
-  plus a reported tool duration on Claude Code (T10c).
+  plus a reported tool duration on Claude Code (T10c); Codex (T34) closes the
+  set, with `call_id`, `turn_id`, `model`, `duration_ms` and a `success = false`
+  that finally reads as the error leg.
+- **#16** the Copilot audit (T34), whose answer was "nothing to lift" — both
+  ids are read speculatively, so Copilot is the one surface still paired by
+  adjacency.
 - **#1/#2/#3** network extraction (T29): the recursive walk, non-HTTP schemes
   and schemeless command hosts, and `endpoints` carrying scheme and stated
   port. The two limits taken on purpose are in the items themselves — no
@@ -397,11 +429,9 @@ Closed:
 
 Open, in the order this list would still do them:
 
-1. **#11** for Codex and Copilot, and **#16**, which is the audit that would
-   tell us whether their payloads carry an id at all.
-2. **#6**'s richer half (T35): the server-to-endpoint inventory, which needs
+1. **#6**'s richer half (T35): the server-to-endpoint inventory, which needs
    the same opt-in and redaction file capture has.
-3. **#12** transcript mining, **#13** git enrichment, **#15** Codex `raw`
+2. **#12** transcript mining, **#13** git enrichment, **#15** Codex `raw`
    inventory, and the rest of **#14**.
 
 Not on this list because it postdates it: file-content capture, which answers

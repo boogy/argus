@@ -6,6 +6,46 @@ use std::sync::{Arc, RwLock};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
+/// The first of several spellings of one OTLP attribute.
+///
+/// A present-but-empty attribute is not an answer, so it does not stop the
+/// search: a build that sends `call_id: ""` alongside a filled `tool_call_id`
+/// has a call id, and stopping at the empty one would report that it has none.
+fn attr_str(attrs: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|k| {
+            attrs
+                .get(k)
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+        })
+        .map(String::from)
+}
+
+/// An OTLP attribute that is a number, whether or not it arrived as one.
+///
+/// Attribute values are scalars of a declared type, and which type a producer
+/// declares for a duration is not something a consumer gets to rely on —
+/// Codex's own stream sends `success` as the string `"true"`. Reading only
+/// `as_u64` would drop the field on the builds that send `"8123"`, and a
+/// dropped duration is indistinguishable from a tool that reported none.
+fn attr_u64(attrs: &Value, key: &str) -> Option<u64> {
+    let v = attrs.get(key)?;
+    v.as_u64()
+        .or_else(|| v.as_f64().filter(|f| *f >= 0.0).map(|f| f as u64))
+        .or_else(|| v.as_str()?.trim().parse().ok())
+}
+
+/// An OTLP attribute that is a boolean, whether or not it arrived as one.
+fn attr_bool(attrs: &Value, key: &str) -> Option<bool> {
+    let v = attrs.get(key)?;
+    v.as_bool().or_else(|| match v.as_str()?.trim() {
+        "true" | "True" | "1" => Some(true),
+        "false" | "False" | "0" => Some(false),
+        _ => None,
+    })
+}
+
 /// Three payload shapes reach this, from three different transports: a
 /// Claude-shaped hook payload (`hook_event_name`), which is handed straight to
 /// the shared parser; a flattened OTLP logRecord
@@ -24,7 +64,28 @@ pub fn parse(env: &Envelope, capture: &CaptureCfg) -> Vec<Event> {
         .get("conversation.id")
         .and_then(Value::as_str)
         .map(String::from);
-    let mk = |kind| Event::new("codex", session_id.clone(), None, kind);
+    // The ids Codex's OTLP stream carries, under whichever spelling this
+    // build uses. A call id is what pairs a decision with its result: two
+    // `shell` calls in a turn are otherwise indistinguishable, so a `pre`
+    // that never got its `post` — a call that hung, or was killed — reads
+    // exactly like one that completed. Reading several spellings rather than
+    // one is not guesswork: they are names for the same field, and the cost
+    // of a spelling this build does not send is `None`, which is what the
+    // field held before.
+    let meta = crate::event::Meta {
+        tool_use_id: attr_str(
+            &attrs,
+            &["call_id", "tool_call_id", "call.id", "tool.call_id"],
+        ),
+        turn_id: attr_str(&attrs, &["turn_id", "turn.id"]),
+        model: attr_str(&attrs, &["model", "gen_ai.request.model"]),
+        ..Default::default()
+    };
+    let mk = |kind| {
+        let mut e = Event::new("codex", session_id.clone(), None, kind);
+        e.meta = meta.clone();
+        e
+    };
     let name = p.get("event_name").and_then(Value::as_str).unwrap_or("");
 
     match name {
@@ -86,10 +147,15 @@ pub fn parse(env: &Envelope, capture: &CaptureCfg) -> Vec<Event> {
             }
             files.sort();
             files.dedup();
-            let phase = if name.ends_with("decision") {
-                "pre"
-            } else {
-                "post"
+            // A result that reports `success = false` is the error leg, the
+            // same as a non-zero hook payload. Without this the only record of
+            // a failed Codex tool call is an attribute inside `input`, where
+            // no "what failed" query looks.
+            let failed = attr_bool(&attrs, "success") == Some(false);
+            let phase = match (name.ends_with("decision"), failed) {
+                (true, _) => "pre",
+                (false, false) => "post",
+                (false, true) => "error",
             }
             .into();
             let input = if capture.tool_inputs {
@@ -109,11 +175,11 @@ pub fn parse(env: &Envelope, capture: &CaptureCfg) -> Vec<Event> {
                 output_fqdns: vec![],
                 output_endpoints: vec![],
                 error: None,
-                // Codex's OTLP attributes carry neither. This arm is the
-                // receiver's path only — a payload with `hook_event_name`
-                // left for the shared parser several lines above, which reads
-                // both fields when they are present.
-                duration_ms: None,
+                // `codex.tool_result` reports how long the call took, and a
+                // duration the tool measured beats one subtracted from two
+                // timestamps stamped on either side of a socket. Nothing here
+                // reports an interruption.
+                duration_ms: attr_u64(&attrs, "duration_ms"),
                 interrupted: false,
                 files,
                 fqdns: blob_net.fqdns,
@@ -128,10 +194,19 @@ pub fn parse(env: &Envelope, capture: &CaptureCfg) -> Vec<Event> {
         // Codex `notify` delivers raw JSON like {"type": "agent-turn-complete", ...}
         // (top-level, not wrapped in a "notify" key).
         _ if p.get("type").and_then(Value::as_str) == Some("agent-turn-complete") => {
-            vec![mk(EventKind::Session {
+            let mut e = mk(EventKind::Session {
                 action: "turn-complete".into(),
                 detail: Value::Null,
-            })]
+            });
+            // This payload spells it with a hyphen, and it is the id the hook
+            // leg puts on every tool call of the turn — so the notification
+            // that a turn ended joins the calls it ended.
+            e.meta.turn_id = p
+                .get("turn-id")
+                .or_else(|| p.get("turn_id"))
+                .and_then(Value::as_str)
+                .map(String::from);
+            vec![e]
         }
         _ => vec![mk(EventKind::Raw { payload: p.clone() })],
     }
@@ -600,6 +675,129 @@ mod tests {
             panic!()
         };
         assert_eq!(fqdns, &vec!["mirror.example.org".to_string()]);
+    }
+
+    /// A Codex tool call over OTLP could be timed and paired by nothing: the
+    /// duration the result *reports* was dropped, and the call id that says
+    /// which decision this result belongs to was never read. Both were sitting
+    /// in the attributes.
+    #[test]
+    fn a_codex_tool_result_carries_its_duration_and_the_call_it_belongs_to() {
+        let events = adapters::parse(
+            env(json!({
+                "event_name": "codex.tool_result",
+                "attributes": {"conversation.id": "cx1", "tool_name": "shell",
+                               "call_id": "call-7", "turn_id": "turn-3",
+                               "model": "gpt-5-codex", "command": "cargo build",
+                               "duration_ms": 8123, "success": "true"}
+            })),
+            &CaptureCfg::default(),
+        );
+        assert_eq!(events[0].meta.tool_use_id.as_deref(), Some("call-7"));
+        assert_eq!(events[0].meta.turn_id.as_deref(), Some("turn-3"));
+        assert_eq!(events[0].meta.model.as_deref(), Some("gpt-5-codex"));
+        let EventKind::ToolUse {
+            phase, duration_ms, ..
+        } = &events[0].kind
+        else {
+            panic!()
+        };
+        assert_eq!(phase, "post");
+        assert_eq!(*duration_ms, Some(8123));
+
+        // An attribute value is a scalar of whichever type the producer
+        // declared, and Codex already sends one boolean as a string. A
+        // fractional millisecond is a millisecond; a negative one is not a
+        // duration, and a wrong number is worse than a missing one.
+        for (value, want) in [
+            (json!("250"), Some(250)),
+            (json!(" 250 "), Some(250)),
+            (json!(12.7), Some(12)),
+            (json!(-5), None),
+            (json!("soon"), None),
+        ] {
+            let events = adapters::parse(
+                env(json!({
+                    "event_name": "codex.tool_result",
+                    "attributes": {"tool_name": "shell", "duration_ms": value,
+                                   "call_id": "", "tool_call_id": "call-8",
+                                   "gen_ai.request.model": "gpt-5"}
+                })),
+                &CaptureCfg::default(),
+            );
+            // An attribute that is present but empty is not an answer: the
+            // filled spelling next to it is.
+            assert_eq!(events[0].meta.tool_use_id.as_deref(), Some("call-8"));
+            assert_eq!(events[0].meta.model.as_deref(), Some("gpt-5"));
+            let EventKind::ToolUse { duration_ms, .. } = &events[0].kind else {
+                panic!()
+            };
+            assert_eq!(*duration_ms, want, "duration_ms = {value}");
+        }
+    }
+
+    /// A failed tool call is the one a reviewer looks for, and it used to be
+    /// recorded as a successful one with an attribute buried in `input`.
+    #[test]
+    fn a_codex_tool_result_that_failed_is_the_error_leg() {
+        // Whichever way this build spells a boolean. Anything that is not a
+        // "no" leaves the result where it was: a `success` nobody can read is
+        // not a failure.
+        for (value, want) in [
+            (json!("false"), "error"),
+            (json!("False"), "error"),
+            (json!("0"), "error"),
+            (json!(false), "error"),
+            (json!("true"), "post"),
+            (json!("True"), "post"),
+            (json!("1"), "post"),
+            (json!(true), "post"),
+            (json!("maybe"), "post"),
+        ] {
+            let events = adapters::parse(
+                env(json!({
+                    "event_name": "codex.tool_result",
+                    "attributes": {"tool_name": "shell", "command": "cargo build",
+                                   "success": value}
+                })),
+                &CaptureCfg::default(),
+            );
+            let EventKind::ToolUse { phase, .. } = &events[0].kind else {
+                panic!()
+            };
+            assert_eq!(phase, want, "success = {value}");
+        }
+        // A decision is still a decision: nothing has failed yet.
+        let events = adapters::parse(
+            env(json!({
+                "event_name": "codex.tool_decision",
+                "attributes": {"tool_name": "shell", "success": "false"}
+            })),
+            &CaptureCfg::default(),
+        );
+        let EventKind::ToolUse { phase, .. } = &events[0].kind else {
+            panic!()
+        };
+        assert_eq!(phase, "pre");
+    }
+
+    /// The turn-complete notification and the tool calls of that turn are the
+    /// same turn, and the hyphen is the only thing that used to keep them
+    /// apart.
+    #[test]
+    fn a_finished_turn_names_the_turn_that_finished() {
+        for key in ["turn-id", "turn_id"] {
+            let events = adapters::parse(
+                env(json!({"type": "agent-turn-complete", key: "turn-42"})),
+                &CaptureCfg::default(),
+            );
+            assert_eq!(events[0].meta.turn_id.as_deref(), Some("turn-42"), "{key}");
+        }
+        let events = adapters::parse(
+            env(json!({"type": "agent-turn-complete"})),
+            &CaptureCfg::default(),
+        );
+        assert_eq!(events[0].meta.turn_id, None);
     }
 
     #[test]
