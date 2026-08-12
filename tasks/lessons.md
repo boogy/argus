@@ -56,3 +56,11 @@ correction; keep entries terse.
   file no diff could explain. The content check (`restored == backup`) passes
   and proves nothing about this. `touch` every restored file, or copy without
   metadata.
+
+- **Never retry a failing commit with `git commit -C <ref>`.** After a 1Password
+  signing failure in T30 I retried in a loop with `-C ORIG_HEAD`, which reuses
+  that ref's *message and author*: the attempt that finally got a signature
+  landed the T30 diff under an unrelated older commit's subject and someone
+  else's name. `--amend --reset-author -F -` repaired it, but the retry has to
+  be the same `-F -` heredoc that failed, never a message borrowed from a ref
+  whose contents were never checked.
