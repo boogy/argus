@@ -90,6 +90,17 @@ pub struct Meta {
     /// surgery in the query.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp_server: Option<String>,
+    /// Where that server is: an `https://…` for a remote one, or
+    /// `stdio:<command args>` for a package running as a child process.
+    ///
+    /// `mcp_server` is a name the host tool chose, and a name is not a
+    /// location — `github` is either a vendor's endpoint or somebody's fork
+    /// running locally, and an inventory of third-party reach that cannot tell
+    /// those apart is not one. Resolved from the tools' own config files by
+    /// [`crate::mcpcfg`] and off by default, because that means reading a file
+    /// the agent never sent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_endpoint: Option<String>,
 }
 
 impl Meta {

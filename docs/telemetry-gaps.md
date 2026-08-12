@@ -171,10 +171,28 @@ ordinary tool name just as well as an MCP one, and a server invented from
 `write_file` puts something that does not exist into the inventory of what the
 fleet reaches.
 
-The richer half is held back rather than skipped: `.mcp.json` routinely
-carries credentials in its `env` block, so snapshotting it needs the opt-in,
-the redaction pass and the size caps that file capture has — a feature, not a
-line in this one. See T35 in `tasks/todo.md`.
+**Closed (T35) for the richer half.** `Meta.mcp_endpoint`, exported as
+`mcp.endpoint`, resolved in `enrich` from the host tools' own config files:
+`.mcp.json` and `opencode.json` beside the project, then `~/.claude.json`
+(including the per-project servers `claude mcp add` writes by default),
+`~/.claude/settings.json`, `~/.copilot/mcp-config.json`,
+`~/.config/opencode/opencode.json` and `~/.codex/config.toml`. One field, not
+two: a remote server is its URL and a local one is `stdio:<command args>`, so
+"which agents reach off this machine" is the rows that do not start `stdio:`.
+
+Not at install/ConfigChange time as this item proposed, and not a `session`
+detail. A snapshot taken once is wrong by the time it matters — servers are
+added mid-session — and a detail on a `session` event has to be joined to the
+call it explains. Resolving per event, off the parse path and behind a
+15-second re-read floor, puts the endpoint on the row that names the server.
+
+The opt-in this item predicted is `capture.mcp_endpoints`, off by default, and
+the credential problem is handled in three places rather than one: `env` is
+never read at all; a URL loses its userinfo and query and an argument whose
+name says credential loses its value; and the result is then passed through
+the ordinary redactor by hand — `Redactor::scrub_event` walks the event's
+`kind`, so a string written into `Meta` is one no redaction pass would
+otherwise see.
 
 ### 7. Bash file activity (known limitation, worth closing)
 
@@ -417,8 +435,10 @@ Closed:
   the host that was asked for.
 - **#5** Codex file extraction (T31), by parsing the `arguments` attribute
   back into JSON first, and reading patch headers whatever the tool is called.
-- **#6** MCP per-call attribution (T32), as `Meta.mcp_server` / `mcp.server`;
-  the server *inventory* half is open as T35.
+- **#6** both halves: per-call attribution (T32) as `Meta.mcp_server` /
+  `mcp.server`, and the server-to-endpoint inventory (T35) as `mcp.endpoint`,
+  resolved per event from the tools' own config files behind
+  `capture.mcp_endpoints`.
 - **#7** Bash file activity (T33): redirect targets and six file verbs, and —
   because each path says whether the command wrote it — the disk capture of
   the write that no payload key names.
@@ -429,9 +449,7 @@ Closed:
 
 Open, in the order this list would still do them:
 
-1. **#6**'s richer half (T35): the server-to-endpoint inventory, which needs
-   the same opt-in and redaction file capture has.
-2. **#12** transcript mining, **#13** git enrichment, **#15** Codex `raw`
+1. **#12** transcript mining, **#13** git enrichment, **#15** Codex `raw`
    inventory, and the rest of **#14**.
 
 Not on this list because it postdates it: file-content capture, which answers

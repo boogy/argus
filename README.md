@@ -18,11 +18,11 @@ argus install             # detects installed tools, wires hooks/plugins/config
 There are three install scopes, and they are independent — a machine can carry
 all three at once:
 
-| Command                          | Writes into                                   | Who can remove it            |
-| -------------------------------- | --------------------------------------------- | ---------------------------- |
-| `argus install`                  | this user's config (`~/.claude`, `~/.codex`, …) | the user                     |
-| `argus install --project <dir>`  | a repository (`<dir>/.codex/hooks.json`)        | anyone who can push          |
-| `argus install --managed`        | an administrator-owned system root              | root/Administrator only      |
+| Command                         | Writes into                                     | Who can remove it       |
+| ------------------------------- | ----------------------------------------------- | ----------------------- |
+| `argus install`                 | this user's config (`~/.claude`, `~/.codex`, …) | the user                |
+| `argus install --project <dir>` | a repository (`<dir>/.codex/hooks.json`)        | anyone who can push     |
+| `argus install --managed`       | an administrator-owned system root              | root/Administrator only |
 
 `--dry-run` prints the plan, and the detection signals behind it, without
 writing anything.
@@ -58,33 +58,33 @@ cleanly remove all wiring.
 Each tool exposes a different amount of detail through its hook/plugin API;
 argus captures everything each surface offers.
 
-| Signal                      |        Claude Code         |       opencode        |          Codex          |    Copilot CLI    |          pi           |
-| --------------------------- | :------------------------: | :-------------------: | :---------------------: | :---------------: | :-------------------: |
-| Prompts                     |             Y              |           Y           |            Y            |         Y         |           Y           |
-| Prompt rewritten en route    |             —              |           —           |            —            | Y (userPromptTransformed) |           —           |
-| Assistant messages          |          Y (Stop)          |           Y           |      Y (Stop hook)      | Y (subagent only) |           —           |
-| Tool use (pre/post)         |             Y              |           Y           |            Y            |         Y         |           Y           |
-| Tool outputs                |             Y              |           Y           |            Y            |         Y         |     Y (text parts)    |
-| Tool failures               |             Y              |           —           | Y (post incl. non-zero) |         Y         |      Y (isError)      |
-| Call id (pairs pre with post) |             Y              |      Y (callID)       |     Y (call_id)         |   — (adjacency)   |           Y           |
-| Tool duration reported      |             Y              |           —           |    Y (duration_ms)      |         —         |           —           |
-| File paths touched          |             Y              |           Y           |  Y (incl. shell patches) |         Y         |           Y           |
-| FQDNs + endpoints contacted |             Y              |           Y           |            Y            |         Y         |           Y           |
-| Skill/command invocations   |             Y              | Y (command.executed)  |            —            |         —         |           —           |
-| Slash-command expansion     |     Y (expanded text)      |           —           |            —            |         —         |           —           |
-| Subagent runs               |       Y (start+stop)       |           —           |            Y            | Y (start+stop)    |           —           |
-| Permission requests         |     Y (request+denied)     |  Y (request+reply)    |            Y            |         Y         |     — (no event)      |
-| Compaction                  | Y (pre+post, token counts) | Y (session.compacted) |            Y            |      Y (pre)      | Y (pre+post, before)  |
-| Errors                      |      Y (StopFailure)       |   Y (session.error)   |            —            | Y (errorOccurred) |   Y (turn_end stop)   |
-| Config/instructions changes |             Y              |           —           |            —            |         —         |           —           |
-| Directory scope changes     |        Y (/add-dir)        |           —           |            —            |         —         |           —           |
-| Session lifecycle           |             Y              |           Y           |            Y            |         Y         |           Y           |
-| Model, tokens, cost per turn |             —              |  Y (message.updated)  |            —            |         —         |     Y (turn_end)      |
-| Interactive shells (pty)    |             —              |  Y (created+exited)   |            —            |         —         |    Y (user_bash `!`)  |
-| File contents               |         Y (opt-in)         |      Y (opt-in)       |       Y (opt-in)        |    Y (opt-in)     |      Y (opt-in)       |
+| Signal                        |        Claude Code         |       opencode        |          Codex          |        Copilot CLI        |          pi          |
+| ----------------------------- | :------------------------: | :-------------------: | :---------------------: | :-----------------------: | :------------------: |
+| Prompts                       |             Y              |           Y           |            Y            |             Y             |          Y           |
+| Prompt rewritten en route     |             —              |           —           |            —            | Y (userPromptTransformed) |          —           |
+| Assistant messages            |          Y (Stop)          |           Y           |      Y (Stop hook)      |     Y (subagent only)     |          —           |
+| Tool use (pre/post)           |             Y              |           Y           |            Y            |             Y             |          Y           |
+| Tool outputs                  |             Y              |           Y           |            Y            |             Y             |    Y (text parts)    |
+| Tool failures                 |             Y              |           —           | Y (post incl. non-zero) |             Y             |     Y (isError)      |
+| Call id (pairs pre with post) |             Y              |      Y (callID)       |       Y (call_id)       |       — (adjacency)       |          Y           |
+| Tool duration reported        |             Y              |           —           |     Y (duration_ms)     |             —             |          —           |
+| File paths touched            |             Y              |           Y           | Y (incl. shell patches) |             Y             |          Y           |
+| FQDNs + endpoints contacted   |             Y              |           Y           |            Y            |             Y             |          Y           |
+| Skill/command invocations     |             Y              | Y (command.executed)  |            —            |             —             |          —           |
+| Slash-command expansion       |     Y (expanded text)      |           —           |            —            |             —             |          —           |
+| Subagent runs                 |       Y (start+stop)       |           —           |            Y            |      Y (start+stop)       |          —           |
+| Permission requests           |     Y (request+denied)     |   Y (request+reply)   |            Y            |             Y             |     — (no event)     |
+| Compaction                    | Y (pre+post, token counts) | Y (session.compacted) |            Y            |          Y (pre)          | Y (pre+post, before) |
+| Errors                        |      Y (StopFailure)       |   Y (session.error)   |            —            |     Y (errorOccurred)     |  Y (turn_end stop)   |
+| Config/instructions changes   |             Y              |           —           |            —            |             —             |          —           |
+| Directory scope changes       |        Y (/add-dir)        |           —           |            —            |             —             |          —           |
+| Session lifecycle             |             Y              |           Y           |            Y            |             Y             |          Y           |
+| Model, tokens, cost per turn  |             —              |  Y (message.updated)  |            —            |             —             |     Y (turn_end)     |
+| Interactive shells (pty)      |             —              |  Y (created+exited)   |            —            |             —             |  Y (user_bash `!`)   |
+| File contents                 |         Y (opt-in)         |      Y (opt-in)       |       Y (opt-in)        |        Y (opt-in)         |      Y (opt-in)      |
 
 Copilot's `userPromptTransformed` is the one row with no equivalent elsewhere,
-and the reason it is wired: it reports what was *actually* sent to the model
+and the reason it is wired: it reports what was _actually_ sent to the model
 after every hook, plugin and enterprise policy in the chain had a turn at
 editing it. An instruction spliced in there appears nowhere else — the user
 never typed it, and the transcript just shows the model obeying it. Both halves
@@ -128,14 +128,12 @@ of a redirection (`> out.txt`, `>> log`, `2> err.log`), and the arguments of
 the few programs whose whole job is to move bytes between paths — `cp`, `mv`,
 `rm`, `tee`, `touch`, and `sed` when it edits in place. `cat /etc/passwd` names
 nothing; a longer verb table would fill `files` with whichever argument
-happened to look like a path, and that field is read as *what this session
-touched*. Descriptors (`2>&1`), `/dev/null`, globs and unexpanded variables are
+happened to look like a path, and that field is read as _what this session
+touched_. Descriptors (`2>&1`), `/dev/null`, globs and unexpanded variables are
 not paths and are dropped. The files such a command **writes** — a redirect
 target, a `cp` destination — are also capture candidates in `disk` mode; a `cp`
 source and an `rm` argument are listed as touched but never opened, the first
 because the shell read it rather than the tool, the second because it is gone.
-
-
 
 A row saying `Y` means the event is recorded, not that every field in it is.
 Four that used to be read past are now kept, because each is the part of its
@@ -178,32 +176,33 @@ config** (remote is fleet policy and always wins, so a compromised or
 uncooperative developer machine can't locally weaken it). All keys are optional;
 unset keys keep their default.
 
-| Key                          | Default            | Meaning                                                                                                                                                                                                          |
-| ---------------------------- | ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `remote.url`                 | _(unset)_          | HTTPS URL polled for fleet-wide config.                                                                                                                                                                          |
-| `remote.poll_interval_secs`  | `300`              | Poll interval (floor `30`).                                                                                                                                                                                      |
-| `export.otlp_endpoint`       | _(unset)_          | OTLP/JSON logs endpoint (`POST {endpoint}/v1/logs`). No endpoint = events stay buffered locally.                                                                                                                 |
-| `export.headers`             | `{}`               | Extra HTTP headers sent with each export (e.g. auth).                                                                                                                                                            |
-| `export.batch_size`          | `256`              | Max events per export batch.                                                                                                                                                                                     |
-| `export.max_batch_bytes`     | `3 MiB`            | Max serialized bytes per export batch, whichever binds first. Collectors reject on request size, and 256 tool results carrying file contents are orders of magnitude larger than 256 prompts. `0` = no limit. An event bigger than the whole budget is still sent, alone. |
-| `export.gzip`                | `false`            | Compress the request body (`Content-Encoding: gzip`). Off by default: OTLP/HTTP receivers *should* accept a gzipped body but are not required to, and one that does not answers `4xx` — a refusal, which drops the batch rather than retrying it. Turn it on once you know the collector decodes it. |
-| `export.flush_interval_secs` | `10`               | Export loop interval; backs off exponentially (capped ~30x) on retryable failures (5xx, `408`, `429`, timeouts). A `4xx` refusal is not retried — see below.                                                     |
-| `capture.prompts`            | `true`             | Capture prompt text. `false` → events still emitted, text replaced with `[not captured]` (metadata-only mode).                                                                                                   |
-| `capture.tool_inputs`        | `true`             | Capture tool-call input JSON. `false` → tool events still emitted (name, files, FQDNs) without the input payload.                                                                                                |
-| `capture.tool_outputs`       | `true`             | Capture tool result/output JSON on post-tool events. `false` → output field left null.                                                                                                                           |
-| `capture.assistant_messages` | `true`             | Capture assistant message text (Claude Code/Codex `Stop`, opencode `chat.message`). `false` → assistant-message events suppressed.                                                                               |
-| `capture.max_field_bytes`    | `65536`            | Per-field size cap (serialized bytes) for prompt text, assistant text, tool input/output, and each string *leaf* inside a JSON payload. Capping the leaves rather than the whole value is what keeps a large `Write` from costing its own `file_path`: the record used to say something big was written and not what. A structure that is still 16× the cap after that (or nested past 32 levels) is replaced wholesale with `{"_truncated":true,…}`. `0` = unlimited. |
-| `capture.truncate_mode`      | `head_tail`        | What survives the cap: `head` (first bytes + `…[truncated]`), `head_tail` (both ends, `…[truncated]…` between), `drop` (`[truncated]`, content discarded). `head_tail` is the default because the answer is usually at the end — a diff's outcome, a stack trace's cause — and `head` alone truncates exactly that away. Cuts land on character boundaries; a multi-byte character is never split. |
-| `capture.file_contents.*`    | off                | Capture the contents of files a tool touched. Off by default, whole table documented in [File-content capture](#file-content-capture). |
-| `capture.cloud_identity`     | `true`             | Record which cloud identity the agent was holding — assumed role, account, subscription, project, cluster — and name the credential variables it had in scope. Whole section in [Cloud identity](#cloud-identity). `false` → no `cloud.*` attribute on any event. |
-| `redaction.enabled`          | `true`             | Run the built-in secret scrubber before anything is buffered or exported.                                                                                                                                        |
-| `redaction.extra_patterns`   | `[]`               | Additional regexes scrubbed the same way as built-ins (invalid patterns are skipped with a warning, not fatal).                                                                                                  |
-| `buffer.max_events`          | `100000`           | SQLite buffer cap; oldest events are dropped once full (offline-first, not unbounded).                                                                                                                           |
-| `buffer.max_bytes`           | `268435456`        | Second cap, on stored event text (256 MiB). A row cap is not a disk bound — 100k pasted file contents is a very different size from 100k prompts. Whichever binds first wins; both are re-read on a config reload. Counted in UTF-8 bytes, so a buffer of CJK or emoji-bearing prompts holds what it says. |
-| `spool.max_bytes`            | `67108864`         | Ceiling on the hand-off spool (64 MiB). It grows exactly while the daemon is down and nothing is draining it; over the cap the oldest undelivered files are deleted and the count rides out on the next envelope as an `event.type=loss`, `loss.reason=spool_full` record. Read fresh on every hook, so a change applies immediately. |
-| `codex.otlp_listen`          | `127.0.0.1:4xxxx`  | Local address the daemon listens on for Codex's `[otel]` OTLP/JSON export. The port defaults to one derived from the data directory (40000–49151), because loopback is machine-wide, not per-user: on a shared fixed port the second account's daemon fails to bind while its Codex keeps posting prompts into the *first* account's audit trail. The receiver requires a bearer token (see below); posts without it get `401` and are not recorded. |
-| `integrity.enabled`          | `true`             | Periodically re-verify the daemon's own hook/plugin wiring is intact. A tampered/removed hook emits an `event.type=integrity`, `integrity.status=broken` record at `WARN`. On by default (security control).      |
-| `integrity.interval_secs`    | `3600`             | Wiring self-check interval (floor `30`). Broken findings re-emit each cycle until re-install, so the alert stays live.                                                                                            |
+| Key                          | Default           | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| ---------------------------- | ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `remote.url`                 | _(unset)_         | HTTPS URL polled for fleet-wide config.                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `remote.poll_interval_secs`  | `300`             | Poll interval (floor `30`).                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `export.otlp_endpoint`       | _(unset)_         | OTLP/JSON logs endpoint (`POST {endpoint}/v1/logs`). No endpoint = events stay buffered locally.                                                                                                                                                                                                                                                                                                                                                                       |
+| `export.headers`             | `{}`              | Extra HTTP headers sent with each export (e.g. auth).                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `export.batch_size`          | `256`             | Max events per export batch.                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `export.max_batch_bytes`     | `3 MiB`           | Max serialized bytes per export batch, whichever binds first. Collectors reject on request size, and 256 tool results carrying file contents are orders of magnitude larger than 256 prompts. `0` = no limit. An event bigger than the whole budget is still sent, alone.                                                                                                                                                                                              |
+| `export.gzip`                | `false`           | Compress the request body (`Content-Encoding: gzip`). Off by default: OTLP/HTTP receivers _should_ accept a gzipped body but are not required to, and one that does not answers `4xx` — a refusal, which drops the batch rather than retrying it. Turn it on once you know the collector decodes it.                                                                                                                                                                   |
+| `export.flush_interval_secs` | `10`              | Export loop interval; backs off exponentially (capped ~30x) on retryable failures (5xx, `408`, `429`, timeouts). A `4xx` refusal is not retried — see below.                                                                                                                                                                                                                                                                                                           |
+| `capture.prompts`            | `true`            | Capture prompt text. `false` → events still emitted, text replaced with `[not captured]` (metadata-only mode).                                                                                                                                                                                                                                                                                                                                                         |
+| `capture.tool_inputs`        | `true`            | Capture tool-call input JSON. `false` → tool events still emitted (name, files, FQDNs) without the input payload.                                                                                                                                                                                                                                                                                                                                                      |
+| `capture.tool_outputs`       | `true`            | Capture tool result/output JSON on post-tool events. `false` → output field left null.                                                                                                                                                                                                                                                                                                                                                                                 |
+| `capture.assistant_messages` | `true`            | Capture assistant message text (Claude Code/Codex `Stop`, opencode `chat.message`). `false` → assistant-message events suppressed.                                                                                                                                                                                                                                                                                                                                     |
+| `capture.max_field_bytes`    | `65536`           | Per-field size cap (serialized bytes) for prompt text, assistant text, tool input/output, and each string _leaf_ inside a JSON payload. Capping the leaves rather than the whole value is what keeps a large `Write` from costing its own `file_path`: the record used to say something big was written and not what. A structure that is still 16× the cap after that (or nested past 32 levels) is replaced wholesale with `{"_truncated":true,…}`. `0` = unlimited. |
+| `capture.truncate_mode`      | `head_tail`       | What survives the cap: `head` (first bytes + `…[truncated]`), `head_tail` (both ends, `…[truncated]…` between), `drop` (`[truncated]`, content discarded). `head_tail` is the default because the answer is usually at the end — a diff's outcome, a stack trace's cause — and `head` alone truncates exactly that away. Cuts land on character boundaries; a multi-byte character is never split.                                                                     |
+| `capture.file_contents.*`    | off               | Capture the contents of files a tool touched. Off by default, whole table documented in [File-content capture](#file-content-capture).                                                                                                                                                                                                                                                                                                                                 |
+| `capture.cloud_identity`     | `true`            | Record which cloud identity the agent was holding — assumed role, account, subscription, project, cluster — and name the credential variables it had in scope. Whole section in [Cloud identity](#cloud-identity). `false` → no `cloud.*` attribute on any event.                                                                                                                                                                                                      |
+| `capture.mcp_endpoints`      | `false`           | Resolve each MCP server name to where that server actually is, by reading the host tools' MCP config files, and export it as `mcp.endpoint`. Off by default: those files sit next to credentials. What is read and what never is, in [Where the server is](#where-the-server-is).                                                                                                                                                                                      |
+| `redaction.enabled`          | `true`            | Run the built-in secret scrubber before anything is buffered or exported.                                                                                                                                                                                                                                                                                                                                                                                              |
+| `redaction.extra_patterns`   | `[]`              | Additional regexes scrubbed the same way as built-ins (invalid patterns are skipped with a warning, not fatal).                                                                                                                                                                                                                                                                                                                                                        |
+| `buffer.max_events`          | `100000`          | SQLite buffer cap; oldest events are dropped once full (offline-first, not unbounded).                                                                                                                                                                                                                                                                                                                                                                                 |
+| `buffer.max_bytes`           | `268435456`       | Second cap, on stored event text (256 MiB). A row cap is not a disk bound — 100k pasted file contents is a very different size from 100k prompts. Whichever binds first wins; both are re-read on a config reload. Counted in UTF-8 bytes, so a buffer of CJK or emoji-bearing prompts holds what it says.                                                                                                                                                             |
+| `spool.max_bytes`            | `67108864`        | Ceiling on the hand-off spool (64 MiB). It grows exactly while the daemon is down and nothing is draining it; over the cap the oldest undelivered files are deleted and the count rides out on the next envelope as an `event.type=loss`, `loss.reason=spool_full` record. Read fresh on every hook, so a change applies immediately.                                                                                                                                  |
+| `codex.otlp_listen`          | `127.0.0.1:4xxxx` | Local address the daemon listens on for Codex's `[otel]` OTLP/JSON export. The port defaults to one derived from the data directory (40000–49151), because loopback is machine-wide, not per-user: on a shared fixed port the second account's daemon fails to bind while its Codex keeps posting prompts into the _first_ account's audit trail. The receiver requires a bearer token (see below); posts without it get `401` and are not recorded.                   |
+| `integrity.enabled`          | `true`            | Periodically re-verify the daemon's own hook/plugin wiring is intact. A tampered/removed hook emits an `event.type=integrity`, `integrity.status=broken` record at `WARN`. On by default (security control).                                                                                                                                                                                                                                                           |
+| `integrity.interval_secs`    | `3600`            | Wiring self-check interval (floor `30`). Broken findings re-emit each cycle until re-install, so the alert stays live.                                                                                                                                                                                                                                                                                                                                                 |
 
 Example `config.toml`:
 
@@ -236,20 +235,20 @@ an audit trail into a copy of source code.
 enabled = true
 ```
 
-| Key                                   | Default                                                    | Meaning                                                                                                                                                                                                      |
-| ------------------------------------- | ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `capture.file_contents.enabled`       | `false`                                                     | Master switch. Off means no `file_contents` key at all — not an empty array on every tool call in every session.                                                                                             |
-| `capture.file_contents.mode`          | `payload`                                                   | Where bytes may come from. `payload`: only what the hook already carried (a `Write`'s content, an `Edit`'s two halves, a patch body) — exact, race-free, **zero I/O**. `disk`: read the file. `both`: the payload when it carried one, the disk otherwise. |
-| `capture.file_contents.include`       | `[]`                                                        | Regexes on the path. Empty means no restriction — an `include` matching nothing would be an enabled feature that captures nothing.                                                                            |
-| `capture.file_contents.exclude`       | `node_modules`, `.git`, `*.lock`/`*.min.js`, `.env*`, `*.pem`, `.ssh/`, `*_rsa`, `*.p12` | Regexes applied after `include`; a tie goes to the exclusion. Writing your own list **replaces** these rather than adding to them — a config that states a whole policy should not silently keep ours.        |
-| `capture.file_contents.max_bytes`     | `32768`                                                     | Per file. A payload body over this is kept truncated; a file on *disk* over it is measured and not read at all (see below). Bounded by `capture.max_field_bytes` regardless.                                  |
-| `capture.file_contents.max_files`     | `10`                                                        | Per event, so one `apply_patch` across forty files cannot become forty bodies in one record.                                                                                                                  |
-| `capture.file_contents.max_total_bytes` | `262144`                                                  | Per event, across all files, and shared by both halves — `both` is not quietly twice the number written here.                                                                                                 |
-| `capture.file_contents.skip_binary`   | `true`                                                      | Drop content that is not text: invalid UTF-8, or any control byte other than tab/CR/LF in the first 8 KiB. Metadata is still recorded.                                                                        |
-| `capture.file_contents.hash`          | `true`                                                      | Record `sha256`, size and mtime **even where content is withheld**. This is what keeps an excluded file visible as *touched*, and what lets two captures of one path be told apart.                           |
-| `capture.file_contents.read_timeout_ms` | `2000`                                                    | How long one file's stat-and-read may take before the daemon stops waiting and records it as unreadable. `0` waits forever.                                                                                    |
+| Key                                     | Default                                                                                  | Meaning                                                                                                                                                                                                                                                    |
+| --------------------------------------- | ---------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `capture.file_contents.enabled`         | `false`                                                                                  | Master switch. Off means no `file_contents` key at all — not an empty array on every tool call in every session.                                                                                                                                           |
+| `capture.file_contents.mode`            | `payload`                                                                                | Where bytes may come from. `payload`: only what the hook already carried (a `Write`'s content, an `Edit`'s two halves, a patch body) — exact, race-free, **zero I/O**. `disk`: read the file. `both`: the payload when it carried one, the disk otherwise. |
+| `capture.file_contents.include`         | `[]`                                                                                     | Regexes on the path. Empty means no restriction — an `include` matching nothing would be an enabled feature that captures nothing.                                                                                                                         |
+| `capture.file_contents.exclude`         | `node_modules`, `.git`, `*.lock`/`*.min.js`, `.env*`, `*.pem`, `.ssh/`, `*_rsa`, `*.p12` | Regexes applied after `include`; a tie goes to the exclusion. Writing your own list **replaces** these rather than adding to them — a config that states a whole policy should not silently keep ours.                                                     |
+| `capture.file_contents.max_bytes`       | `32768`                                                                                  | Per file. A payload body over this is kept truncated; a file on _disk_ over it is measured and not read at all (see below). Bounded by `capture.max_field_bytes` regardless.                                                                               |
+| `capture.file_contents.max_files`       | `10`                                                                                     | Per event, so one `apply_patch` across forty files cannot become forty bodies in one record.                                                                                                                                                               |
+| `capture.file_contents.max_total_bytes` | `262144`                                                                                 | Per event, across all files, and shared by both halves — `both` is not quietly twice the number written here.                                                                                                                                              |
+| `capture.file_contents.skip_binary`     | `true`                                                                                   | Drop content that is not text: invalid UTF-8, or any control byte other than tab/CR/LF in the first 8 KiB. Metadata is still recorded.                                                                                                                     |
+| `capture.file_contents.hash`            | `true`                                                                                   | Record `sha256`, size and mtime **even where content is withheld**. This is what keeps an excluded file visible as _touched_, and what lets two captures of one path be told apart.                                                                        |
+| `capture.file_contents.read_timeout_ms` | `2000`                                                                                   | How long one file's stat-and-read may take before the daemon stops waiting and records it as unreadable. `0` waits forever.                                                                                                                                |
 
-Every file that is *named* appears in the record, whether or not its content
+Every file that is _named_ appears in the record, whether or not its content
 does. A withheld body carries a `skipped` reason — `excluded`, `too_large`,
 `binary`, `budget`, `unreadable` — which is exported as an attribute, because a
 policy excluding more than its author intended otherwise looks exactly like a
@@ -259,7 +258,7 @@ What the disk half will not do:
 
 - **Follow a symlink.** `/tmp/x -> ~/.ssh/id_rsa` is the oldest way to get a
   privileged reader to fetch something on your behalf, and it walks straight
-  past an `exclude` list that matches on the path the *agent* said. The stat
+  past an `exclude` list that matches on the path the _agent_ said. The stat
   refuses the link, and the open refuses it again (`O_NOFOLLOW`) because a stat
   and an open are two syscalls and swapping the path in between is the whole
   point of the gap. A refused link is reported without even its target's size.
@@ -274,7 +273,7 @@ What the disk half will not do:
   opened at all.
 - **Wait forever.** A read that stops returning — a network mount that goes
   away mid-read — is abandoned after `read_timeout_ms` and reported as
-  unreadable. Nothing here can *cancel* that read (a thread parked in the
+  unreadable. Nothing here can _cancel_ that read (a thread parked in the
   kernel is not interruptible from userspace); what the deadline bounds is the
   blast radius, so one dead mount costs one stuck thread instead of every event
   behind it.
@@ -289,10 +288,10 @@ One interaction is worth knowing before you rely on this: `capture.tool_inputs
 = false` disables file capture entirely, both halves. The files a call touched
 are found in its input, so an event with no input has no candidates to read —
 including for `disk` mode, which needs the path even though it does not need
-the body. The `files` list is unaffected: such an event still *names* every
+the body. The `files` list is unaffected: such an event still _names_ every
 file and describes none of them.
 
-`disk` mode reads the file a moment *after* the tool acted, so what it records
+`disk` mode reads the file a moment _after_ the tool acted, so what it records
 is the state that resulted, not necessarily the state the tool wrote — which is
 also how it shows a change the tool did not make, such as a formatter that ran
 afterwards. `payload` mode has the opposite property and no I/O; `both` is the
@@ -371,14 +370,43 @@ a `-` or a single `_` between server and tool — split an ordinary tool name
 just as cleanly as an MCP one, and a server invented from `write_file` would
 put something that does not exist into the inventory of what the fleet reaches.
 
-What this does not do is map a server name to an endpoint; that needs reading
-the MCP config files, which routinely hold credentials, and so it needs the
-opt-in and the redaction that file capture has.
+### Where the server is
+
+A name is not a location. `github` is either a package running as a child
+process on this machine or an HTTPS endpoint belonging to whoever controls that
+hostname, and an inventory that cannot tell those apart is not one. With
+`capture.mcp_endpoints = true`, a call also carries `mcp.endpoint`
+(`mcp_endpoint` in the event body): the server's URL if it is remote, or
+`stdio:<command args>` if it runs locally. One field rather than two, and
+prefixed, so "which of my agents reach off this machine" is a query for the
+rows that are not `stdio:` rather than a join.
+
+It is resolved from the host tools' own config files — `.mcp.json` and
+`opencode.json` beside the project, then `~/.claude.json` (including the
+per-project servers `claude mcp add` writes by default), `~/.claude/settings.json`,
+`~/.copilot/mcp-config.json`, `~/.config/opencode/opencode.json` and
+`~/.codex/config.toml`. A project file wins over a user-wide one of the same
+name, because that is the server the call actually reached. All six are
+consulted whatever tool made the call: a server is configured once and reached
+from whichever agent is open.
+
+Off by default, because those files sit next to credentials, and three rules
+follow from that. The `env` block is never read — not redacted, not hashed,
+never looked at. A URL loses its userinfo and its query string, both of which
+are authentication rather than location. An argument whose _name_ says
+credential (`--api-key=…`) loses its value, and then the ordinary redactor runs
+over the result, catching by shape what that catches by name. Files over 4 MiB
+are skipped and endpoints are capped at 512 bytes.
+
+Each file is re-read at most every 15 seconds rather than per event:
+`~/.claude.json` is megabytes and a live session rewrites it continuously. A
+server added mid-session is therefore named a few seconds later, which is the
+side of that trade worth taking.
 
 ## Cloud identity
 
 An event says an agent ran `terraform apply`. The question an incident actually
-asks is *as whom* — which role it had assumed, which account, which cluster.
+asks is _as whom_ — which role it had assumed, which account, which cluster.
 Nothing in a hook payload carries that; the environment does, and the hook shim
 is spawned by the agent and inherits it.
 
@@ -404,7 +432,7 @@ Two disjoint kinds of variable, and the split is the whole design:
   something the provider already writes into its own audit log: a role ARN, an
   account id, a project, a profile name, an access key **id**. They say who the
   agent was; none of them authenticates as anyone.
-- **Credentials** are everything whose *name* says it holds secret material
+- **Credentials** are everything whose _name_ says it holds secret material
   (`*_TOKEN`, `*_SECRET`, `*_PASSWORD`, `*_API_KEY`, `*_PRIVATE_KEY`, …). Only
   the **name** is recorded — the value is never read at all. They arrive as one
   attribute, `cloud.credentials_present=AWS_SECRET_ACCESS_KEY,GITHUB_TOKEN`,
@@ -413,7 +441,7 @@ Two disjoint kinds of variable, and the split is the whole design:
 Anything matching neither is ignored. An agent's environment on a developer's
 machine holds their entire shell, and a monitoring tool that shipped it
 wholesale would be the largest thing it had to defend. The allowlist is
-deliberately not exhaustive and no heuristic ever inspects a *value*: a provider
+deliberately not exhaustive and no heuristic ever inspects a _value_: a provider
 argus does not know yet is a missing attribute, never a leaked one.
 
 **The files behind the variables.** `AWS_PROFILE=prod` says which profile, not
@@ -444,7 +472,7 @@ pi it is the plugin itself, which writes its own envelope over the socket and
 only falls back to the shim. The two allowlists are pinned to each other by a
 test, so one cannot drift from the other.
 
-The *policy* is applied in the daemon: `capture.cloud_identity = false` in fleet
+The _policy_ is applied in the daemon: `capture.cloud_identity = false` in fleet
 config switches it off everywhere without reinstalling a single hook.
 
 **One channel cannot carry it.** Codex's `[otel]` export posts to the daemon
@@ -594,7 +622,7 @@ the Codex receiver token that already live there.
   names the quieter case, a plugin left over from an older argus that keeps
   its markers while speaking an older frame to the daemon.
 
-  opencode discovers plugins under `plugin/` *or* `plugins/` — both spellings
+  opencode discovers plugins under `plugin/` _or_ `plugins/` — both spellings
   are in its own documentation — so argus writes into whichever the config
   directory already has, preferring the one that already holds an `argus.ts`.
   A reinstall therefore updates the copy opencode is loading instead of
@@ -629,7 +657,7 @@ the Codex receiver token that already live there.
   fixture — three consistent artefacts describing an event opencode has never
   emitted — and it held the only mapping to a `requested` permission action, so
   no query for permission requests on opencode ever matched. `permission.updated`
-  *is* the ask, and now says so; it also carries the `callID` of the tool call
+  _is_ the ask, and now says so; it also carries the `callID` of the tool call
   it gates, so the prompt and the call join. A test walks `BUS_FORWARD` out of
   the plugin source and asserts each name reaches a real adapter arm, because
   the failure mode is silent: a forwarded event with no arm is not dropped, it
@@ -639,13 +667,14 @@ the Codex receiver token that already live there.
   pid that never passes through `tool.execute.*` — the one way to run something
   in opencode and leave no trace in the tool record — so `pty.created` and
   `pty.exited` become a `pre`/`post` `ToolUse` pair joined by the pty's id,
-  with FQDNs scanned from the program *and* its arguments. As a session note
+  with FQDNs scanned from the program _and_ its arguments. As a session note
   they would have been command executions invisible to every query about
   command executions. `message.removed` is the only notice that part of the
   transcript stopped existing, and `vcs.branch.updated` says which branch a
   session's `cwd` was on, which is what makes a file edit mean anything.
   `lsp.*`, `message.part.*`, `tui.*` and `installation.update-available` stay
   out: high-frequency, UI-only, or a poll result rather than a state change.
+
 - **Daemon** (`argus daemon`) does everything else off that critical
   path: per-tool adapter parsing → secret redaction → durable SQLite buffering
   → batched OTLP/JSON export with exponential backoff. It also drains the
@@ -678,14 +707,14 @@ the Codex receiver token that already live there.
   above. `--dry-run` prints planned changes, and the signals behind them,
   without writing anything.
 
-  | Signal       | What it reads                                                          |
-  | ------------ | ---------------------------------------------------------------------- |
-  | `config dir` | `~/.claude`, `~/.codex`, `~/.copilot`, `~/.pi/agent`, `$XDG_CONFIG_HOME/opencode` (`%APPDATA%\opencode` on Windows), honouring `COPILOT_HOME`/`CODEX_HOME` |
+  | Signal       | What it reads                                                                                                                                                                                                  |
+  | ------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+  | `config dir` | `~/.claude`, `~/.codex`, `~/.copilot`, `~/.pi/agent`, `$XDG_CONFIG_HOME/opencode` (`%APPDATA%\opencode` on Windows), honouring `COPILOT_HOME`/`CODEX_HOME`                                                     |
   | `binary`     | the tool's binary on `PATH` **and** in the per-user prefixes a hook's `PATH` often omits (`~/.local/bin`, `~/.npm-global/bin`, `%APPDATA%\npm`, scoop shims, …); on Windows the candidates come from `PATHEXT` |
-  | `npm`        | that binary's real path resolving inside `node_modules/<package>/`      |
-  | `brew`       | …or inside `Cellar/<formula>/`                                          |
+  | `npm`        | that binary's real path resolving inside `node_modules/<package>/`                                                                                                                                             |
+  | `brew`       | …or inside `Cellar/<formula>/`                                                                                                                                                                                 |
 
-  A config directory only appears once a tool has been *run*, so binary and
+  A config directory only appears once a tool has been _run_, so binary and
   package signals are what let argus wire a freshly installed agent. In the
   other direction, a binary whose name is an ordinary word (`codex`) is never
   proof by itself — it counts only when a config dir or package provenance
@@ -695,7 +724,7 @@ the Codex receiver token that already live there.
 - **Repository-level wiring** (`argus install --project <dir>`) writes
   `<dir>/.codex/hooks.json` and nothing else, so anyone running Codex inside
   that checkout is captured without a per-machine hook install. `uninstall
-  --project <dir>` reverses it, and `check --project <dir>` verifies it
+--project <dir>` reverses it, and `check --project <dir>` verifies it
   alongside the user-level wiring — a repository nothing wired is silent rather
   than broken.
 
@@ -721,7 +750,7 @@ the Codex receiver token that already live there.
 ## Machine-wide wiring (`--managed`)
 
 `argus install --managed` writes into the administrator-owned layer each tool
-reads *above* the user's own config. That layer is the only wiring an ordinary
+reads _above_ the user's own config. That layer is the only wiring an ordinary
 account cannot edit away, which is the whole point: a user-scope install is a
 file in the user's home directory, and anyone who can be captured by it can also
 delete it.
@@ -730,10 +759,10 @@ It needs root/Administrator. `--dry-run` does not — it writes nothing — but 
 says so on stderr when the real install would fail, because "the preview worked"
 must not read as "the install will".
 
-| Tool        | macOS                                          | Linux              | Windows                          |
-| ----------- | ---------------------------------------------- | ------------------ | -------------------------------- |
-| Claude Code | `/Library/Application Support/ClaudeCode/`      | `/etc/claude-code/`| `C:\Program Files\ClaudeCode\`   |
-| Codex       | `/etc/codex/`                                   | `/etc/codex/`      | `C:\ProgramData\OpenAI\Codex\`   |
+| Tool        | macOS                                      | Linux               | Windows                        |
+| ----------- | ------------------------------------------ | ------------------- | ------------------------------ |
+| Claude Code | `/Library/Application Support/ClaudeCode/` | `/etc/claude-code/` | `C:\Program Files\ClaudeCode\` |
+| Codex       | `/etc/codex/`                              | `/etc/codex/`       | `C:\ProgramData\OpenAI\Codex\` |
 
 Both were read out of the shipped binaries rather than from documentation, which
 is how the two surprises here were found: macOS Codex uses `/etc/codex` like
@@ -746,7 +775,7 @@ two pinned settings.
 
 - `disableAllHooks = false` — the switch that would otherwise turn every hook off
   from a file the user owns. Pinning it is what actually protects capture.
-- `allowManagedHooksOnly = true` — restricts execution to hooks in *this* file.
+- `allowManagedHooksOnly = true` — restricts execution to hooks in _this_ file.
   argus's are in it, so its capture is unaffected. **The user's own hooks stop
   running.** That is a real cost and a deliberate one: it is what an
   administrator deploying this layer is asking for, and `check --managed` reports
@@ -773,7 +802,7 @@ be invisible to the file-based `check`.
    value argus overwrites, and re-running the install is the documented repair
    for finding it flipped.
 
-(3) tells Codex to run managed hooks *and nothing else*, so writing it before (1)
+(3) tells Codex to run managed hooks _and nothing else_, so writing it before (1)
 exists would leave the machine running no hooks at all — for the length of an
 install, not an instant. Hence the order, which is asserted by a test.
 
@@ -783,7 +812,7 @@ is world-readable, so that would hand every account on the host a credential in
 exchange for wiring that can only be right for one of them. Also not written is a
 `feature_requirements` pin: the field exists but its inner schema is not readable
 from the shipped binaries, and a `requirements.toml` Codex rejects for an unknown
-field is a config-load failure for *every* user on the machine. That gap is
+field is a config-load failure for _every_ user on the machine. That gap is
 covered from the other side — `check` reports `[features] hooks = false` wherever
 someone sets it, machine-wide layer included.
 
@@ -792,7 +821,7 @@ file is already a per-user path with no administrator equivalent, and the
 opencode and pi extensions are loaded from the user's config directory.
 
 `argus check --managed` verifies the layer and exits `2` if anything is missing
-or flipped. Unlike `--project`, a *missing* managed artifact is BROKEN rather
+or flipped. Unlike `--project`, a _missing_ managed artifact is BROKEN rather
 than silent — passing the flag asserts the layer should be there. Reading it
 needs no privilege, so an MDM compliance script can run it as the logged-in user.
 
@@ -821,16 +850,16 @@ one.
 Mostly for tests and for running argus somewhere other than a real home
 directory; none are needed for an ordinary install.
 
-| Variable             | Effect                                                                                       |
-| -------------------- | -------------------------------------------------------------------------------------------- |
-| `ARGUS_DATA_DIR`     | Override the data directory (buffer, spool, socket, config, Codex token).                     |
-| `ARGUS_HOME`         | Override the home directory `install`/`uninstall`/`check` resolve tool config against.        |
-| `ARGUS_SOCKET`       | Exact socket path (or Windows pipe name) instead of one derived from the data directory.      |
-| `ARGUS_BIN`          | Path baked into the hook commands `install` writes, instead of the running binary's.          |
-| `ARGUS_BIN_DIRS`     | Replace the directories detection searches for tool binaries.                                 |
+| Variable             | Effect                                                                                                                                                                            |
+| -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ARGUS_DATA_DIR`     | Override the data directory (buffer, spool, socket, config, Codex token).                                                                                                         |
+| `ARGUS_HOME`         | Override the home directory `install`/`uninstall`/`check` resolve tool config against.                                                                                            |
+| `ARGUS_SOCKET`       | Exact socket path (or Windows pipe name) instead of one derived from the data directory.                                                                                          |
+| `ARGUS_BIN`          | Path baked into the hook commands `install` writes, instead of the running binary's.                                                                                              |
+| `ARGUS_BIN_DIRS`     | Replace the directories detection searches for tool binaries.                                                                                                                     |
 | `ARGUS_SYSTEM_ROOT`  | Treat this directory as the system root for `--managed`. Marked "not the real machine", so the privilege check is skipped and the round-trip tests can sweep all three platforms. |
-| `ARGUS_NO_AUTOSPAWN` | Stop the hook shim starting a daemon; it spools instead.                                      |
-| `ARGUS_RECORD_DIR`   | Dump every envelope **raw, before redaction**, for writing adapters. Off unless set; see [Privacy and redaction](#privacy-and-redaction). |
+| `ARGUS_NO_AUTOSPAWN` | Stop the hook shim starting a daemon; it spools instead.                                                                                                                          |
+| `ARGUS_RECORD_DIR`   | Dump every envelope **raw, before redaction**, for writing adapters. Off unless set; see [Privacy and redaction](#privacy-and-redaction).                                         |
 
 ## Troubleshooting
 
@@ -846,7 +875,7 @@ directory; none are needed for an ordinary install.
   agent on the endpoint's poll cycle — the pull-based counterpart to the
   daemon's `integrity` events. Checks two things (both by default; scope with
   `--hooks` / `--config`):
-  - **hooks** — each detected tool still carries the `argus` wiring, *and* that
+  - **hooks** — each detected tool still carries the `argus` wiring, _and_ that
     wiring can still fire: the binary each hook command names is resolved and
     must be executable, files argus owns must be non-empty and still contain
     the commands they were installed with, and Codex's `config.toml` `notify`
@@ -860,7 +889,7 @@ directory; none are needed for an ordinary install.
     still fires, and files the wrong events under the wrong tool — rows that
     look real. `timeout: 0` and a second hook body appended inside our own
     entry pass every earlier test too. Codex additionally records trust against
-    a hook's *current hash*, so an altered entry there is skipped until
+    a hook's _current hash_, so an altered entry there is skipped until
     re-trusted via `/hooks` — reported as `hooks altered`, remedied by
     `argus install`, which refreshes its own entries in place. The same applies
     to the bearer token in the `[otel]` block: a Codex presenting a token this
@@ -894,11 +923,11 @@ directory; none are needed for an ordinary install.
     first stops that layer too. `strictPluginOnlyCustomization` appears in no
     documentation — it is either `true` or a list of the customizations it
     covers, and only the list containing `hooks` reaches ours. All four are read
-    from the machine-wide file *and* from `managed-settings.d/*.json` beside it,
+    from the machine-wide file _and_ from `managed-settings.d/*.json` beside it,
     since a switch hidden in a drop-in counts exactly as much.
 
     The three "only machine-wide hooks run" rows are reported only where argus
-    is *not* itself in that layer. Where it is (after `install --managed`), a
+    is _not_ itself in that layer. Where it is (after `install --managed`), a
     rule keeping only managed hooks changes nothing about its capture, and
     reporting it would fire on every host the managed install has run on —
     argus's own pin reported as argus's own kill switch.
@@ -923,17 +952,18 @@ directory; none are needed for an ordinary install.
     by presence, so removing one is the only way to disable it — and there is
     nothing silent to detect, because the wiring check already sees it gone.
 
-    Two limits worth stating: `disableAllHooks` in a *repository*
+    Two limits worth stating: `disableAllHooks` in a _repository_
     `settings.json` skips every hook from every source for sessions in that
     repository, which no machine-level check can see; and a `disableAllHooks` in
     someone else's hooks file is file-scoped, disables their hooks rather than
     ours, and is deliberately not reported.
+
   - **config** — a remote policy (`[remote].url`) is loaded and effective, and
     the effective config matches it. Fails if the host isn't policy-managed, the
     policy never loaded (no/invalid cache → running on local/defaults), or a
     policy key isn't reflected. Note: because the loader is
     `defaults < local < remote`, a value the policy sets can't be weakened
-    locally — so this verifies policy is *in force* rather than spot-checking
+    locally — so this verifies policy is _in force_ rather than spot-checking
     individual keys (which a targeted edit would slip past).
     Pass **`--remote-url <URL>`** (the canonical policy URL, from your MDM) so
     the check fails if `remote.url` was **removed or repointed** to another
@@ -944,6 +974,7 @@ directory; none are needed for an ordinary install.
   repository's wiring (missing is silent), and `--managed` for the
   administrator-owned layer (missing is BROKEN — see
   [Machine-wide wiring](#machine-wide-wiring---managed)).
+
 - **Offline / collector unreachable**: events keep flowing into the SQLite
   buffer (`<data-dir>/events.db`) instead of being dropped; `buffered events`
   in `status` grows. Once the collector is reachable again, the export loop's

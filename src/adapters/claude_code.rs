@@ -31,6 +31,8 @@ fn meta_of(p: &Value) -> Meta {
         // Derived from the tool's name by `harness::parse`, for every source
         // at once — nothing in the payload says it.
         mcp_server: None,
+        // Resolved from config files in `enrich`, behind its own opt-in.
+        mcp_endpoint: None,
     }
 }
 

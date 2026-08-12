@@ -43,9 +43,37 @@ pub fn enrich(
             // same redactor pass as the input it was copied out of, or it is
             // the one field in the event nobody looked at.
             crate::filecap::capture(&mut e, capture, paths);
+            resolve_mcp_endpoint(&mut e, redactor, capture);
             crate::adapters::cap_event(redactor.scrub_event(e), capture)
         })
         .collect()
+}
+
+/// Say where the MCP server named on this event is, if it is configured
+/// anywhere this machine can see.
+///
+/// Runs here rather than in the adapters for the reason file capture does: it
+/// touches the disk, so it belongs on the blocking pool, off the parse path,
+/// and behind the same opt-in.
+///
+/// The redactor is applied by hand, and that is not belt-and-braces:
+/// [`Redactor::scrub_event`] walks the event's `kind` and nothing else, so a
+/// string put into `Meta` is a string no redaction pass will ever see.
+/// [`crate::mcpcfg`] already drops a URL's userinfo and query and blanks an
+/// argument whose name says credential; this catches what is left — a token
+/// with a recognisable shape sitting in an argument that is named nothing in
+/// particular.
+fn resolve_mcp_endpoint(e: &mut Event, redactor: &Redactor, capture: &CaptureCfg) {
+    if !capture.mcp_endpoints {
+        return;
+    }
+    let Some(server) = e.meta.mcp_server.clone() else {
+        return;
+    };
+    let Some(endpoint) = crate::mcpcfg::resolver().endpoint(&server, e.cwd.as_deref()) else {
+        return;
+    };
+    e.meta.mcp_endpoint = Some(redactor.scrub_str(&endpoint).into_owned());
 }
 
 /// Test-only throttle. Backpressure is only observable when Stage B is slower
@@ -246,5 +274,141 @@ mod tests {
     fn a_short_field_is_left_exactly_alone() {
         let out = prompt_through_pipeline("hello world", &capture(200, TruncateMode::HeadTail));
         assert_eq!(out, "hello world");
+    }
+
+    /// A `.mcp.json` in a temp project, and a server name nothing on a real
+    /// machine is called — so the user-wide config files this also consults
+    /// cannot answer, and the test does not have to move `ARGUS_HOME` out from
+    /// under whatever else is running.
+    fn project_with_server(entry: serde_json::Value) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".mcp.json"),
+            serde_json::json!({"mcpServers": {"argus-fixture-srv": entry}}).to_string(),
+        )
+        .unwrap();
+        crate::mcpcfg::resolver().clear();
+        dir
+    }
+
+    /// Through the adapter rather than hand-built, so the `mcp_server` this
+    /// resolves from is the one `harness::parse` really stamps.
+    fn mcp_call_through_pipeline(dir: &tempfile::TempDir, capture: &CaptureCfg) -> Event {
+        let envelope = Envelope {
+            cloud_identity: Default::default(),
+            source: "claude-code".into(),
+            received_at: chrono::Utc::now(),
+            truncated: false,
+            dropped: 0,
+            event: None,
+            payload: serde_json::json!({
+                "hook_event_name": "PreToolUse",
+                "session_id": "s1",
+                "cwd": dir.path().to_string_lossy(),
+                "tool_name": "mcp__argus-fixture-srv__create_issue",
+                "tool_input": {},
+            }),
+        };
+        let events = crate::adapters::parse(envelope, capture);
+        let redactor = Redactor::new(&RedactionCfg::default());
+        let paths = PathFilter::new(&capture.file_contents);
+        let mut out = enrich(events, &redactor, capture, &paths);
+        assert_eq!(
+            out[0].meta.mcp_server.as_deref(),
+            Some("argus-fixture-srv"),
+            "the fixture stopped naming a server, so it proves nothing"
+        );
+        out.remove(0)
+    }
+
+    /// Which server the call went to is in the tool's name; where that server
+    /// is only exists on disk.
+    #[test]
+    fn an_mcp_call_says_where_the_server_it_reached_is() {
+        let dir = project_with_server(serde_json::json!({"url": "https://mcp.vendor.example/sse"}));
+        let capture = CaptureCfg {
+            mcp_endpoints: true,
+            ..CaptureCfg::default()
+        };
+        assert_eq!(
+            mcp_call_through_pipeline(&dir, &capture).meta.mcp_endpoint,
+            Some("https://mcp.vendor.example/sse".into())
+        );
+    }
+
+    /// Reading the host tools' config files is collection the operator has to
+    /// ask for, like file contents — the default must leave the disk alone.
+    #[test]
+    fn no_config_file_is_read_until_the_operator_asks() {
+        let dir = project_with_server(serde_json::json!({"url": "https://mcp.vendor.example/sse"}));
+        assert_eq!(
+            mcp_call_through_pipeline(&dir, &CaptureCfg::default())
+                .meta
+                .mcp_endpoint,
+            None,
+            "an endpoint was resolved with capture.mcp_endpoints off"
+        );
+    }
+
+    /// The one field in the event the ordinary scrub cannot reach.
+    /// `scrub_event` walks `kind`, so anything put into `Meta` is redacted
+    /// here or nowhere — and a command line out of a config file is exactly
+    /// where a token that no key name announces sits.
+    #[test]
+    fn a_secret_in_a_server_command_is_redacted_even_though_it_lands_in_meta() {
+        let secret = format!("ghp_{}", "A".repeat(36));
+        let dir = project_with_server(serde_json::json!({
+            "command": "srv",
+            "args": ["--opaque", secret],
+        }));
+        let capture = CaptureCfg {
+            mcp_endpoints: true,
+            ..CaptureCfg::default()
+        };
+        let got = mcp_call_through_pipeline(&dir, &capture)
+            .meta
+            .mcp_endpoint
+            .expect("no endpoint");
+        assert!(
+            !got.contains("ghp_"),
+            "a token reached Meta unredacted: {got}"
+        );
+        assert!(got.starts_with("stdio:srv --opaque"), "{got}");
+    }
+
+    /// An event with no MCP server on it has nothing to resolve, and a call to
+    /// a server nobody configured is a gap rather than a guess.
+    #[test]
+    fn an_unconfigured_server_leaves_the_field_empty() {
+        let dir = project_with_server(serde_json::json!({"url": "https://mcp.vendor.example/sse"}));
+        let capture = CaptureCfg {
+            mcp_endpoints: true,
+            ..CaptureCfg::default()
+        };
+        let redactor = Redactor::new(&RedactionCfg::default());
+        let paths = PathFilter::new(&capture.file_contents);
+
+        let mut ordinary = Event::new(
+            "claude-code",
+            Some("s1".into()),
+            Some(dir.path().to_string_lossy().into_owned()),
+            EventKind::Prompt {
+                text: "hello".into(),
+            },
+        );
+        assert!(
+            enrich(vec![ordinary.clone()], &redactor, &capture, &paths)[0]
+                .meta
+                .mcp_endpoint
+                .is_none()
+        );
+
+        ordinary.meta.mcp_server = Some("a-server-nobody-configured".into());
+        assert!(
+            enrich(vec![ordinary], &redactor, &capture, &paths)[0]
+                .meta
+                .mcp_endpoint
+                .is_none()
+        );
     }
 }

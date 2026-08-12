@@ -91,6 +91,15 @@ pub struct CaptureCfg {
     /// rest attributable. Off, an event says a tool ran `terraform apply`;
     /// on, it says which account it ran against.
     pub cloud_identity: bool,
+    /// Resolve `mcp.server` to where that server actually is, by reading the
+    /// host tools' MCP config files. See [`crate::mcpcfg`] for which files and
+    /// what is never read out of them.
+    ///
+    /// Off by default, for the reason file capture is: it reads a file on
+    /// disk that the agent never sent, and those files sit next to
+    /// credentials. On, every MCP call and permission event also says whether
+    /// the server is a local package or somebody else's HTTPS endpoint.
+    pub mcp_endpoints: bool,
 }
 impl Default for CaptureCfg {
     fn default() -> Self {
@@ -103,6 +112,7 @@ impl Default for CaptureCfg {
             truncate_mode: TruncateMode::default(),
             file_contents: FileContentsCfg::default(),
             cloud_identity: true,
+            mcp_endpoints: false,
         }
     }
 }

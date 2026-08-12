@@ -13,6 +13,7 @@ pub mod hook;
 pub mod install;
 pub mod integrity;
 pub mod ipc;
+pub mod mcpcfg;
 pub mod paths;
 pub mod record;
 pub mod redact;

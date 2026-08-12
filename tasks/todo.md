@@ -2500,8 +2500,9 @@ commit gated on `make verify`, and none needs another to be done first.
   it was handed; the notify payload's hyphenated and snake_case turn ids each
   dropped; and, on Copilot, each call-id spelling and the turn id dropped.
 
-- [ ] **T35** — MCP server → endpoint inventory. Dependency: T32. Files:
-  `src/filecap.rs`, `src/adapters/mod.rs`, `docs/telemetry-gaps.md` (#6)
+- [x] **T35** — MCP server → endpoint inventory. Dependency: T32. Files:
+  `src/mcpcfg.rs` (new), `src/enrich.rs`, `src/event.rs`, `src/export.rs`,
+  `src/config.rs`, `src/lib.rs`, `docs/telemetry-gaps.md` (#6), `README.md`
 
   T32 says *which* server a call went to; nothing says where that server is —
   a command and args for a stdio server, a URL for an HTTP one. That mapping
@@ -2510,6 +2511,45 @@ commit gated on `make verify`, and none needs another to be done first.
   credentials in their `env` block, so reading them needs the opt-in, the
   redaction pass and the size caps that file capture already has, not a plain
   read.
+
+  Done: `Meta.mcp_endpoint`, exported as `mcp.endpoint`. One field rather than
+  two — a remote server is its sanitized URL, a local one is
+  `stdio:<command args>` — so "which agents reach off this machine" is the rows
+  that do not start `stdio:`, not a join. Resolved in `enrich` rather than at
+  install time as the gap list proposed: a snapshot taken once is wrong by the
+  time it matters, and a detail hung on a `session` event has to be joined back
+  to the call it explains.
+
+  All six config files are consulted whatever tool made the call, because a
+  server is configured once and reached from whichever agent is open; a project
+  file beats a user-wide one of the same name, and inside `~/.claude.json` the
+  per-project block `claude mcp add` writes by default beats the top-level one.
+  Parsed files are cached by path with a 15-second re-read floor, not by mtime
+  alone: `~/.claude.json` is megabytes and a live session rewrites it
+  continuously, so an mtime check per event is a multi-megabyte parse per
+  event. The cost is that a server added a moment ago is named a few seconds
+  late, which is the better side of that trade.
+
+  The credential problem is handled in three places, not one. `env` is never
+  read — not redacted, not hashed. A URL loses its userinfo and query (both are
+  authentication, not location) and an argument whose *name* says credential
+  loses its value, which is what catches an `--api-key=hunter2` that no shape
+  matches. Then the ordinary redactor is run over the result **by hand**:
+  `Redactor::scrub_event` walks the event's `kind` and nothing else, so a
+  string written into `Meta` is one no redaction pass would otherwise see.
+  Files over 4 MiB are skipped, endpoints capped at 512 bytes.
+
+  Mutants killed (29/29): each candidate file's precedence and each of the
+  three server-map spellings dropped; the `projects` block skipped; the
+  project-scoped key never looked up and then outranked by the user-wide one;
+  the size cap unenforced; TOML parsed as JSON; a remote `url` never read, an
+  argv-array command not understood, `args` dropped, an empty command accepted,
+  the `stdio:` prefix dropped; arguments unsanitized, every valued argument
+  blanked, an empty value blanked, a credential name matched case-sensitively;
+  the length cap removed and the cut moved off character boundaries; the
+  re-read floor removed; and on the wiring side, the opt-in ignored, the
+  resolver never called, `Meta` left unredacted, the call's project ignored,
+  the attribute never exported, and the flag defaulted on.
 
 ## Dependency graph (from the plan)
 
