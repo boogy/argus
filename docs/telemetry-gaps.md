@@ -9,6 +9,9 @@ what the implementation decided where it differed from the fix sketched here.
 Everything without a **Closed** note is still open; [Status](#status) lists
 both sides so a reader does not have to scan for the absence of a label.
 
+The `T<number>` in each note is the task id the commit subject starts with, so
+`git log --oneline --grep '^T29'` finds the change and its reasoning.
+
 ## Network connections
 
 ### 1. FQDN extraction only sees three top-level keys

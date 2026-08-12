@@ -84,6 +84,7 @@ builds use `json_extract(body, '$.path')` — they are equivalent.
 | `$.meta.tool_use_id`     | id of one tool call; the `pre` and `post` rows of the same call share it |
 | `$.meta.effort`          | reasoning effort asked of the model this turn (e.g. `high`) |
 | `$.meta.mcp_server`      | the MCP server a tool call or permission prompt went to, from a `mcp__<server>__<tool>` name |
+| `$.meta.mcp_endpoint`    | where that server actually is — a URL, or `stdio:<command line>` for a local one. Only when `capture.mcp_endpoints` is on |
 
 ### Per-kind fields (flattened at top level, discriminated by `$.type`)
 
@@ -230,6 +231,10 @@ WHERE server IS NOT NULL
 GROUP BY 1, 2
 ORDER BY calls DESC;
 ```
+
+With `capture.mcp_endpoints` on, add `body->>'$.meta.mcp_endpoint'` to the
+select and the grouping: the same server name can resolve to a different place
+on two machines, and that difference is the interesting one.
 
 ### Files: everything touched, by session
 

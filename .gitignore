@@ -7,6 +7,11 @@ deploy/
 .superpowers/
 docs/superpowers/
 
+# Working ledger and plans: they track how the work was sequenced, which is
+# not what a reader of this repo needs. The record that survives is the commit
+# history, where each change carries its own reasoning.
+tasks/
+
 
 # Added by cargo
 #
