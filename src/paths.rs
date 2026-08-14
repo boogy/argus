@@ -91,7 +91,11 @@ fn migrate(from: &Path, to: &Path, copy: &CopyFn) -> Migration {
         let (src, dst) = (from.join(&rel), to.join(&rel));
         let copied = dst
             .parent()
-            .map(std::fs::create_dir_all)
+            // On a clean install this is what brings the data directory into
+            // existence, ahead of the `Buffer::open` that would otherwise
+            // harden it — so it has to create it private itself, or the
+            // migrated history sits world-readable until the daemon opens it.
+            .map(create_private_dir)
             .unwrap_or(Ok(()))
             .and_then(|()| {
                 if dst.exists() {
@@ -102,6 +106,14 @@ fn migrate(from: &Path, to: &Path, copy: &CopyFn) -> Migration {
                 copy(&src, &dst)
             })
             .is_ok();
+        // `fs::copy` carries the source's mode across, and the source was
+        // written by a version that may predate any of this. The copy is the
+        // one that lives on, so give it the posture the writers use now.
+        #[cfg(unix)]
+        if copied {
+            let _ =
+                std::fs::set_permissions(&dst, std::os::unix::fs::PermissionsExt::from_mode(0o600));
+        }
         if copied && same_bytes(&src, &dst).unwrap_or(false) {
             moved += 1;
         } else {
@@ -280,6 +292,59 @@ pub fn endpoint_discriminator(dir: &Path) -> u64 {
     hash
 }
 
+/// Create `dir` and any missing parent, owner-only from the instant each level
+/// exists.
+///
+/// Every directory this crate creates holds pre-redaction payloads — the
+/// spool, the buffer, a recording directory — and the mode belongs on the
+/// creation rather than on a `set_permissions` after it. A directory made at
+/// the umask default and chmodded a moment later is world-readable for that
+/// moment, and on a shared machine a moment is all an attacker's inotify watch
+/// needs to open what lands there first.
+///
+/// The chmod is still made, for the case the mode above cannot cover: a
+/// directory that already existed keeps whatever mode it was made with, and
+/// `DirBuilder` will not touch it. Its failure is ignored, because a
+/// pre-existing directory belongs to whoever made it and a shim that cannot
+/// re-own one must still be able to spool into it.
+pub fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt as _;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)?;
+        let _ = std::fs::set_permissions(dir, std::os::unix::fs::PermissionsExt::from_mode(0o700));
+        Ok(())
+    }
+    // Non-Unix platforms don't use POSIX permission bits; ACL-based hardening
+    // is out of scope here.
+    #[cfg(not(unix))]
+    std::fs::create_dir_all(dir)
+}
+
+/// Write `body` to `path`, owner-only from the instant the file exists.
+///
+/// The file counterpart of [`create_private_dir`], and it exists for the same
+/// reason: a spooled envelope is raw, so the window between `write` and a
+/// `set_permissions` afterwards is a window in which every account on the box
+/// can read one. The mode goes on the `open` instead, which leaves no window
+/// at all — and, as above, the chmod stays for the one case a creation mode
+/// cannot reach, a file that was already there.
+pub fn write_private(path: &Path, body: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
+    let mut file = opts.open(path)?;
+    #[cfg(unix)]
+    let _ = std::fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o600));
+    file.write_all(body)?;
+    file.flush()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -445,6 +510,68 @@ mod tests {
         std::fs::create_dir_all(dir.path().join("spool")).unwrap();
         std::fs::write(dir.path().join("spool/a.json"), b"{}").unwrap();
         dir
+    }
+
+    #[cfg(unix)]
+    fn mode_of(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    /// The leaf is not the only level that holds payloads. `data_dir/spool` is
+    /// created by whoever gets there first, and a chmod applied to the path
+    /// that was asked for leaves every directory made on the way to it at the
+    /// umask default — world-readable, and holding the same raw envelopes.
+    #[cfg(unix)]
+    #[test]
+    fn every_level_of_a_private_directory_is_owner_only() {
+        let root = tempfile::tempdir().unwrap();
+        let leaf = root.path().join("argus/spool/pending");
+        create_private_dir(&leaf).unwrap();
+        for level in ["argus", "argus/spool", "argus/spool/pending"] {
+            assert_eq!(
+                mode_of(&root.path().join(level)),
+                0o700,
+                "{level} is readable by accounts that are not ours"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_private_file_is_owner_only_and_replaces_what_it_finds() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("envelope.json");
+        write_private(&path, b"{\"prompt\":\"secret\"}").unwrap();
+        assert_eq!(mode_of(&path), 0o600);
+        // Shorter than the first write: a create that did not truncate would
+        // leave the tail of the previous envelope behind it.
+        write_private(&path, b"{}").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"{}");
+        assert_eq!(mode_of(&path), 0o600);
+    }
+
+    /// A migration is the one path that writes the data directory without
+    /// going through the spool or the buffer, and `fs::copy` carries the old
+    /// mode across — so a buffer written before any of this was hardened stays
+    /// exactly as exposed as it was, at its new location.
+    #[cfg(unix)]
+    #[test]
+    fn a_migration_leaves_nothing_readable_behind_it() {
+        let from = legacy_tree();
+        let to = tempfile::tempdir().unwrap();
+        assert_eq!(
+            migrate(from.path(), to.path(), &real_copy),
+            Migration::Moved { files: 3 }
+        );
+        assert_eq!(mode_of(&to.path().join("spool")), 0o700);
+        for file in ["events.db", "events.db-wal", "spool/a.json"] {
+            assert_eq!(
+                mode_of(&to.path().join(file)),
+                0o600,
+                "{file} arrived at the new data directory still readable by everyone"
+            );
+        }
     }
 
     #[test]

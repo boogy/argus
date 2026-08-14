@@ -44,13 +44,9 @@ pub fn record(envelope: &Envelope) {
 }
 
 fn write_recording(dir: &Path, envelope: &Envelope) -> std::io::Result<()> {
-    std::fs::create_dir_all(dir)?;
-    #[cfg(unix)]
-    {
-        // Recordings are raw: prompts, tool inputs, whatever the session
-        // contained. Same posture as the spool — owner-only, both levels.
-        let _ = std::fs::set_permissions(dir, std::os::unix::fs::PermissionsExt::from_mode(0o700));
-    }
+    // Recordings are raw: prompts, tool inputs, whatever the session
+    // contained. Same posture as the spool — owner-only, both levels.
+    crate::paths::create_private_dir(dir)?;
     // One file per invocation, so a recording never overwrites another; the
     // source and label are in the name purely so the directory is readable.
     let name = format!(
@@ -61,12 +57,9 @@ fn write_recording(dir: &Path, envelope: &Envelope) -> std::io::Result<()> {
     );
     let path = dir.join(name);
     let body = serde_json::to_vec(envelope)?;
-    std::fs::write(&path, body)?;
-    #[cfg(unix)]
-    {
-        std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
-    }
-    Ok(())
+    // A recording is the one thing this crate writes that is never redacted,
+    // so it is the last file that should spend a write world-readable.
+    crate::paths::write_private(&path, &body)
 }
 
 /// The event name a payload carries, in the tool's own vocabulary.
