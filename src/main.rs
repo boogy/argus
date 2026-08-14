@@ -92,6 +92,46 @@ enum Cmd {
     },
 }
 
+/// Give the daemon's log lines somewhere to go.
+///
+/// `tracing` without a subscriber is a no-op: every `warn!` this binary emits
+/// about a dropped batch, a rejected export, a spool file it could not read
+/// was compiled in, evaluated, and thrown away. The daemon has no other voice
+/// — it has no terminal and its whole job is to run unattended — so an
+/// operator debugging "why is nothing arriving" had exactly nothing to read.
+///
+/// Only the daemon, deliberately. The hook shim shares its stderr with the
+/// host tool's own hook output, and argus is not entitled to write there.
+///
+/// stderr, so log lines never mix into anything a command prints on stdout.
+///
+/// `ARGUS_LOG` raises the level for argus's own targets only. A subscriber is
+/// process-global, so a bare max level would also turn on the HTTP stack's,
+/// and hyper logs header bytes and body frames at TRACE — which for this
+/// process means the OTLP receiver token in `export.headers` and the full
+/// serialized batch. An operator turning up argus's logs is not asking to
+/// print argus's credentials. Dependencies stay at WARN, where a genuine
+/// transport failure still speaks up.
+fn daemon_log_filter(level: tracing::Level) -> tracing_subscriber::filter::Targets {
+    tracing_subscriber::filter::Targets::new()
+        .with_target("argus", level)
+        .with_default(tracing::Level::WARN)
+}
+
+fn init_daemon_logging() {
+    let level = std::env::var("ARGUS_LOG")
+        .ok()
+        .and_then(|v| v.trim().parse::<tracing::Level>().ok())
+        .unwrap_or(tracing::Level::INFO);
+    let filter = daemon_log_filter(level);
+    use tracing_subscriber::layer::SubscriberExt as _;
+    use tracing_subscriber::util::SubscriberInitExt as _;
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
+        .init();
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
@@ -103,6 +143,7 @@ fn main() -> Result<()> {
             payload,
         } => argus::hook::run(&source, event.as_deref(), payload.as_deref()),
         Cmd::Daemon => {
+            init_daemon_logging();
             tokio::runtime::Runtime::new()?.block_on(argus::daemon::run())?;
         }
         Cmd::Install {
@@ -201,4 +242,41 @@ fn print_status() -> Result<()> {
     );
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::daemon_log_filter;
+    use tracing::Level;
+
+    /// `ARGUS_LOG=trace` is a request for argus's logs, not for the HTTP
+    /// stack's. hyper writes header bytes and body frames at TRACE, and this
+    /// process's headers carry the OTLP receiver token while its bodies carry
+    /// every exported event — so raising the level globally would print the
+    /// credential and the payload to stderr on the way to debugging something
+    /// else entirely.
+    #[test]
+    fn turning_up_argus_logging_does_not_turn_up_the_http_stack() {
+        let f = daemon_log_filter(Level::TRACE);
+        assert!(f.would_enable("argus::daemon", &Level::TRACE));
+        assert!(f.would_enable("argus::export", &Level::DEBUG));
+        for dep in ["hyper::proto::h1::io", "reqwest::connect", "h2::codec"] {
+            assert!(
+                !f.would_enable(dep, &Level::TRACE),
+                "{dep} would print at TRACE"
+            );
+            assert!(!f.would_enable(dep, &Level::DEBUG), "{dep} at DEBUG");
+            // A transport failure still has to be able to speak.
+            assert!(f.would_enable(dep, &Level::WARN), "{dep} silenced at WARN");
+        }
+    }
+
+    /// The default has to leave argus itself audible: INFO is where the
+    /// daemon says it started, bound, and shut down.
+    #[test]
+    fn the_default_level_still_carries_argus_info() {
+        let f = daemon_log_filter(Level::INFO);
+        assert!(f.would_enable("argus::daemon", &Level::INFO));
+        assert!(!f.would_enable("argus::daemon", &Level::DEBUG));
+    }
 }
