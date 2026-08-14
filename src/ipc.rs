@@ -1,6 +1,6 @@
 use crate::event::Envelope;
 use crate::paths;
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Result, anyhow};
 use interprocess::local_socket::{
     GenericFilePath, ListenerOptions, Stream, ToFsName,
     tokio::{Stream as AsyncStream, prelude::*},
@@ -107,6 +107,7 @@ pub struct Listener {
 /// daemon keeps its successor out.
 #[cfg(unix)]
 fn claim_single_instance() -> Result<std::fs::File> {
+    use anyhow::Context as _;
     use std::os::unix::fs::OpenOptionsExt as _;
     use std::os::unix::io::AsRawFd;
     let path = format!("{}.lock", paths::socket_name());
