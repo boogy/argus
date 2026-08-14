@@ -1,0 +1,88 @@
+<svg width="900" height="300" viewBox="0 0 900 300" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="argus: visibility into how AI coding agents are used — no proxy, no MITM">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="900" y2="300" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0B1220"/>
+      <stop offset="1" stop-color="#111C2E"/>
+    </linearGradient>
+    <linearGradient id="rust" x1="400" y1="146" x2="550" y2="240" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#F5A623"/>
+      <stop offset="1" stop-color="#E8743B"/>
+    </linearGradient>
+    <marker id="arrowBlue" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0 0 L6 3 L0 6 Z" fill="#58A6FF"/>
+    </marker>
+    <marker id="arrowGreen" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0 0 L6 3 L0 6 Z" fill="#3FB950"/>
+    </marker>
+    <marker id="arrowTiny" markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0 0 L4 2.5 L0 5 Z" fill="#8B98A5"/>
+    </marker>
+  </defs>
+
+  <rect x="1" y="1" width="898" height="298" rx="18" fill="url(#bg)" stroke="#22304A" stroke-width="2"/>
+
+  <!-- title -->
+  <text x="450" y="52" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="38" font-weight="700" fill="#E6EDF3">argus</text>
+  <text x="450" y="80" text-anchor="middle" font-family="ui-sans-serif, -apple-system, Segoe UI, Roboto, sans-serif" font-size="15" fill="#8B98A5">Visibility into how AI coding agents are used — no proxy, no MITM</text>
+
+  <!-- left: AI coding agents -->
+  <g>
+    <rect x="35" y="130" width="110" height="22" rx="4" fill="#152238" stroke="#58A6FF" stroke-width="1.5"/>
+    <text x="90" y="145" text-anchor="middle" font-family="ui-sans-serif, -apple-system, Segoe UI, Roboto, sans-serif" font-size="11" fill="#C9D1D9">Claude Code</text>
+
+    <rect x="35" y="156" width="110" height="22" rx="4" fill="#152238" stroke="#58A6FF" stroke-width="1.5"/>
+    <text x="90" y="171" text-anchor="middle" font-family="ui-sans-serif, -apple-system, Segoe UI, Roboto, sans-serif" font-size="11" fill="#C9D1D9">opencode</text>
+
+    <rect x="35" y="182" width="110" height="22" rx="4" fill="#152238" stroke="#58A6FF" stroke-width="1.5"/>
+    <text x="90" y="197" text-anchor="middle" font-family="ui-sans-serif, -apple-system, Segoe UI, Roboto, sans-serif" font-size="11" fill="#C9D1D9">Codex</text>
+
+    <rect x="35" y="208" width="110" height="22" rx="4" fill="#152238" stroke="#58A6FF" stroke-width="1.5"/>
+    <text x="90" y="223" text-anchor="middle" font-family="ui-sans-serif, -apple-system, Segoe UI, Roboto, sans-serif" font-size="11" fill="#C9D1D9">Copilot CLI</text>
+
+    <rect x="35" y="234" width="110" height="22" rx="4" fill="#152238" stroke="#58A6FF" stroke-width="1.5"/>
+    <text x="90" y="249" text-anchor="middle" font-family="ui-sans-serif, -apple-system, Segoe UI, Roboto, sans-serif" font-size="11" fill="#C9D1D9">pi</text>
+
+    <text x="90" y="272" text-anchor="middle" font-family="ui-sans-serif, -apple-system, Segoe UI, Roboto, sans-serif" font-size="12" fill="#8B98A5">AI coding agents</text>
+  </g>
+
+  <!-- arrow 1: agents -> argus (native hooks / plugins, no MITM) -->
+  <g>
+    <line x1="150" y1="193" x2="393" y2="193" stroke="#58A6FF" stroke-width="2" marker-end="url(#arrowBlue)"/>
+    <text x="271" y="178" text-anchor="middle" font-family="ui-sans-serif, -apple-system, Segoe UI, Roboto, sans-serif" font-size="12" fill="#8B98A5">native hooks / plugins</text>
+    <text x="271" y="212" text-anchor="middle" font-family="ui-sans-serif, -apple-system, Segoe UI, Roboto, sans-serif" font-size="11" fill="#3FB950">no MITM</text>
+  </g>
+
+  <!-- centre: argus daemon -->
+  <g>
+    <text x="475" y="132" text-anchor="middle" font-family="ui-sans-serif, -apple-system, Segoe UI, Roboto, sans-serif" font-size="13" font-weight="600" fill="#F5A623">argus daemon</text>
+    <rect x="400" y="146" width="150" height="94" rx="14" fill="#152238" stroke="url(#rust)" stroke-width="2.5"/>
+
+    <rect x="420" y="154" width="110" height="18" rx="4" fill="#1E304C" stroke="#F5A623" stroke-width="1"/>
+    <text x="475" y="166" text-anchor="middle" font-family="ui-sans-serif, -apple-system, Segoe UI, Roboto, sans-serif" font-size="10" fill="#E6EDF3">capture</text>
+
+    <line x1="475" y1="173" x2="475" y2="183" stroke="#8B98A5" stroke-width="1.5" marker-end="url(#arrowTiny)"/>
+
+    <rect x="420" y="184" width="110" height="18" rx="4" fill="#1E304C" stroke="#F5A623" stroke-width="1"/>
+    <text x="475" y="196" text-anchor="middle" font-family="ui-sans-serif, -apple-system, Segoe UI, Roboto, sans-serif" font-size="10" fill="#E6EDF3">redact</text>
+
+    <line x1="475" y1="203" x2="475" y2="213" stroke="#8B98A5" stroke-width="1.5" marker-end="url(#arrowTiny)"/>
+
+    <rect x="420" y="214" width="110" height="18" rx="4" fill="#1E304C" stroke="#F5A623" stroke-width="1"/>
+    <text x="475" y="226" text-anchor="middle" font-family="ui-sans-serif, -apple-system, Segoe UI, Roboto, sans-serif" font-size="10" fill="#E6EDF3">spool</text>
+  </g>
+
+  <!-- arrow 2: argus -> backend (OTLP / JSON) -->
+  <g>
+    <line x1="557" y1="193" x2="731" y2="193" stroke="#3FB950" stroke-width="2" marker-end="url(#arrowGreen)"/>
+    <text x="644" y="178" text-anchor="middle" font-family="ui-sans-serif, -apple-system, Segoe UI, Roboto, sans-serif" font-size="12" fill="#8B98A5">OTLP / JSON</text>
+  </g>
+
+  <!-- right: observability backend -->
+  <g>
+    <path d="M748 193 v40 a32 9 0 0 0 64 0 v-40" fill="#152238" stroke="#58A6FF" stroke-width="2"/>
+    <ellipse cx="780" cy="193" rx="32" ry="9" fill="#1E304C" stroke="#58A6FF" stroke-width="2"/>
+    <text x="780" y="258" text-anchor="middle" font-family="ui-sans-serif, -apple-system, Segoe UI, Roboto, sans-serif" font-size="12" fill="#8B98A5">observability</text>
+    <text x="780" y="274" text-anchor="middle" font-family="ui-sans-serif, -apple-system, Segoe UI, Roboto, sans-serif" font-size="12" fill="#8B98A5">backend</text>
+    <text x="780" y="289" text-anchor="middle" font-family="ui-sans-serif, -apple-system, Segoe UI, Roboto, sans-serif" font-size="9" fill="#6E7B8A">Splunk · Datadog · Grafana · OTel</text>
+  </g>
+</svg>

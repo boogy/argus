@@ -14,21 +14,21 @@ argus supports a tool when three pieces exist:
    directly for in-process plugins.
 3. **Harness** — `src/harness/<tool>.rs` with an `impl Harness`, plus one row
    in `HARNESSES` in `src/harness/mod.rs`. That single row is what makes the
-   tool detectable, installable, uninstallable, checkable *and* parseable, so
+   tool detectable, installable, uninstallable, checkable _and_ parseable, so
    a tool can no longer be half-registered.
 
 The `Harness` impl is declarative — describe the tool, don't write install
 logic:
 
 - `probes()` — the evidence that the tool is installed. Four independent kinds,
-  and a tool is detected if *any* of them fires:
+  and a tool is detected if _any_ of them fires:
   - `config_dirs` — where the tool's config lives. Each entry has an optional
     env root (`("CODEX_HOME", "")`, `("XDG_CONFIG_HOME", "opencode")`), a
     home-relative default, and an optional `platform` that scopes it to one OS.
     **Declaration order is install order**: the first entry is where argus
     writes when nothing exists on disk yet, so put the tool's own preferred
     location first and platform-specific variants after it.
-  - `binaries` — the executable names to look for, on `PATH` *and* in the
+  - `binaries` — the executable names to look for, on `PATH` _and_ in the
     per-user prefixes a hook's `PATH` routinely omits. Use `BinaryProbe::new`
     for a name only this tool would own, and `BinaryProbe::generic` for an
     ordinary word someone else might ship (`codex`); a generic name alone
@@ -37,16 +37,17 @@ logic:
     under. Detection canonicalizes the binary it found and checks whether the
     real path runs through `node_modules/<package>/` or `Cellar/<formula>/`.
     That is what corroborates a generic name, and it is what tells `status`
-    *how* the tool got there.
+    _how_ the tool got there.
 
   A config directory only exists once the tool has been **run**, so a
   binary-or-package signal is what lets argus wire a freshly-installed agent
   before its first launch. Everything detection reads from the outside world —
   including the platform — arrives through `detect::Env`, so a Windows layout
   is unit-testable from macOS; never reach for `cfg!` here.
+
 - `artifacts(d, scope)` — the files argus writes. `OwnedFile` for a file with
   our own name (overwritten on install, deleted on uninstall); `AbsentFile` for
-  a path we own the *name* of and require to stay empty (removed on install,
+  a path we own the _name_ of and require to stay empty (removed on install,
   a finding on check); `JsonHooks` to merge entries into a shared hooks JSON;
   `TomlEdit` for key-level edits into shared TOML. Generic
   `install`/`uninstall`/`check` drive all of them, and every
@@ -61,7 +62,7 @@ logic:
   where argus writes artifacts for a platform it may not be running on (the
   round-trip tests sweep all three), and because the layers genuinely differ:
   Codex spells one setting `managed_dir` on unix and `windows_managed_dir` on
-  Windows. Under `Managed`, `d.config_home` is the *system* directory — never a
+  Windows. Under `Managed`, `d.config_home` is the _system_ directory — never a
   home directory. The command runs under `sudo`, so anything derived from the
   invoking user would resolve to root's home and monitor nobody; the harness
   layer enforces this centrally by refusing any artifact that lands outside the
@@ -71,6 +72,7 @@ logic:
   the hooks, for the machine-wide scope only — a test asserts no other scope
   pins anything, since a pin in a user file would silently disable the user's
   own hooks in their own config.
+
 - `managed_dirs()` — the system directories for `Scope::Managed`, one per
   platform, relative to the system root. Defaults to empty, which means the tool
   has no machine-wide layer and `--managed` skips it.
@@ -79,7 +81,7 @@ logic:
   nothing is worse than reporting nothing, because someone believes it. Read
   these from the shipped binary, not from documentation: every one argus checks
   today was found that way, and two of them are documented nowhere. If argus's
-  own machine-wide install *sets* one of these (Claude Code's
+  own machine-wide install _sets_ one of these (Claude Code's
   `allowManagedHooksOnly`, Codex's `allow_managed_hooks_only`), suppress the
   finding where argus is itself in the managed layer — otherwise the check fires
   on every host `install --managed` has run on.
@@ -90,7 +92,7 @@ which quotes the program path for the target shell (and emits PowerShell's `&`
 call operator). An unquoted path breaks on any install location containing a
 space. It also resolves the binary through `install_path`, which prefers the
 stable `PATH` alias over `current_exe()` — the latter reports the symlink
-*target*, a path the next package upgrade deletes.
+_target_, a path the next package upgrade deletes.
 
 `check` has to be able to prove capture can happen, not just that files exist,
 so give it something falsifiable per artifact:
@@ -102,7 +104,7 @@ so give it something falsifiable per artifact:
   leave it empty for a file that reaches the daemon without invoking the
   binary. A test asserts every marker really is in the contents `install`
   writes, so a bad marker fails the suite rather than every user's `check`.
-  Set `exact` when the host tool *executes* the file — the opencode plugin,
+  Set `exact` when the host tool _executes_ the file — the opencode plugin,
   the pi extension — and `check` additionally requires it to be byte-identical
   to what this binary writes, reporting both sha256 prefixes when it is not.
   Markers alone cannot cover this: they constrain the substrings they name and
@@ -121,7 +123,7 @@ so give it something falsifiable per artifact:
 - `TomlEdit` — set `argv_tail` when the value is an argv array starting with
   the argus binary, and `check` compares the trailing arguments element-wise
   and resolves element 0. Otherwise `ours_markers` is used as a substring test.
-  Set `must_carry` when being *ours* is not enough and the value has to match
+  Set `must_carry` when being _ours_ is not enough and the value has to match
   **this** install: `ours_markers` deliberately still recognises what older
   argus versions wrote, so uninstall cleans up after them — but a config
   pointing at a port nothing listens on, or presenting a token the receiver
@@ -188,7 +190,7 @@ output is committed, so it redacts, normalizes the timestamp, and collapses
 repeats of an event into one file — re-running it on unchanged recordings
 leaves the tree clean.
 
-`tests/fixtures.rs` then asserts every fixture parses into a *recognized*
+`tests/fixtures.rs` then asserts every fixture parses into a _recognized_
 event. A fixture that falls through to `EventKind::Raw` means the adapter does
 not understand its own tool, which is exactly the drift this exists to catch.
 The fixtures in the repo today are doc-derived seeds: replacing one with a real

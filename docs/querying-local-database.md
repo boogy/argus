@@ -25,12 +25,12 @@ The database is an **export buffer, not an archive**:
   `buffer.max_events` (default 100 000) or `buffer.max_bytes` (default
   256 MiB), whichever binds first; the oldest rows are then dropped, and the
   gap is recorded as a `loss` event rather than vanishing.
-- Events lost *before* they reached the database are recorded the same way, so
+- Events lost _before_ they reached the database are recorded the same way, so
   `SELECT ... WHERE type = 'loss'` is the one query that tells you whether the
   rest of the table is the whole story. `reason` says which mechanism:
   `buffer_full` (this cap), `spool_full` (the shim deleted undelivered events
   while the daemon was down), `stdin_truncated` (a hook payload over the 8 MiB
-  cap, so the event *after* the marker is incomplete rather than missing).
+  cap, so the event _after_ the marker is incomplete rather than missing).
 - For local-only analysis, leave `export.otlp_endpoint` unset.
 
 The DB runs in WAL mode. Reading while the daemon is running is safe, but:
@@ -73,35 +73,35 @@ builds use `json_extract(body, '$.path')` — they are equivalent.
 
 ### Optional `meta` context (present when the tool exposed it)
 
-| JSON path                | Meaning                            |
-| ------------------------ | ---------------------------------- |
-| `$.meta.turn_id`         | prompt/turn id                     |
-| `$.meta.agent_id`        | subagent id                        |
-| `$.meta.agent_type`      | subagent type (e.g. `Explore`)     |
-| `$.meta.permission_mode` | e.g. `acceptEdits`                 |
-| `$.meta.model`           | model id in use                    |
-| `$.meta.transcript_path` | path to the tool's transcript file |
-| `$.meta.tool_use_id`     | id of one tool call; the `pre` and `post` rows of the same call share it |
-| `$.meta.effort`          | reasoning effort asked of the model this turn (e.g. `high`) |
-| `$.meta.mcp_server`      | the MCP server a tool call or permission prompt went to, from a `mcp__<server>__<tool>` name |
+| JSON path                | Meaning                                                                                                                   |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------- |
+| `$.meta.turn_id`         | prompt/turn id                                                                                                            |
+| `$.meta.agent_id`        | subagent id                                                                                                               |
+| `$.meta.agent_type`      | subagent type (e.g. `Explore`)                                                                                            |
+| `$.meta.permission_mode` | e.g. `acceptEdits`                                                                                                        |
+| `$.meta.model`           | model id in use                                                                                                           |
+| `$.meta.transcript_path` | path to the tool's transcript file                                                                                        |
+| `$.meta.tool_use_id`     | id of one tool call; the `pre` and `post` rows of the same call share it                                                  |
+| `$.meta.effort`          | reasoning effort asked of the model this turn (e.g. `high`)                                                               |
+| `$.meta.mcp_server`      | the MCP server a tool call or permission prompt went to, from a `mcp__<server>__<tool>` name                              |
 | `$.meta.mcp_endpoint`    | where that server actually is — a URL, or `stdio:<command line>` for a local one. Only when `capture.mcp_endpoints` is on |
 
 ### Per-kind fields (flattened at top level, discriminated by `$.type`)
 
-| `$.type`            | Fields                                                                                                                                                |
-| ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `prompt`            | `text`                                                                                                                                                |
-| `assistant_message` | `text`                                                                                                                                                |
-| `tool_use`          | `tool`, `phase` (`pre`/`post`/`error`), `input` (JSON), `output` (JSON, post only), `error` (string, failures only), `duration_ms` (post legs only), `interrupted` (present only when a human stopped the call), `files` (array), `fqdns` (array), `endpoints` (array of `scheme://host[:port]`), `output_fqdns` / `output_endpoints` (the same two read out of the *result*, post legs only, minus whatever the input already named) |
-| `skill`             | `name`, `args`                                                                                                                                        |
-| `agent`             | `agent_type`, `description`                                                                                                                           |
-| `permission`        | `tool`, `action` (`requested`/`denied`/`replied`/`updated`), `input`                                                                                  |
-| `notification`      | `message`, `category`                                                                                                                                 |
-| `compact`           | `phase`, `trigger`, `tokens_before`, `tokens_after`                                                                                                   |
-| `file_change`       | `path`, `action` (`edited`, `config_changed:<src>`, `instructions_loaded:<tier>`, `directory_added:<how>`, …)                                          |
-| `error`             | `message`, `context`                                                                                                                                  |
-| `session`           | `action` (`SessionStart`, `Stop`, `UserPromptExpansion`, `PostToolBatch`, `session.created`, `turn-complete`, …), `detail` (JSON)                      |
-| `raw`               | `payload` (unmapped upstream event, kept verbatim)                                                                                                    |
+| `$.type`            | Fields                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `prompt`            | `text`                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `assistant_message` | `text`                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `tool_use`          | `tool`, `phase` (`pre`/`post`/`error`), `input` (JSON), `output` (JSON, post only), `error` (string, failures only), `duration_ms` (post legs only), `interrupted` (present only when a human stopped the call), `files` (array), `fqdns` (array), `endpoints` (array of `scheme://host[:port]`), `output_fqdns` / `output_endpoints` (the same two read out of the _result_, post legs only, minus whatever the input already named) |
+| `skill`             | `name`, `args`                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `agent`             | `agent_type`, `description`                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `permission`        | `tool`, `action` (`requested`/`denied`/`replied`/`updated`), `input`                                                                                                                                                                                                                                                                                                                                                                  |
+| `notification`      | `message`, `category`                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `compact`           | `phase`, `trigger`, `tokens_before`, `tokens_after`                                                                                                                                                                                                                                                                                                                                                                                   |
+| `file_change`       | `path`, `action` (`edited`, `config_changed:<src>`, `instructions_loaded:<tier>`, `directory_added:<how>`, …)                                                                                                                                                                                                                                                                                                                         |
+| `error`             | `message`, `context`                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `session`           | `action` (`SessionStart`, `Stop`, `UserPromptExpansion`, `PostToolBatch`, `session.created`, `turn-complete`, …), `detail` (JSON)                                                                                                                                                                                                                                                                                                     |
+| `raw`               | `payload` (unmapped upstream event, kept verbatim)                                                                                                                                                                                                                                                                                                                                                                                    |
 
 Fields that are null/empty may be omitted entirely (`output`, `error`, `meta`,
 `detail`), so prefer `->>` (returns NULL on missing paths) over assuming presence.

@@ -23,8 +23,8 @@ only at the top level of the tool input. Anything nested is missed — MCP tools
 
 **Closed.** `extract_net_for_tool` (`src/adapters/net.rs`) walks the
 whole input — objects, arrays and nested strings alike — to a depth of 8.
-`NET_KEYS` is gone; the key names now decide only *how* a string is read, not
-*whether* it is read: a value under `command`/`cmd`/`script` is additionally
+`NET_KEYS` is gone; the key names now decide only _how_ a string is read, not
+_whether_ it is read: a value under `command`/`cmd`/`script` is additionally
 parsed as a shell command (see #2), everything else is scanned for URLs.
 
 ### 2. Scheme-required regex misses most non-HTTP egress
@@ -51,7 +51,7 @@ and proxy flags (`--index-url`, `--registry`, `--proxy`, …). `user@host:path`
 is read as an scp/rsync target.
 
 The limit: a schemeless host is only believed inside a command string whose
-*first word* is a known network binary, and a `|`/`&&`/`;` resets that word.
+_first word_ is a known network binary, and a `|`/`&&`/`;` resets that word.
 Prose is full of dotted tokens (`crates.io`, `foo.rs`, `v1.2.3`) and a
 hostname invented from prose is worse than a hostname missed — it is a
 connection the agent never made, in the one field a reviewer trusts. IPv6
@@ -74,7 +74,7 @@ written down is a fact about the scheme, not about the call, and inventing it
 would make `:443` and "the agent chose 443" indistinguishable.
 
 The path and query are dropped rather than sanitized: a presigned S3 URL
-carries its credential *in the query string*, so a field holding paths is a
+carries its credential _in the query string_, so a field holding paths is a
 field that eventually holds a secret. `fqdns` stays as it was, so every
 existing query still works; `endpoints` is the additive half.
 
@@ -93,16 +93,16 @@ separate field if needed).
 `ToolUse.output_fqdns` / `output_endpoints`, exported as `net.output_fqdns`
 and `net.output_endpoints`. Three decisions the parenthetical left open:
 
-- *Separate, not merged.* A tool result is content the agent fetched, not an
+- _Separate, not merged._ A tool result is content the agent fetched, not an
   instruction it issued. Merging would let any page the agent read put
   hostnames into the field a reviewer reads as "hosts this call connected
   to" — an alert on `net.fqdns` would then fire on every document with a link
   in it.
-- *Content, not command.* `walk_content` only scans for URLs. The
+- _Content, not command._ `walk_content` only scans for URLs. The
   command-shaped reading of the input — network binaries, `--index-url`, bare
   `host:path` — is not applied to output, because a result that quotes a
   `curl` line is quoting, not running.
-- *Only what the input did not say.* `NetRefs::minus` drops hosts the input
+- _Only what the input did not say._ `NetRefs::minus` drops hosts the input
   already named, so a result echoing back the URL it was given adds nothing.
   What survives is the redirect that was followed, the host a search result
   pointed at, the registry an error message named.
@@ -126,7 +126,7 @@ exists.
 extractor on the joined text blob.
 
 **Closed.** Both halves, plus the step that makes them work: OTLP
-attribute values are scalars, so `arguments` arrives as a *string* holding
+attribute values are scalars, so `arguments` arrives as a _string_ holding
 JSON. It is parsed back before anything reads it — a call whose arguments
 stayed a string is a call whose `file_path` was never a key, and whose nested
 `command` array was never a command. `extract_files_for_tool` then runs over
@@ -202,7 +202,7 @@ redirection targets and file-verb arguments would close most of it.
 
 Still open, and it costs more than it did: file-content capture keys off the
 same `FILE_KEYS` path spellings, so a file written through a redirect is not
-merely unnamed — it is the one write whose *contents* no capture mode can
+merely unnamed — it is the one write whose _contents_ no capture mode can
 reach, because nothing in the payload says which file to read.
 
 **Closed.** `adapters::command_files` reads two shapes out of a command
@@ -215,12 +215,12 @@ produce a command whose hosts are read but whose files are not.
 
 The verb list stays short on purpose. Most programs take a file argument, and a
 table of them would fill `files` with whichever argument happened to be spelled
-like a path, in a field read as *what this session touched*; a gap there is
+like a path, in a field read as _what this session touched_; a gap there is
 better than a guess. Descriptors (`2>&1`), `/dev/null`, globs and unexpanded
 variables are refused for the same reason — nothing downstream could open them.
 
 The second half of the cost is closed too. Each path carries whether the
-command *wrote* it, and the written ones are capture candidates in `disk` mode:
+command _wrote_ it, and the written ones are capture candidates in `disk` mode:
 a redirect target is as explicit a claim about a named file as a `Write` tool's
 `file_path`, and the include/exclude filter still decides whether it may be
 opened. A `cp` source and an `rm` argument are reported as touched but never
@@ -388,7 +388,7 @@ day pairing stops being a guess; see #11 for what that leaves open.
 - `hostname()` (`src/event.rs:142`) spawns the `hostname` process **per
   event**. Cache it in a `OnceLock`.
 
-  **Closed.** Host *and* username behind one `OnceLock`, since both were
+  **Closed.** Host _and_ username behind one `OnceLock`, since both were
   paying per event and both are constant for the life of a process.
 
 - `extract_files_for_tool` calls `out.dedup()` without sorting — only adjacent
@@ -403,7 +403,7 @@ day pairing stops being a guess; see #11 for what that leaves open.
 "replied"` but opencode also emits `"updated"` — update the comment.
 
   **Closed, the other way round.** The comment was right and the adapter was
-  wrong: `permission.updated` *is* opencode's ask — it carries the tool type,
+  wrong: `permission.updated` _is_ opencode's ask — it carries the tool type,
   the pattern matched, and the call gated. The mapping to `requested` lived in
   an arm for `permission.asked`, an event opencode has never emitted, so every
   permission request on opencode arrived labelled `updated` and a query for
