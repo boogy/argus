@@ -23,8 +23,16 @@ fn enforce_cap(dir: &std::path::Path, incoming: u64, max_bytes: u64) -> u64 {
         .flatten()
         .filter(|e| e.path().extension().is_some_and(|x| x == "jsonl"))
         .filter_map(|e| {
+            // A failed `metadata` means the file is gone — the daemon's
+            // `discard` racing this read — so leaving it out is right.
             let m = e.metadata().ok()?;
-            Some((m.modified().ok()?, e.file_name(), m.len(), e.path()))
+            // A missing *mtime* is not the same: those bytes are still on the
+            // disk. Dropping the file here would take it out of the total and
+            // out of the eviction list at once, so it would push the spool
+            // past its cap and stay there. Undated sorts oldest, which makes
+            // it the first thing evicted instead of the one thing immortal.
+            let mtime = m.modified().unwrap_or(std::time::UNIX_EPOCH);
+            Some((mtime, e.file_name(), m.len(), e.path()))
         })
         .collect();
     let mut total: u64 = files.iter().map(|f| f.2).sum();
@@ -60,14 +68,10 @@ fn enforce_cap(dir: &std::path::Path, incoming: u64, max_bytes: u64) -> u64 {
 /// spool was filling their disk.
 pub fn append(envelope: &Envelope) -> Result<()> {
     let dir = paths::spool_dir();
-    std::fs::create_dir_all(&dir)?;
-    #[cfg(unix)]
-    {
-        // Spooled envelopes hold raw, un-redacted payloads (prompts, tool
-        // inputs) until the daemon can process them; keep the directory and
-        // each file owner-only.
-        let _ = std::fs::set_permissions(&dir, std::os::unix::fs::PermissionsExt::from_mode(0o700));
-    }
+    // Spooled envelopes hold raw, un-redacted payloads (prompts, tool inputs)
+    // until the daemon can process them; keep the directory and each file
+    // owner-only, from the moment each exists.
+    paths::create_private_dir(&dir)?;
     let mut body = serde_json::to_vec(envelope)?;
     // No `.max(1)` clamp here, unlike the buffer's: the newest envelope is
     // written whatever the cap says, so `max_bytes = 0` already means "hold
@@ -87,11 +91,7 @@ pub fn append(envelope: &Envelope) -> Result<()> {
         body = serde_json::to_vec(&envelope)?;
     }
     let file = dir.join(spool_name());
-    std::fs::write(&file, body)?;
-    #[cfg(unix)]
-    {
-        std::fs::set_permissions(&file, std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
-    }
+    paths::write_private(&file, &body)?;
     Ok(())
 }
 
@@ -166,13 +166,25 @@ pub fn take(limit: usize) -> Vec<(std::path::PathBuf, Envelope)> {
         if out.len() >= limit {
             break;
         }
-        match std::fs::read_to_string(&path)
-            .map_err(anyhow::Error::from)
-            .and_then(|s| serde_json::from_str::<Envelope>(&s).map_err(Into::into))
-        {
+        // A read that fails and a parse that fails are not the same news. The
+        // second is a verdict on the file's contents and no retry will change
+        // it; the first is a verdict on the moment — a descriptor limit, a
+        // lock some scanner holds, a permission being repaired — and the
+        // envelope behind it may be perfectly good. Deleting on either would
+        // destroy real events because the machine was briefly busy.
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(e) => {
+                tracing::warn!(
+                    "could not read spool file {path:?}, leaving it for the next pass: {e}"
+                );
+                continue;
+            }
+        };
+        match serde_json::from_str::<Envelope>(&text) {
             Ok(env) => out.push((path, env)),
             Err(e) => {
-                tracing::warn!("dropping bad spool file {path:?}: {e}");
+                tracing::warn!("dropping unparseable spool file {path:?}: {e}");
                 if let Err(del_err) = std::fs::remove_file(&path) {
                     tracing::warn!("failed to delete corrupt spool file {path:?}: {del_err}");
                 }
@@ -477,6 +489,40 @@ mod tests {
             .permissions()
             .mode();
         assert_eq!(mode & 0o777, 0o600, "spool file must be owner-only");
+    }
+
+    /// The spool exists so a daemon outage costs nothing, which makes `take`
+    /// the last place that should be destroying events on a guess. A file it
+    /// could not open has said nothing about its contents.
+    #[cfg(unix)]
+    #[test]
+    fn a_spool_file_that_cannot_be_read_is_kept_for_the_next_pass() {
+        use std::os::unix::fs::PermissionsExt;
+        let _dir = setup();
+        let dir = crate::paths::spool_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("unreadable.jsonl");
+        append(&env(7)).unwrap();
+        std::fs::rename(
+            std::fs::read_dir(&dir)
+                .unwrap()
+                .flatten()
+                .map(|e| e.path())
+                .next()
+                .unwrap(),
+            &path,
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read_to_string(&path).is_ok() {
+            // root ignores the mode, so there is no failed read to observe.
+            return;
+        }
+        assert!(take(usize::MAX).is_empty(), "an unreadable file was parsed");
+        assert!(
+            path.exists(),
+            "a readable-tomorrow event was destroyed because today's open failed"
+        );
     }
 
     #[test]
