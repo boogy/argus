@@ -45,9 +45,11 @@ logic:
   including the platform — arrives through `detect::Env`, so a Windows layout
   is unit-testable from macOS; never reach for `cfg!` here.
 - `artifacts(d, scope)` — the files argus writes. `OwnedFile` for a file with
-  our own name (overwritten on install, deleted on uninstall); `JsonHooks` to
-  merge entries into a shared hooks JSON; `TomlEdit` for key-level edits into
-  shared TOML. Generic `install`/`uninstall`/`check` drive all three, and every
+  our own name (overwritten on install, deleted on uninstall); `AbsentFile` for
+  a path we own the *name* of and require to stay empty (removed on install,
+  a finding on check); `JsonHooks` to merge entries into a shared hooks JSON;
+  `TomlEdit` for key-level edits into shared TOML. Generic
+  `install`/`uninstall`/`check` drive all of them, and every
   `JsonHooks` entry is stamped `"_argus": true` so uninstall removes exactly
   what we added.
 
@@ -110,6 +112,12 @@ so give it something falsifiable per artifact:
   `hooks/argus.json` takes a `disableAllHooks` beside argus's hooks — and
   falsify those through their contents instead. `exact` also catches a plugin
   left behind by an older argus, which keeps every marker.
+- `AbsentFile` — the digest above speaks only for the file it hashes, so if the
+  host tool can load the same artifact from more than one path, name the paths
+  `install` did not pick. opencode globs `{plugin,plugins}/*.{ts,js}` and loads
+  **both** spellings: without this, a copy of the plugin in the other one runs
+  inside the agent's process while `check` verifies the copy in the first and
+  reports the tool healthy.
 - `TomlEdit` — set `argv_tail` when the value is an argv array starting with
   the argus binary, and `check` compares the trailing arguments element-wise
   and resolves element 0. Otherwise `ours_markers` is used as a substring test.

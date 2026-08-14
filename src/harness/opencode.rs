@@ -66,7 +66,25 @@ fn plugin_dir(config_home: &std::path::Path) -> std::path::PathBuf {
             return config_home.join(name);
         }
     }
+    // Last resort, and the only branch that can pick a name something else is
+    // already using: a *file* called `plugin` is not a directory the install
+    // can write into, and the other spelling costs nothing.
+    if config_home.join("plugin").exists() {
+        return config_home.join("plugins");
+    }
     config_home.join("plugin")
+}
+
+/// The spelling `plugin_dir` did not pick. opencode globs
+/// `{plugin,plugins}/*.{ts,js}` — both spellings, one process — so a copy left
+/// here is a copy it loads.
+fn other_plugin_dir(config_home: &std::path::Path, chosen: &std::path::Path) -> std::path::PathBuf {
+    let plural = config_home.join("plugins");
+    if chosen == plural {
+        config_home.join("plugin")
+    } else {
+        plural
+    }
 }
 
 /// XDG on Unix, `%APPDATA%` on Windows. Declaration order is install order:
@@ -115,18 +133,29 @@ impl Harness for OpenCode {
         if scope == Scope::Project {
             return Vec::new();
         }
-        vec![Artifact::OwnedFile {
-            path: plugin_dir(&d.config_home).join("argus.ts"),
-            contents: Cow::Owned(shim_source()),
-            markers: markers(),
-            // The plugin reaches the daemon over the socket and resolves the
-            // fallback binary itself at runtime, so there is no baked-in path
-            // for `check` to resolve.
-            commands: Vec::new(),
-            // Code the runtime loads into its own process: anything on disk
-            // that this binary did not write is a finding.
-            exact: true,
-        }]
+        let dir = plugin_dir(&d.config_home);
+        let other = other_plugin_dir(&d.config_home, &dir);
+        vec![
+            Artifact::OwnedFile {
+                path: dir.join("argus.ts"),
+                contents: Cow::Owned(shim_source()),
+                markers: markers(),
+                // The plugin reaches the daemon over the socket and resolves
+                // the fallback binary itself at runtime, so there is no
+                // baked-in path for `check` to resolve.
+                commands: Vec::new(),
+                // Code the runtime loads into its own process: anything on
+                // disk that this binary did not write is a finding.
+                exact: true,
+            },
+            // Exactly one copy, and it is the one above. Both spellings are
+            // globbed by opencode, so a second `argus.ts` here would load and
+            // run beside the verified one while every check above still
+            // passed — the digest only speaks for the file it hashes.
+            Artifact::AbsentFile {
+                path: other.join("argus.ts"),
+            },
+        ]
     }
 
     fn parse(&self, env: &Envelope, cfg: &CaptureCfg) -> Vec<Event> {

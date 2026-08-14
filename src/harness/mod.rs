@@ -230,6 +230,19 @@ pub enum Artifact {
         /// which is what actually decides whether events arrive.
         exact: bool,
     },
+    /// A path argus owns the *name* of and requires to be empty: install
+    /// removes whatever is there, `check` reports it as a finding, uninstall
+    /// removes it again.
+    ///
+    /// This exists because "the file we wrote is intact" is not the same
+    /// question as "ours is the only copy the tool loads". opencode globs
+    /// `{plugin,plugins}/*.{ts,js}` and loads **both** spellings, so a second
+    /// `argus.ts` in the spelling `install` did not pick runs inside the
+    /// agent's process alongside the one being verified — every marker and the
+    /// digest still hold for the checked copy, and the finding is `ok`. The
+    /// duplicate is named here so it is deleted on install and flagged on
+    /// check rather than left to run unlooked-at.
+    AbsentFile { path: PathBuf },
     /// Key-level edits into a shared TOML file via toml_edit, never clobbering.
     TomlEdit {
         path: PathBuf,
@@ -655,6 +668,7 @@ pub fn install(home: &Path, dry_run: bool) -> Result<()> {
     if !dry_run && let Err(e) = crate::adapters::codex::shared_token() {
         eprintln!("warning: could not create the Codex receiver token: {e}");
     }
+    let mut failures = Vec::new();
     for d in detect(home) {
         let Some(h) = harness_by_id(d.id) else {
             continue;
@@ -671,11 +685,14 @@ pub fn install(home: &Path, dry_run: bool) -> Result<()> {
         // under `config_home`. What matters is that the writers are the *only*
         // thing that creates it, so a dry run — which returns before all of
         // them — still leaves the disk exactly as it found it.
-        for artifact in h.artifacts(&d, Scope::User) {
-            apply(&artifact, h.display_name(), dry_run)?;
-        }
+        apply_all(
+            &h.artifacts(&d, Scope::User),
+            h.display_name(),
+            dry_run,
+            &mut failures,
+        );
     }
-    Ok(())
+    into_result(failures)
 }
 
 /// Where a harness keeps its config *inside a repository*. Detection has no
@@ -703,19 +720,22 @@ fn project_detection(h: &dyn Harness, root: &Path) -> Option<Detection> {
 /// can push to the repository can also remove what this writes.
 pub fn install_project(root: &Path, dry_run: bool) -> Result<()> {
     let mut wired = 0;
+    let mut failures = Vec::new();
     for h in HARNESSES {
         let Some(d) = project_detection(*h, root) else {
             continue;
         };
-        for artifact in h.artifacts(&d, Scope::Project) {
-            apply(&artifact, h.display_name(), dry_run)?;
-            wired += 1;
-        }
+        wired += apply_all(
+            &h.artifacts(&d, Scope::Project),
+            h.display_name(),
+            dry_run,
+            &mut failures,
+        );
     }
-    if wired == 0 {
+    if wired == 0 && failures.is_empty() {
         println!("no tool supports repository-level wiring yet");
     }
-    Ok(())
+    into_result(failures)
 }
 
 /// Exact inverse of [`install_project`].
@@ -824,6 +844,7 @@ fn install_managed_in(
     dry_run: bool,
 ) -> Result<()> {
     let mut wired = 0;
+    let mut failures = Vec::new();
     for h in harnesses {
         let Some(d) = managed_detection(*h, root, platform) else {
             continue;
@@ -831,21 +852,20 @@ fn install_managed_in(
         let artifacts = h.artifacts(&d, Scope::Managed(platform));
         // Checked for the whole harness before a single one is applied: a
         // refusal half-way through would leave the machine in a state neither
-        // install nor uninstall describes.
+        // install nor uninstall describes. Still a hard `bail!` rather than a
+        // contained failure — a harness answering with user-scope paths under
+        // `sudo` is a bug in argus, not a condition of the machine.
         for a in &artifacts {
             if let Some(why) = escapes_managed_root(root, a) {
                 anyhow::bail!("{}: refusing to write it — {why}", h.id());
             }
         }
-        for a in &artifacts {
-            apply(a, h.display_name(), dry_run)?;
-            wired += 1;
-        }
+        wired += apply_all(&artifacts, h.display_name(), dry_run, &mut failures);
     }
-    if wired == 0 {
+    if wired == 0 && failures.is_empty() {
         println!("no tool supports machine-wide wiring on {platform:?} yet");
     }
-    Ok(())
+    into_result(failures)
 }
 
 /// Exact inverse of [`install_managed`].
@@ -987,6 +1007,7 @@ fn artifact_path(a: &Artifact) -> &Path {
     match a {
         Artifact::JsonHooks { path, .. }
         | Artifact::OwnedFile { path, .. }
+        | Artifact::AbsentFile { path }
         | Artifact::TomlEdit { path, .. } => path,
     }
 }
@@ -1046,8 +1067,23 @@ fn apply(artifact: &Artifact, display: &str, dry_run: bool) -> Result<()> {
             }
             // Overwrite unconditionally: the file is versioned with the
             // binary, so a stale copy from an older install must be replaced.
+            // `clear_squatter` first, because a *directory* on the path is not
+            // something the rename can overwrite — see its doc comment.
+            clear_squatter(path)?;
             write_atomic(path, contents.as_ref().as_bytes())?;
             println!("installed {display} at {}", path.display());
+        }
+        Artifact::AbsentFile { path } => {
+            if !occupied(path) {
+                return Ok(());
+            }
+            if dry_run {
+                println!("[dry-run] would remove {}", path.display());
+                return Ok(());
+            }
+            clear_squatter(path)?;
+            let _ = std::fs::remove_file(path);
+            println!("removed a duplicate {display} at {}", path.display());
         }
         Artifact::TomlEdit { path, edits } => {
             let mut doc = std::fs::read_to_string(path)
@@ -1071,6 +1107,46 @@ fn apply(artifact: &Artifact, display: &str, dry_run: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Apply a harness's artifacts, carrying on past one that fails.
+///
+/// The install loop used to propagate the first error, which made every
+/// harness a single point of failure for the ones declared after it: one
+/// unwritable path under `~/.config/opencode` and Codex, Copilot and pi were
+/// never even attempted, while the exit code said only "install failed" and
+/// named one file. Failures accumulate in `failures` instead; the caller turns
+/// a non-empty list into the error, so the exit code still reports the
+/// install as incomplete — after everything that *could* be wired is.
+fn apply_all(
+    artifacts: &[Artifact],
+    display: &str,
+    dry_run: bool,
+    failures: &mut Vec<String>,
+) -> usize {
+    let mut applied = 0;
+    for a in artifacts {
+        match apply(a, display, dry_run) {
+            Ok(()) => applied += 1,
+            Err(e) => {
+                let what = format!("{display}: {} — {e}", artifact_path(a).display());
+                eprintln!("warning: {what}");
+                failures.push(what);
+            }
+        }
+    }
+    applied
+}
+
+fn into_result(failures: Vec<String>) -> Result<()> {
+    if failures.is_empty() {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "{} artifact(s) could not be written; everything else was:\n  {}",
+        failures.len(),
+        failures.join("\n  ")
+    )
 }
 
 fn hook_entry(shape: HookShape, cmd: &str, ev: &HookEvent) -> Value {
@@ -1153,7 +1229,7 @@ fn revert(artifact: &Artifact) -> Result<()> {
             }
             write_json(path, &doc)?;
         }
-        Artifact::OwnedFile { path, .. } => {
+        Artifact::OwnedFile { path, .. } | Artifact::AbsentFile { path } => {
             let _ = std::fs::remove_file(path);
         }
         Artifact::TomlEdit { path, edits } => {
@@ -1367,6 +1443,18 @@ fn verify(artifact: &Artifact) -> std::result::Result<(), String> {
             }
             Ok(())
         }
+        // A copy the tool loads and this check does not: the digest above
+        // proves only that the file it was pointed at is ours.
+        Artifact::AbsentFile { path } => {
+            if occupied(path) {
+                return Err(format!(
+                    "{} is a second copy of a file argus owns — the host tool loads it \
+                     alongside the checked one, unverified; re-run `argus install`",
+                    path.display()
+                ));
+            }
+            Ok(())
+        }
         Artifact::TomlEdit { path, edits } => {
             if !path.exists() {
                 return Err(format!("{} missing", path.display()));
@@ -1482,11 +1570,50 @@ fn write_json(path: &Path, doc: &Value) -> Result<()> {
 /// The temporary is a sibling so the rename stays within one filesystem, and
 /// the existing file's mode is carried over — several of these are `0600` and
 /// silently widening them would be a worse bug than the one being fixed.
+/// Is there anything at all at `path` — including a dangling symlink, which
+/// `Path::exists` follows and therefore reports as absent while `rename` and
+/// `create_dir_all` both still trip over it.
+fn occupied(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok()
+}
+
+/// Remove anything at `path` that is not a regular file, so the write that
+/// follows can proceed.
+///
+/// The names argus installs under are argus's: `argus.ts`, `argus.json`. What
+/// makes this more than tidiness is that a *directory* is the one thing
+/// `write_atomic`'s rename cannot replace — `mkdir ~/.config/opencode/plugin/
+/// argus.ts` is a no-privilege, no-tooling way for a user to make `install`
+/// fail on that path. Combined with the old behaviour of propagating the first
+/// error out of the install loop, that single `mkdir` also left Codex, Copilot
+/// and pi — every harness declared after opencode — completely unwired.
+///
+/// A symlink is cleared for a quieter reason: `write_atomic` copies the mode
+/// of whatever `path` resolves to, so a link pointing at a `0600` file
+/// elsewhere silently narrows the plugin's permissions.
+fn clear_squatter(path: &Path) -> Result<()> {
+    let Ok(md) = std::fs::symlink_metadata(path) else {
+        return Ok(());
+    };
+    if md.is_file() {
+        return Ok(());
+    }
+    if md.is_dir() {
+        std::fs::remove_dir_all(path)?;
+    } else {
+        std::fs::remove_file(path)?;
+    }
+    Ok(())
+}
+
 fn write_atomic(path: &Path, contents: &[u8]) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let tmp = path.with_extension("argus-tmp");
+    // The temporary is a predictable sibling, so it is squattable in exactly
+    // the same way the destination is.
+    clear_squatter(&tmp)?;
     std::fs::write(&tmp, contents)?;
     #[cfg(unix)]
     if let Ok(md) = std::fs::metadata(path) {
