@@ -73,7 +73,7 @@ argus captures everything each surface offers.
 | Skill/command invocations     |             Y              | Y (command.executed)  |            —            |             —             |          —           |
 | Slash-command expansion       |     Y (expanded text)      |           —           |            —            |             —             |          —           |
 | Subagent runs                 |       Y (start+stop)       |           —           |            Y            |      Y (start+stop)       |          —           |
-| Permission requests           |     Y (request+denied)     |   Y (request+reply)   |            Y            |             Y             |     — (no event)     |
+| Permission requests           |     Y (request+denied)     |   Y (request+reply)   |  Y (decision recorded)  |             Y             |     — (no event)     |
 | Compaction                    | Y (pre+post, token counts) | Y (session.compacted) |            Y            |          Y (pre)          | Y (pre+post, before) |
 | Errors                        |      Y (StopFailure)       |   Y (session.error)   |            —            |     Y (errorOccurred)     |  Y (turn_end stop)   |
 | Config/instructions changes   |             Y              |           —           |            —            |             —             |          —           |
