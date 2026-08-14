@@ -18,16 +18,9 @@ any observability backend (Splunk, Datadog, Grafana, an OTel Collector, ...).
 
 Supports **Claude Code**, **opencode**, **OpenAI Codex**, **GitHub Copilot CLI**, and **pi**.
 
-```mermaid
-flowchart LR
-    A["Coding agents<br/>(Claude Code / opencode / Codex / Copilot CLI / pi)"] --> B["Hook / plugin surface"]
-    B --> C["argus hook shim<br/>(&lt;250ms, no MITM)"]
-    C --> D["argus daemon"]
-    D --> E["Redact"]
-    E --> F["SQLite buffer<br/>+ spool fallback"]
-    F --> G["OTLP/JSON export"]
-    G --> H["Observability backend"]
-```
+<p align="center">
+  <img src="assets/pipeline.svg" alt="argus pipeline: coding agents emit through each tool's hook or plugin surface into the argus hook shim, which has a 250 ms budget and is the only part on the coding tool's critical path; it hands off to the argus daemon, which captures, redacts, buffers to SQLite with a spool fallback, and exports batched OTLP/JSON to an observability backend" width="900">
+</p>
 
 The hook shim is the only thing on the host tool's critical path (a 250ms
 deadline, falling back to an on-disk spool if the daemon isn't reachable); the
