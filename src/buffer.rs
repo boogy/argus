@@ -31,6 +31,14 @@ pub struct Buffer {
     /// one record per flush costs a marker if the process dies in between,
     /// which is the cheaper of the two failures.
     dropped: std::sync::atomic::AtomicU64,
+    /// Rows that were on disk, could not be parsed, and were deleted by the
+    /// `ack` that settled the batch around them.
+    ///
+    /// Counted apart from `dropped` because it is a different failure with a
+    /// different fix: the cap destroying old events is capacity, an unreadable
+    /// row is corruption, and reporting the second as the first sends an
+    /// operator to raise a limit that was never the problem.
+    unreadable: std::sync::atomic::AtomicU64,
 }
 
 /// Counts trim queries. The trim is the expensive part of a write, and a
@@ -47,14 +55,7 @@ impl Buffer {
         // the most recent event.
         let max_events = max_events.max(1);
         let data_dir = crate::paths::data_dir();
-        std::fs::create_dir_all(&data_dir)?;
-        #[cfg(unix)]
-        {
-            let _ = std::fs::set_permissions(
-                &data_dir,
-                std::os::unix::fs::PermissionsExt::from_mode(0o700),
-            );
-        }
+        crate::paths::create_private_dir(&data_dir)?;
         let conn = Connection::open(crate::paths::db_path())?;
         // Best-effort: on-disk events may hold pre-redaction data, so keep
         // the DB file readable only by its owner. A perm error here must not
@@ -83,6 +84,7 @@ impl Buffer {
             max_bytes: std::sync::atomic::AtomicU64::new(cfg.max_bytes.max(1)),
             bytes: std::sync::atomic::AtomicU64::new(bytes),
             dropped: std::sync::atomic::AtomicU64::new(0),
+            unreadable: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
@@ -150,11 +152,28 @@ impl Buffer {
             .execute([self.max_events.load(Relaxed) as i64])?
         };
         let max_bytes = self.max_bytes.load(Relaxed);
-        if self.bytes.fetch_add(added, Relaxed) + added > max_bytes {
+        let trimmed_bytes = if self.bytes.fetch_add(added, Relaxed) + added > max_bytes {
             trimmed += trim_to_bytes(&tx, max_bytes)?;
-            self.bytes.store(total_bytes(&tx)?, Relaxed);
-        }
+            true
+        } else {
+            false
+        };
         tx.commit()?;
+        // Recounted only once the trim is durable. Read inside the transaction
+        // it would describe a database that does not exist yet, and a commit
+        // that then fails rolls the trim back while leaving the smaller total
+        // behind — the one direction this counter may not drift, since an
+        // underestimate stops the byte cap from binding at all.
+        if trimmed_bytes {
+            match total_bytes(&conn) {
+                Ok(n) => self.bytes.store(n, Relaxed),
+                // The overestimate already in place is the safe answer: it
+                // costs an early trim, which recounts exactly.
+                Err(e) => tracing::warn!(
+                    "byte recount after a trim failed, keeping the running total: {e}"
+                ),
+            }
+        }
         Ok(trimmed)
     }
 
@@ -171,10 +190,46 @@ impl Buffer {
     /// gap it already describes. Losses from a concurrent writer are untouched
     /// and roll into the next flush.
     pub fn flush_loss_record(&self) -> Result<bool> {
-        let Some(loss) = self.loss_record() else {
+        use std::sync::atomic::Ordering::Relaxed;
+        let dropped = self.dropped.swap(0, Relaxed);
+        let unreadable = self.unreadable.swap(0, Relaxed);
+        let mut records = Vec::new();
+        if dropped > 0 {
+            records.push(self.loss_record(
+                "buffer_full",
+                dropped,
+                format!(
+                    "local buffer at capacity ({} events / {} bytes); oldest dropped \
+                     before export",
+                    self.max_events.load(Relaxed),
+                    self.max_bytes.load(Relaxed)
+                ),
+            ));
+        }
+        if unreadable > 0 {
+            records.push(
+                self.loss_record(
+                    "buffer_unreadable",
+                    unreadable,
+                    "buffered rows could not be parsed and were discarded with the batch \
+                 around them"
+                        .into(),
+                ),
+            );
+        }
+        if records.is_empty() {
             return Ok(false);
-        };
-        self.append(std::slice::from_ref(&loss))?;
+        }
+        if let Err(e) = self.append(&records) {
+            // The counter *is* the report, and taking it is what makes the
+            // report owed. Letting it go here turns a gap that was about to be
+            // stated into one nobody can see — and this write fails precisely
+            // when the buffer is already in trouble, which is when the marker
+            // is worth the most. Handed back for the next flush to carry.
+            self.dropped.fetch_add(dropped, Relaxed);
+            self.unreadable.fetch_add(unreadable, Relaxed);
+            return Err(e);
+        }
         Ok(true)
     }
 
@@ -186,27 +241,19 @@ impl Buffer {
         self.dropped.swap(0, std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// Turn any outstanding losses into an event, so a gap in the stream
-    /// arrives at the collector as a statement rather than as an absence.
-    fn loss_record(&self) -> Option<Event> {
-        let count = self.take_dropped();
-        (count > 0).then(|| {
-            Event::new(
-                "argus",
-                None,
-                None,
-                crate::event::EventKind::Loss {
-                    reason: "buffer_full".into(),
-                    count,
-                    detail: format!(
-                        "local buffer at capacity ({} events / {} bytes); oldest dropped \
-                         before export",
-                        self.max_events.load(std::sync::atomic::Ordering::Relaxed),
-                        self.max_bytes.load(std::sync::atomic::Ordering::Relaxed)
-                    ),
-                },
-            )
-        })
+    /// Turn outstanding losses into an event, so a gap in the stream arrives at
+    /// the collector as a statement rather than as an absence.
+    fn loss_record(&self, reason: &str, count: u64, detail: String) -> Event {
+        Event::new(
+            "argus",
+            None,
+            None,
+            crate::event::EventKind::Loss {
+                reason: reason.into(),
+                count,
+                detail,
+            },
+        )
     }
 
     /// The oldest events, bounded by both a row count and a byte budget.
@@ -269,11 +316,27 @@ impl Buffer {
         Ok(out)
     }
 
-    pub fn ack(&self, up_to_seq: i64) -> Result<()> {
-        self.conn
+    /// Settle everything up to `up_to_seq`, of which `delivered` rows actually
+    /// reached the exporter.
+    ///
+    /// The two numbers differ when `peek_batch` could not parse a row: the
+    /// delete is a range and takes the unparsed rows out with the batch that
+    /// straddled them. Deleting them is right — a row that cannot be read will
+    /// not become readable, and leaving it wedges the queue behind it — but it
+    /// is the one loss nothing else counts, so it is counted here. `seq` only
+    /// increases, so a row written after the peek can never fall inside the
+    /// range and be miscounted as one of them.
+    pub fn ack(&self, up_to_seq: i64, delivered: usize) -> Result<()> {
+        let deleted = self
+            .conn
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .execute("DELETE FROM events WHERE seq <= ?1", [up_to_seq])?;
+        let unread = deleted.saturating_sub(delivered) as u64;
+        if unread > 0 {
+            self.unreadable
+                .fetch_add(unread, std::sync::atomic::Ordering::Relaxed);
+        }
         Ok(())
     }
 
@@ -375,7 +438,7 @@ mod tests {
         let batch = b.peek_batch(3, 0).unwrap();
         assert_eq!(batch.len(), 3);
         assert_eq!(b.len().unwrap(), 5, "peek must not delete");
-        b.ack(batch.last().unwrap().0).unwrap();
+        b.ack(batch.last().unwrap().0, batch.len()).unwrap();
         assert_eq!(b.len().unwrap(), 2);
     }
 
@@ -500,6 +563,195 @@ mod tests {
         assert!(
             !b.flush_loss_record().unwrap(),
             "nothing was lost to report"
+        );
+    }
+
+    /// The count *is* the report. Taking it and then failing to write the
+    /// marker turns a reported gap into a silent one — and the write fails
+    /// exactly when the buffer is already in trouble, which is when the marker
+    /// is worth the most.
+    #[test]
+    fn a_loss_count_survives_a_failed_marker_write() {
+        let _dir = tmp();
+        let b = Buffer::open(&rows(1)).unwrap();
+        b.push(&ev(0)).unwrap();
+        b.push(&ev(1)).unwrap();
+
+        {
+            let conn = b.conn.lock().unwrap_or_else(|e| e.into_inner());
+            conn.execute_batch("PRAGMA query_only = ON").unwrap();
+        }
+        assert!(
+            b.flush_loss_record().is_err(),
+            "a read-only database accepted a write"
+        );
+        {
+            let conn = b.conn.lock().unwrap_or_else(|e| e.into_inner());
+            conn.execute_batch("PRAGMA query_only = OFF").unwrap();
+        }
+
+        assert!(
+            b.flush_loss_record().unwrap(),
+            "the gap went unreported once its marker failed to be written"
+        );
+        let loss = b
+            .peek_batch(10, 0)
+            .unwrap()
+            .into_iter()
+            .map(|(_, e)| e)
+            .find(|e| matches!(e.kind, EventKind::Loss { .. }))
+            .expect("no loss record was queued");
+        let EventKind::Loss { count, .. } = loss.kind else {
+            unreachable!()
+        };
+        assert_eq!(count, 1, "the count came back wrong");
+    }
+
+    /// A row `peek_batch` could not parse is deleted by the `ack` that settles
+    /// the batch around it. It was never exported and nothing else counts it,
+    /// so without this the gap is the one kind the buffer cannot see: a
+    /// disappearance with no record and no number.
+    #[test]
+    fn a_row_that_could_not_be_read_is_still_reported_as_lost() {
+        let _dir = tmp();
+        let b = Buffer::open(&rows(1000)).unwrap();
+        b.push(&ev(1)).unwrap();
+        {
+            let conn = b.conn.lock().unwrap_or_else(|e| e.into_inner());
+            conn.execute("INSERT INTO events (body) VALUES ('not json')", [])
+                .unwrap();
+        }
+        b.push(&ev(2)).unwrap();
+
+        let batch = b.peek_batch(10, 0).unwrap();
+        assert_eq!(batch.len(), 2, "corrupt row skipped, valid rows returned");
+        let last = batch.last().unwrap().0;
+        b.ack(last, batch.len()).unwrap();
+        assert_eq!(b.len().unwrap(), 0, "the range delete left rows behind");
+
+        assert!(
+            b.flush_loss_record().unwrap(),
+            "the corrupt row went unsaid"
+        );
+        let loss = b
+            .peek_batch(10, 0)
+            .unwrap()
+            .into_iter()
+            .map(|(_, e)| e)
+            .find(|e| matches!(e.kind, EventKind::Loss { .. }))
+            .expect("no loss record was queued");
+        let EventKind::Loss { count, reason, .. } = loss.kind else {
+            unreachable!()
+        };
+        assert_eq!(count, 1);
+        assert_eq!(
+            reason, "buffer_unreadable",
+            "an unreadable row is not the capacity cap and must not read as it"
+        );
+    }
+
+    /// An ack that deletes exactly what was delivered has lost nothing, and
+    /// saying otherwise would put a permanent false alarm on every healthy
+    /// export cycle.
+    #[test]
+    fn an_ordinary_ack_reports_no_loss() {
+        let _dir = tmp();
+        let b = Buffer::open(&rows(1000)).unwrap();
+        for i in 0..5 {
+            b.push(&ev(i)).unwrap();
+        }
+        let batch = b.peek_batch(10, 0).unwrap();
+        b.ack(batch.last().unwrap().0, batch.len()).unwrap();
+        assert!(!b.flush_loss_record().unwrap(), "nothing was lost");
+    }
+
+    /// The running byte total may drift, but only upward — an overestimate
+    /// costs a recount, an underestimate silently overshoots the cap and the
+    /// buffer stops being bounded by the thing it is configured by.
+    ///
+    /// A transaction that fails to commit rolls its trim back with everything
+    /// else, so a total read from *inside* it describes a database state that
+    /// never existed — and it is always the smaller one, because the read
+    /// happens after the trim.
+    ///
+    /// Forcing a commit to fail takes a deferred foreign key: SQLite checks
+    /// those at `COMMIT` and nowhere earlier, so every statement in the
+    /// transaction succeeds and the commit is what refuses.
+    #[test]
+    fn a_failed_commit_does_not_drift_the_byte_total_downward() {
+        use std::sync::atomic::Ordering::Relaxed;
+        let _dir = tmp();
+        std::fs::create_dir_all(crate::paths::data_dir()).unwrap();
+        // The only failure SQLite lets a test inject at COMMIT rather than at
+        // the statement: a deferred foreign key. Every row `append` writes
+        // points at `parents(999)`, so the commit refuses the moment that
+        // parent stops existing.
+        {
+            let conn = Connection::open(crate::paths::db_path()).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE parents (id INTEGER PRIMARY KEY);
+                 INSERT INTO parents (id) VALUES (1), (999);
+                 CREATE TABLE events (
+                     seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                     body TEXT NOT NULL,
+                     parent INTEGER NOT NULL DEFAULT 999
+                         REFERENCES parents(id) DEFERRABLE INITIALLY DEFERRED
+                 );",
+            )
+            .unwrap();
+        }
+        let b = Buffer::open(&BufferCfg {
+            max_events: 1_000_000,
+            max_bytes: u64::MAX,
+        })
+        .unwrap();
+        // The setup runs with the parent present and foreign keys on, which
+        // matters twice: `append` caches its INSERT, and SQLite compiles the
+        // key check into that cached statement. Filling the buffer with the
+        // checks off would cache a statement that has none, and the push below
+        // would quietly succeed.
+        for i in 0..40 {
+            b.push(&ev(i)).unwrap();
+        }
+        let on_disk = total_bytes(&b.conn.lock().unwrap()).unwrap();
+        assert!(on_disk > 0, "the setup stored nothing to trim");
+        // Dropped only now, so the doomed push below trims nearly everything.
+        // Filling against the final cap would leave the stored bytes and the
+        // post-trim count within a row of each other, and a drift that small
+        // proves nothing.
+        b.set_limits(&BufferCfg {
+            max_events: 1_000_000,
+            max_bytes: 100,
+        });
+
+        // Re-point the stored rows at a parent that stays, then retire 999.
+        // Leaving them orphaned instead would defuse the whole test: the trim
+        // below deletes them inside the same transaction, and SQLite credits
+        // each deleted orphan back against the deferred counter, so the one
+        // violation this test needs would net out to zero and commit.
+        b.conn
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "UPDATE events SET parent = 1;
+                 DELETE FROM parents WHERE id = 999;",
+            )
+            .unwrap();
+        assert!(
+            b.push(&ev(99)).is_err(),
+            "the deferred constraint did not refuse the commit"
+        );
+
+        assert_eq!(
+            total_bytes(&b.conn.lock().unwrap()).unwrap(),
+            on_disk,
+            "the failed transaction was not rolled back"
+        );
+        let running = b.bytes.load(Relaxed);
+        assert!(
+            running >= on_disk,
+            "the running total drifted down to {running} against {on_disk} bytes on disk, \
+             so the byte cap now trims late"
         );
     }
 

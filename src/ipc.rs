@@ -1,6 +1,6 @@
 use crate::event::Envelope;
 use crate::paths;
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use interprocess::local_socket::{
     GenericFilePath, ListenerOptions, Stream, ToFsName,
     tokio::{Stream as AsyncStream, prelude::*},
@@ -59,8 +59,80 @@ pub fn is_daemon_running() -> bool {
     Stream::connect(n).is_ok()
 }
 
+/// The one `bind` failure that is not a failure: a daemon of ours is already
+/// listening, so this process has nothing to do.
+///
+/// A type rather than a message because the caller has to act on the
+/// difference. Every other reason `bind` refuses — an endpoint another account
+/// owns, a directory that cannot be created, a name already taken by something
+/// that is not us — is an install that will record nothing, and a daemon that
+/// reports it the same way reports "I did not start" as "all is well".
+#[derive(Debug)]
+pub struct AlreadyRunning;
+
+impl std::fmt::Display for AlreadyRunning {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("daemon already running")
+    }
+}
+
+impl std::error::Error for AlreadyRunning {}
+
 pub struct Listener {
     inner: interprocess::local_socket::tokio::Listener,
+    /// Held open for as long as this daemon listens; see
+    /// [`claim_single_instance`]. Dropping it releases the claim, which is
+    /// what makes a crashed daemon's claim disappear with its process.
+    #[cfg(unix)]
+    _claim: std::fs::File,
+}
+
+/// Take the exclusive right to be *the* daemon for this endpoint, or say who
+/// already has it.
+///
+/// The probe below — connect, and bind if nothing answers — cannot do this on
+/// its own. Two daemons starting together both find nothing listening, both
+/// bind, and the second's `bind` unlinks the first's socket: two processes
+/// draining one buffer, one of them holding a socket no hook can reach. It is
+/// not a theoretical window either; starting eight at once left two or three
+/// alive in three runs out of eight. `flock` closes it because the kernel
+/// decides the winner, not a gap between two of our syscalls.
+///
+/// The lock lives beside the socket rather than in the data directory: the
+/// endpoint is what is being claimed, and `ARGUS_SOCKET` can point two data
+/// directories at one socket or one data directory at two.
+///
+/// Released by the kernel when the process dies however it dies, so — unlike
+/// a pid file — there is no stale claim to reap and no window where a crashed
+/// daemon keeps its successor out.
+#[cfg(unix)]
+fn claim_single_instance() -> Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    use std::os::unix::io::AsRawFd;
+    let path = format!("{}.lock", paths::socket_name());
+    let mut opts = std::fs::OpenOptions::new();
+    opts.create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        // Not `write_private`, which truncates: this file's contents are
+        // irrelevant but its *identity* is the lock, and reopening it is how a
+        // second daemon discovers the first. The mode is on the create for the
+        // same reason as everywhere else.
+        .mode(0o600);
+    let file = opts
+        .open(&path)
+        .with_context(|| format!("cannot open the daemon lock at {path}"))?;
+    let _ = std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o600));
+    // SAFETY: `file` owns a valid descriptor for the duration of the call.
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        let e = std::io::Error::last_os_error();
+        return match e.kind() {
+            std::io::ErrorKind::WouldBlock => Err(AlreadyRunning.into()),
+            _ => Err(anyhow::Error::new(e).context(format!("cannot lock {path}"))),
+        };
+    }
+    Ok(file)
 }
 
 impl Listener {
@@ -69,15 +141,23 @@ impl Listener {
         // name" is never reported as "our daemon is already running".
         #[cfg(unix)]
         prepare_unix_endpoint()?;
+        // Then the claim, before anything is probed or unlinked: everything
+        // below this line assumes no other daemon is racing it.
+        #[cfg(unix)]
+        let claim = claim_single_instance()?;
         // Liveness probe: if a daemon is already listening on this socket,
         // connecting succeeds. Bail out rather than stealing the socket out
         // from under a live daemon (which would keep running orphaned). The
         // probe connection is dropped immediately; the accept side already
         // tolerates a zero-byte connection (EOF just ends the handler).
+        //
+        // Still worth doing with the claim in hand: a daemon from a build
+        // before the lock existed, or one started with `ARGUS_SOCKET` naming
+        // this endpoint from a different lock path, holds no claim at all.
         if let Ok(n) = name()
             && Stream::connect(n).is_ok()
         {
-            return Err(anyhow!("daemon already running"));
+            return Err(AlreadyRunning.into());
         }
         // No live daemon: remove a stale socket file left by a crashed
         // daemon (Unix only) before binding. Safe to unlink unconditionally
@@ -88,7 +168,11 @@ impl Listener {
         let inner = create_owner_only()?;
         #[cfg(not(any(unix, windows)))]
         let inner = ListenerOptions::new().name(name()?).create_tokio()?;
-        Ok(Listener { inner })
+        Ok(Listener {
+            inner,
+            #[cfg(unix)]
+            _claim: claim,
+        })
     }
 
     pub async fn accept_loop(self, tx: Ingress) {
@@ -312,7 +396,7 @@ fn prepare_unix_endpoint() -> Result<()> {
         // existence on a clean install: `bind` runs before anything else in
         // the daemon, so without this a first `argus daemon` on a machine no
         // hook has fired on yet fails on a missing directory.
-        std::fs::create_dir_all(dir)?;
+        paths::create_private_dir(dir)?;
         secure_dir(dir, us)?;
     }
 
@@ -1092,12 +1176,46 @@ mod tests {
         let second = tokio::task::spawn_blocking(Listener::bind).await.unwrap();
         let err = second
             .err()
-            .expect("second bind must fail while first daemon is alive")
-            .to_string();
+            .expect("second bind must fail while first daemon is alive");
         assert_eq!(
-            err, "daemon already running",
+            err.to_string(),
+            "daemon already running",
             "our own daemon must stay distinguishable from a foreign owner; \
              conflating them is what let a squatter look like a healthy install"
+        );
+        assert!(
+            err.downcast_ref::<AlreadyRunning>().is_some(),
+            "the benign case has to be recognisable as a type: the daemon exits \
+             0 on it, and matching on the wording alone means one reworded \
+             message turns every bind failure into a silent success"
+        );
+        unsafe {
+            std::env::remove_var("ARGUS_SOCKET");
+        }
+    }
+
+    /// The other half of that guarantee, and the one that actually bites: a
+    /// bind that fails for any reason except our own daemon must not wear the
+    /// benign type, or the daemon exits 0 having recorded nothing.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_bind_that_fails_for_another_reason_is_not_already_running() {
+        let sock = std::env::temp_dir().join(format!(
+            "lm-ipc-missing-{}/nowhere/argus.sock",
+            std::process::id()
+        ));
+        // Named explicitly, so `bind` will not create the directory for us.
+        unsafe {
+            std::env::set_var("ARGUS_SOCKET", &sock);
+        }
+        let err = tokio::task::spawn_blocking(Listener::bind)
+            .await
+            .unwrap()
+            .err()
+            .expect("binding under a directory that does not exist must fail");
+        assert!(
+            err.downcast_ref::<AlreadyRunning>().is_none(),
+            "an unbindable endpoint was reported as a healthy daemon: {err:#}"
         );
         unsafe {
             std::env::remove_var("ARGUS_SOCKET");

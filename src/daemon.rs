@@ -31,6 +31,9 @@ fn batch_bounds(cfg: &ExportCfg) -> (usize, u64) {
 }
 
 pub async fn run() -> Result<()> {
+    // First, before anything that can block: a stop request during startup is
+    // not a rare case, it is what a supervisor restarting the service sends.
+    let mut shutdown = Shutdown::new();
     // Single-instance guard: if another daemon already holds the socket, exit
     // cleanly rather than fighting over it.
     // Not always "already running" — `bind` also refuses an endpoint another
@@ -38,10 +41,17 @@ pub async fn run() -> Result<()> {
     // socket stays invisible.
     let listener = match ipc::Listener::bind() {
         Ok(listener) => listener,
-        Err(e) => {
+        // Only our own daemon holding the endpoint is a clean exit. Reporting
+        // the rest that way — a squatted socket, an unwritable directory —
+        // told every supervisor watching (systemd, launchd, a Jamf check)
+        // that a process which records nothing had done its job, so the one
+        // failure that silences the whole install is the one nobody is paged
+        // for.
+        Err(e) if e.downcast_ref::<ipc::AlreadyRunning>().is_some() => {
             tracing::info!("not starting: {e:#}");
             return Ok(());
         }
+        Err(e) => return Err(e.context("cannot listen for hook events")),
     };
     // Before anything opens the buffer: an upgrade may need to bring one over
     // from the pre-0.2 location. Only the daemon does this, and only while it
@@ -57,7 +67,7 @@ pub async fn run() -> Result<()> {
             left.len()
         ),
     }
-    std::fs::create_dir_all(crate::paths::data_dir())?;
+    crate::paths::create_private_dir(&crate::paths::data_dir())?;
 
     let shared_cfg = Arc::new(RwLock::new(config::load()));
     tokio::spawn(config::poll_loop(shared_cfg.clone()));
@@ -103,7 +113,7 @@ pub async fn run() -> Result<()> {
 
     loop {
         tokio::select! {
-            _ = tokio::signal::ctrl_c() => {
+            _ = shutdown.recv() => {
                 tracing::info!("shutdown signal received, draining queued envelopes and flushing final batch");
                 // Drain in stage order — A, then B, then C — because each
                 // stage's work only exists once the one before it has handed
@@ -134,6 +144,80 @@ pub async fn run() -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// The operating system asking this process to stop.
+///
+/// Ctrl-C is how a developer stops the daemon; SIGTERM is how everything else
+/// does — `systemctl stop`, launchd, a container runtime, a package upgrade,
+/// `pkill argus`. Waiting only on the first left the ordinary shutdown taking
+/// the signal's default disposition and dying on the spot, skipping the staged
+/// drain and the final flush: every envelope still in the pipeline, and every
+/// event buffered since the last export tick, gone. Those are the last events
+/// before the machine went down, which is the window the buffer exists to
+/// survive.
+///
+/// Built before the loop, never inside it. A handler is only installed when
+/// its stream is created, and a select branch is not created until it is first
+/// polled — so wiring this up lazily leaves a window across the whole of
+/// startup where a stop request is still fatal. Startup is not a rare moment
+/// to be signalled: it is exactly when a supervisor restarting the service
+/// sends one.
+struct Shutdown {
+    #[cfg(unix)]
+    term: Option<tokio::signal::unix::Signal>,
+    #[cfg(unix)]
+    interrupt: Option<tokio::signal::unix::Signal>,
+}
+
+impl Shutdown {
+    fn new() -> Self {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{SignalKind, signal};
+            // Nothing sane to fall back to if a handler cannot be installed,
+            // so the daemon runs on without it: the default disposition still
+            // stops the process, just without the drain.
+            let install = |kind: SignalKind, name: &str| match signal(kind) {
+                Ok(s) => Some(s),
+                Err(e) => {
+                    tracing::warn!("cannot listen for {name}; it will not drain cleanly: {e}");
+                    None
+                }
+            };
+            Shutdown {
+                term: install(SignalKind::terminate(), "SIGTERM"),
+                interrupt: install(SignalKind::interrupt(), "SIGINT"),
+            }
+        }
+        #[cfg(not(unix))]
+        Shutdown {}
+    }
+
+    /// Resolves on the first stop request that arrives.
+    async fn recv(&mut self) {
+        #[cfg(unix)]
+        {
+            async fn next(s: &mut Option<tokio::signal::unix::Signal>) {
+                match s {
+                    Some(s) => {
+                        s.recv().await;
+                    }
+                    // Parked, not resolved: a missing handler must not read as
+                    // a signal that never came.
+                    None => std::future::pending().await,
+                }
+            }
+            tokio::select! {
+                _ = next(&mut self.term) => {}
+                _ = next(&mut self.interrupt) => {}
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = tokio::signal::ctrl_c().await;
+        }
+    }
 }
 
 /// Shut the pipeline down in stage order: A, then B, then C.
@@ -347,7 +431,7 @@ async fn export_once(buffer: &Buffer, exporter: &Exporter, bounds: (usize, u64))
     let events: Vec<_> = batch.iter().map(|(_, e)| e.clone()).collect();
     match exporter.export(&events).await {
         Ok(()) => {
-            let _ = buffer.ack(last_seq);
+            let _ = buffer.ack(last_seq, events.len());
             Attempt::Sent
         }
         Err(crate::export::Rejection::Transient(e)) => {
@@ -360,7 +444,7 @@ async fn export_once(buffer: &Buffer, exporter: &Exporter, bounds: (usize, u64))
                  the queue keeps moving",
                 events.len()
             );
-            let _ = buffer.ack(last_seq);
+            let _ = buffer.ack(last_seq, events.len());
             if !is_gap_record(&events) {
                 let _ = buffer.push(&Event::new(
                     "argus",
@@ -500,6 +584,30 @@ mod tests {
 
     fn shared() -> Arc<RwLock<config::Config>> {
         Arc::new(RwLock::new(config::Config::default()))
+    }
+
+    /// A daemon that cannot listen has to say so in the only language a
+    /// supervisor reads. Exiting 0 makes systemd and launchd record a clean
+    /// run, so the machine keeps a daemon that captures nothing and no monitor
+    /// ever notices.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_unbindable_endpoint_is_a_failed_start() {
+        let sock = std::env::temp_dir().join(format!(
+            "lm-daemon-missing-{}/nowhere/argus.sock",
+            std::process::id()
+        ));
+        unsafe {
+            std::env::set_var("ARGUS_SOCKET", &sock);
+        }
+        let started = run().await;
+        unsafe {
+            std::env::remove_var("ARGUS_SOCKET");
+        }
+        assert!(
+            started.is_err(),
+            "the daemon reported success without a socket to listen on"
+        );
     }
 
     /// Anything the pipeline caches must show up in the fingerprint. The
