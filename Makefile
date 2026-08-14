@@ -210,7 +210,7 @@ changelog: ## Prepend a section for unreleased commits (make changelog [TAG=v0.3
 	git cliff --unreleased $(if $(TAG),--tag $(TAG),) --prepend CHANGELOG.md
 
 .PHONY: tag
-tag: ## Create an annotated release tag (make tag VERSION=v0.2.0); does not push
+tag: ## Create a signed release tag (make tag VERSION=v0.2.0); does not push
 	@test -n "$(VERSION)" || { \
 		echo "tag: VERSION is required, e.g. make tag VERSION=v0.2.0"; exit 1; }
 	$(MAKE) version-check TAG=$(VERSION)
@@ -218,6 +218,6 @@ tag: ## Create an annotated release tag (make tag VERSION=v0.2.0); does not push
 		echo "tag: working tree is dirty; commit or stash changes first" >&2; \
 		exit 1; \
 	fi
-	git tag -a "$(VERSION)" -m "$(VERSION)"
+	git tag -s "$(VERSION)" -m "$(VERSION)"
 	@echo "Tag created locally. To publish it, run:"
 	@echo "  git push origin $(VERSION)"

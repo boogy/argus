@@ -34,6 +34,11 @@ what AI coding agents actually did and exports it as OTLP/JSON.
 Supported platforms: Linux (x86_64, aarch64 — static musl), macOS (Apple
 silicon, Intel), Windows (x86_64).
 
+There is no 0.1.0 tag. The crate carried that version through early development
+and was bumped to 0.2.0 when it moved to Rust edition 2024, well before the
+first release; 0.2.0 is the version already stamped into every exported record
+as the OTLP instrumentation scope, so it is the one that ships.
+
 <details>
 <summary>Every commit in this release</summary>
 
