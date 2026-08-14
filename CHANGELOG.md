@@ -196,6 +196,7 @@ silicon, Intel), Windows (x86_64).
 
 - CI matrix (ubuntu/macos/windows) and task ledger ([68872b2](https://github.com/boogy/argus/commit/68872b2b8de1c160f69ffc05e614e6cdf9a21886))
 - tag-driven release workflow, pinned actions, dependabot, changelog ([2a13580](https://github.com/boogy/argus/commit/2a1358063cd64972b720b893ae9dc079be4ae46d))
+- stop running every PR commit twice on all three OSes ([28f1744](https://github.com/boogy/argus/commit/28f1744eab6a190f2f6f1c2d893b8d3635ef956e))
 
 ### Other Changes
 
