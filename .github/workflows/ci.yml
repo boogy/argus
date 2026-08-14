@@ -11,15 +11,21 @@ env:
 permissions:
   contents: read
 
-# A push to a branch with an open PR fires `push` and `pull_request` both, and
-# the two carry different `github.ref` values (`refs/heads/x` vs
-# `refs/pull/N/merge`) — so keying on `github.ref` alone would put them in
-# separate groups and run the same commit twice on all three OSes. `head_ref`
-# is set only on pull_request and holds the source branch, which is what makes
-# the two events collapse into one group. Superseded runs are then cancelled
-# rather than left to finish against stale code.
+# Cancels superseded runs of the same ref: push three commits in a minute and
+# only the last one finishes, instead of three runs racing to report on code
+# nobody has anymore.
+#
+# It deliberately does NOT collapse the `push` and `pull_request` runs a commit
+# on a PR'd branch produces. Sharing one group between them is possible
+# (`head_ref || ref_name` — note `ref_name`, since `head_ref` is empty on push
+# and `github.ref` would fall back to the full `refs/heads/…` form and key
+# differently anyway), but it makes the two events cancel each other, and which
+# one survives is a race. Losing the `pull_request` run leaves a cancelled
+# check sitting on the PR, which reads as a failure and blocks the merge under
+# branch protection. Minutes are free on a public repo; a merge blocked by a
+# check that was never allowed to run is not a good trade for them.
 concurrency:
-  group: ci-${{ github.head_ref || github.ref }}
+  group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
