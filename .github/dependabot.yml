@@ -1,0 +1,38 @@
+# Dependabot — https://docs.github.com/code-security/dependabot/dependabot-version-updates
+#
+# Keeps this repo's pins current: Cargo dependencies and GitHub Actions commit
+# SHAs. For actions, Dependabot rewrites the pinned SHA *and* the trailing
+# `# vX.Y.Z` comment, which is why every `uses:` line carries one — the comment
+# is the only human-readable record of what a 40-hex pin actually is.
+#
+# Minor and patch updates are grouped into a single PR per ecosystem; major
+# updates are deliberately left ungrouped so each one gets its own PR. A major
+# bump is the one that needs to be read, and bundling it with a dozen routine
+# patches is how it gets merged unread on a green check.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    groups:
+      cargo-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    groups:
+      actions-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch

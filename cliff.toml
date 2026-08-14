@@ -1,0 +1,130 @@
+# git-cliff configuration for argus.
+#
+# This repo's history is NOT pure conventional commits: alongside `fix:` /
+# `feat:` / `docs:` there are ~93 `T<n><letter>: <message>` commits — numbered
+# work items from a task ledger (see `tasks/todo.md` in earlier history).
+# They are real, substantive engineering work (features, security fixes,
+# perf fixes, doc corrections), not noise, so they must not be dropped.
+#
+# `commit_parsers` below classifies each `T\d+` commit individually by its
+# actual diff content (read during authoring of this file — see the
+# comments next to each list), because a generic keyword regex over messages
+# like "record", "read", "wire", "bound" is not reliable enough to tell a new
+# capability from a defensive fix. Where classification genuinely can't be
+# done reliably by regex, commits fall through to "Other Changes" rather than
+# being guessed at or dropped.
+
+[changelog]
+header = """
+# Changelog
+
+All notable changes to this project are documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+"""
+# `<!-- N -->` sort keys are stripped by the body template below; they only
+# exist so git-cliff's lexicographic group ordering matches the desired
+# section order (git-cliff sorts groups by their group name).
+body = """
+{%- if version %}
+## [{{ version | trim_start_matches(pat="v") }}] - {{ timestamp | date(format="%Y-%m-%d") }}
+{%- else %}
+## [Unreleased]
+{%- endif %}
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | trim_start_matches(pat="<!-- ") | split(pat=" -->") | last }}
+{% for commit in commits -%}
+* {{ commit.message | split(pat="\n") | first | trim }} \
+([{{ commit.id | truncate(length=7, end="") }}](https://github.com/boogy/argus/commit/{{ commit.id }}))
+{% endfor -%}
+{% endfor -%}
+{%- if previous and previous.version %}
+**Full Changelog**: https://github.com/boogy/argus/compare/{{ previous.version }}...{{ version }}
+{% endif %}
+"""
+footer = ""
+trim = true
+
+[git]
+# Most of this history is `T\d+:`-prefixed, not conventional-commit syntax.
+# conventional_commits=true lets git-cliff still parse the `fix:`/`feat:`/
+# `docs:`/`chore:` commits that DO follow the convention; filter_unconventional
+# MUST be false, or every non-conventional commit (i.e. all 93 `T\d+:`
+# commits — the majority of this project's real history) is silently
+# dropped from the changelog before commit_parsers ever sees it.
+conventional_commits = true
+filter_unconventional = false
+split_commits = false
+protect_breaking_commits = false
+filter_commits = false
+tag_pattern = "v[0-9]*"
+topo_order = false
+sort_commits = "oldest"
+
+# A few commits carry a gitmoji prefix ("📝 docs: ...", "🧑‍💻 chore: ..."), so the
+# conventional-commit patterns below tolerate leading non-alphanumeric characters
+# before the type — `^docs:` never matches a subject that starts with an emoji, and
+# those commits would silently land in "Other Changes" instead.
+#
+# The class is `[^\p{L}\p{N}]`, not `\W`: Rust's regex counts Join_Control as a word
+# character, so `\W*` does not match the ZWJ inside a multi-codepoint emoji like
+# 🧑‍💻 (U+1F9D1 U+200D U+1F4BB) and the prefix fails to strip.
+commit_parsers = [
+  # --- housekeeping: not useful to a release reader ---
+  { message = '^[^\p{L}\p{N}]*(lessons|todo|chore):', skip = true },
+
+  # --- Documentation ---
+  { message = '^[^\p{L}\p{N}]*docs:', group = "<!-- 2 -->📝 Documentation" },
+  # T19 family = a documentation-correction wave. T19a-c add/rewrite real
+  # doc files (README.md, docs/*.md); T19e-l are pure in-source comment
+  # corrections (verified: their diffs add no non-comment lines). T19d is
+  # excluded here on purpose — despite the "T19" number and doc-sounding
+  # subject, its diff changes real matching logic in src/filecap.rs, so it
+  # is classified as a Fix by the catch-all below instead.
+  { message = '^T19[a-c]:', group = "<!-- 2 -->📝 Documentation" },
+  { message = '^T19[e-l]:', group = "<!-- 2 -->📝 Documentation" },
+  { message = '^T15f:', group = "<!-- 2 -->📝 Documentation" },
+
+  # --- CI / Build ---
+  { message = '^[^\p{L}\p{N}]*(ci|build)(\(.+\))?:', group = "<!-- 3 -->🔧 CI / Build" },
+  { message = '^T1:', group = "<!-- 3 -->🔧 CI / Build" }, # CI matrix + task ledger
+
+  # --- Dependencies (none currently in history; kept for future commits) ---
+  { message = '^(chore|build)\(deps\):', group = "<!-- 4 -->📦 Dependencies" },
+  { message = '(?i)^(chore|build): bump|dependabot', group = "<!-- 4 -->📦 Dependencies" },
+
+  # --- Features ---
+  { message = '^[^\p{L}\p{N}]*(feat|feature|perf)(\(.+\))?:', group = "<!-- 0 -->🚀 Features" },
+  # New capability/adapter/integration work identified by reading each
+  # commit's diff: new Codex/Copilot/opencode/pi.dev integration surface,
+  # new fields captured, new `check` capabilities, new export options.
+  { message = '^T(3|9c|10b|10c|10e|11a|11b|11d|11e|12a|12b|12d|13d|13e|13g|14a|14b|15b|15c|15d|15e|17b|18a|18b|18c|18d|27|29|30|31|32|33|34|35):', group = "<!-- 0 -->🚀 Features" },
+
+  # --- Fixes ---
+  { message = '^[^\p{L}\p{N}]*(fix|revert)(\(.+\))?:', group = "<!-- 1 -->🐛 Fixes" },
+
+  # --- Other Changes (refactors / test & task-ledger infra, not
+  #     user-facing features or fixes) ---
+  { message = '^refactor:', group = "<!-- 5 -->Other Changes" },
+  { message = '^T(2|5|13b|16b):', group = "<!-- 5 -->Other Changes" },
+
+  # Catch-all for every remaining `T\d+[letter]:` commit: read individually,
+  # these are corrective/defensive engineering (bounding buffers, capping
+  # batches, fixing races, tightening permissions, correcting detection
+  # logic) rather than new capability, so they read most naturally as Fixes.
+  { message = '^T\d+[a-z]?:', group = "<!-- 1 -->🐛 Fixes" },
+
+  # Anything else unclassified.
+  { message = '.*', group = "<!-- 5 -->Other Changes" },
+]
+
+# No [remote.github] block on purpose. git-cliff only contacts the GitHub API
+# when a remote is configured, and an unreachable repo (this one is private today)
+# makes it panic rather than degrade. The body template builds its commit and
+# compare URLs from hardcoded paths, so it needs no remote metadata at all.
+#
+# Adding one only becomes worthwhile if the template starts using PR numbers or
+# contributor lists (`commit.github.pr_number`, `github.contributors`). If you do
+# add it after the repo goes public, give the release job a GITHUB_TOKEN — the
+# unauthenticated API rate limit is low enough to fail a release on a bad day.

@@ -139,3 +139,85 @@ audit: ## Scan dependencies for known vulnerabilities (needs cargo-audit)
 .PHONY: clean
 clean: ## Remove build artifacts
 	$(CARGO) clean
+
+## --- Release ---------------------------------------------------------------
+
+.PHONY: version-check
+version-check: ## Verify TAG matches the crate version (make version-check TAG=v0.2.0)
+	@set -e; \
+	if [ -z "$(TAG)" ]; then \
+		echo "version-check: TAG is required, e.g. make version-check TAG=v0.2.0" >&2; \
+		exit 1; \
+	fi; \
+	crate_version="$$(cargo metadata --format-version 1 --no-deps | jq -r '.packages[0].version')"; \
+	tag_version="$${TAG#v}"; \
+	if [ "$$tag_version" != "$$crate_version" ]; then \
+		echo "version-check: tag $(TAG) (version $$tag_version) does not match Cargo.toml version $$crate_version" >&2; \
+		exit 1; \
+	fi; \
+	echo "version-check: tag $(TAG) matches crate version $$crate_version"
+
+# The release body is the reviewed CHANGELOG.md section for this tag, not a
+# fresh git-cliff run. Regenerating at tag time would ignore every edit made to
+# the committed file — the curated summary, a reworded entry, an added note —
+# and publish the raw commit list instead. Extracting keeps the release page and
+# the changelog the same text by construction.
+#
+# Missing section => hard failure, deliberately. An empty release body is not a
+# usable fallback, and it is the sort of thing nobody notices until the release
+# is already published.
+.PHONY: release-notes
+release-notes: ## Extract one version's CHANGELOG.md section into CHANGES.md (make release-notes TAG=v0.2.0)
+	@set -e; \
+	if [ -z "$(TAG)" ]; then \
+		echo "release-notes: TAG is required, e.g. make release-notes TAG=v0.2.0" >&2; \
+		exit 1; \
+	fi; \
+	version="$${TAG#v}"; \
+	awk -v v="$$version" ' \
+		index($$0, "## [" v "]") == 1 { inside = 1; print; next } \
+		inside && index($$0, "## [") == 1 { inside = 0 } \
+		inside { print } \
+	' CHANGELOG.md > CHANGES.md; \
+	if [ ! -s CHANGES.md ]; then \
+		rm -f CHANGES.md; \
+		echo "release-notes: CHANGELOG.md has no '## [$$version]' section" >&2; \
+		exit 1; \
+	fi; \
+	echo "release-notes: wrote CHANGES.md for $(TAG) ($$(wc -l < CHANGES.md | tr -d ' ') lines)"
+
+# Adds a section for the commits since the last tag; it does not regenerate the
+# file. That is the important part: released sections are edited after
+# git-cliff drafts them (0.2.0 carries a hand-written summary above its commit
+# list), and `--output` would overwrite all of it with the raw list again. With
+# --prepend, git-cliff inserts below the header and leaves everything already
+# in the file untouched.
+#
+# TAG names the version the new section should be filed under. Without it the
+# commits land under "[Unreleased]" — right for a routine update, wrong when
+# preparing a release, since `make release-notes` looks the version up by
+# heading.
+#
+# Run it once per release. A second run prepends the same commits again,
+# because the tag they now belong to still does not exist.
+#
+# No --offline flag is needed: cliff.toml deliberately configures no
+# [remote.github], so git-cliff never calls the GitHub API in the first place.
+.PHONY: changelog
+changelog: ## Prepend a section for unreleased commits (make changelog [TAG=v0.3.0]); needs git-cliff
+	@command -v git-cliff >/dev/null 2>&1 || { \
+		echo "git-cliff not installed; run: cargo install git-cliff"; exit 1; }
+	git cliff --unreleased $(if $(TAG),--tag $(TAG),) --prepend CHANGELOG.md
+
+.PHONY: tag
+tag: ## Create an annotated release tag (make tag VERSION=v0.2.0); does not push
+	@test -n "$(VERSION)" || { \
+		echo "tag: VERSION is required, e.g. make tag VERSION=v0.2.0"; exit 1; }
+	$(MAKE) version-check TAG=$(VERSION)
+	@if [ -n "$$(git status --porcelain)" ]; then \
+		echo "tag: working tree is dirty; commit or stash changes first" >&2; \
+		exit 1; \
+	fi
+	git tag -a "$(VERSION)" -m "$(VERSION)"
+	@echo "Tag created locally. To publish it, run:"
+	@echo "  git push origin $(VERSION)"

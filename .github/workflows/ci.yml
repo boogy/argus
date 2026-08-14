@@ -7,6 +7,16 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# Read-only: this workflow builds and tests, it never writes to the repo.
+permissions:
+  contents: read
+
+# A push to a branch with an open PR triggers both events; superseded runs of
+# the same ref are cancelled rather than left to finish against stale code.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   verify:
     name: verify (${{ matrix.os }})
@@ -17,15 +27,16 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
         with:
+          toolchain: stable
           components: rustfmt, clippy
 
       - name: Cache cargo registry and build
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       # `make verify` is fmt-check + lint + test, but `make` isn't present by
       # default on windows-latest runners — run the three cargo commands
