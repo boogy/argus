@@ -11,10 +11,15 @@ env:
 permissions:
   contents: read
 
-# A push to a branch with an open PR triggers both events; superseded runs of
-# the same ref are cancelled rather than left to finish against stale code.
+# A push to a branch with an open PR fires `push` and `pull_request` both, and
+# the two carry different `github.ref` values (`refs/heads/x` vs
+# `refs/pull/N/merge`) — so keying on `github.ref` alone would put them in
+# separate groups and run the same commit twice on all three OSes. `head_ref`
+# is set only on pull_request and holds the source branch, which is what makes
+# the two events collapse into one group. Superseded runs are then cancelled
+# rather than left to finish against stale code.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
 
 jobs:
