@@ -151,11 +151,16 @@ version-check: ## Verify TAG matches the crate version (make version-check TAG=v
 	fi; \
 	crate_version="$$(cargo metadata --format-version 1 --no-deps | jq -r '.packages[0].version')"; \
 	tag_version="$${TAG#v}"; \
-	if [ "$$tag_version" != "$$crate_version" ]; then \
-		echo "version-check: tag $(TAG) (version $$tag_version) does not match Cargo.toml version $$crate_version" >&2; \
-		exit 1; \
+	if [ "$$tag_version" = "$$crate_version" ]; then \
+		echo "version-check: tag $(TAG) matches crate version $$crate_version"; \
+		exit 0; \
 	fi; \
-	echo "version-check: tag $(TAG) matches crate version $$crate_version"
+	if [ "$${tag_version%%-*}" = "$$crate_version" ]; then \
+		echo "version-check: tag $(TAG) is a prerelease of crate version $$crate_version"; \
+		exit 0; \
+	fi; \
+	echo "version-check: tag $(TAG) (version $$tag_version) does not match Cargo.toml version $$crate_version" >&2; \
+	exit 1
 
 # The release body is the reviewed CHANGELOG.md section for this tag, not a
 # fresh git-cliff run. Regenerating at tag time would ignore every edit made to
@@ -174,11 +179,14 @@ release-notes: ## Extract one version's CHANGELOG.md section into CHANGES.md (ma
 		exit 1; \
 	fi; \
 	version="$${TAG#v}"; \
-	awk -v v="$$version" ' \
-		index($$0, "## [" v "]") == 1 { inside = 1; print; next } \
-		inside && index($$0, "## [") == 1 { inside = 0 } \
-		inside { print } \
-	' CHANGELOG.md > CHANGES.md; \
+	for v in "$$version" "$${version%%-*}"; do \
+		awk -v v="$$v" ' \
+			index($$0, "## [" v "]") == 1 { inside = 1; print; next } \
+			inside && index($$0, "## [") == 1 { inside = 0 } \
+			inside { print } \
+		' CHANGELOG.md > CHANGES.md; \
+		if [ -s CHANGES.md ]; then break; fi; \
+	done; \
 	if [ ! -s CHANGES.md ]; then \
 		rm -f CHANGES.md; \
 		echo "release-notes: CHANGELOG.md has no '## [$$version]' section" >&2; \
