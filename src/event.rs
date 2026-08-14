@@ -546,26 +546,35 @@ pub fn visit_strings(kind: &mut EventKind, f: &mut impl FnMut(&mut String)) {
         } => visit_json_strings(input, f),
         EventKind::Notification {
             message,
-            category: _,
+            // Visited despite reading like a category. No adapter gets it from
+            // an enumeration: Copilot takes it from `notificationType` and
+            // Claude Code from `type`, both free-form strings a plugin author
+            // chooses. It is also the one field here its adapters do not pass
+            // through `cap_text`, so skipping it left it unbounded as well as
+            // unredacted.
+            category,
             title,
         } => {
             f(message);
+            f(category);
             if let Some(t) = title {
                 f(t);
             }
         }
         EventKind::Error {
             message,
-            context: _,
-            // Visited, unlike `context`, whose vocabulary the host tool
-            // enumerates. This one is whatever the throwing code called its
-            // error class, and code that builds a class name by interpolation
-            // puts the interpolated value here.
+            // Visited for the same reason as `name`: whatever the throwing
+            // code called its error class, and code that builds a class name
+            // by interpolation puts the interpolated value here. Claude Code
+            // puts its error class in this field and Copilot puts free-form
+            // `errorContext` in it, so the vocabulary is nobody's to enumerate.
+            context,
             name,
             // A boolean.
             recoverable: _,
         } => {
             f(message);
+            f(context);
             if let Some(n) = name {
                 f(n);
             }
