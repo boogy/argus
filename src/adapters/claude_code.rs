@@ -147,15 +147,23 @@ pub(crate) fn parse_hook(source: &'static str, p: &Value, capture: &CaptureCfg) 
                 file_contents: vec![],
             })];
             if hook == "PreToolUse" {
+                // `args` and `description` are tool input under another name:
+                // a slash command's arguments and an agent's brief are both
+                // free text the user typed or pasted. A deployment that turned
+                // `tool_inputs` off asked for that not to leave the machine,
+                // and it does not stop asking because the field is spelled
+                // differently. The *name* stays either way — that is the
+                // record of what ran, which is what capture is for.
+                let arg = |key| capture.tool_inputs.then(|| s(&input, key)).flatten();
                 match tool.as_str() {
                     "Skill" => events.push(mk(EventKind::Skill {
                         name: s(&input, "skill").unwrap_or_else(|| "unknown".into()),
-                        args: s(&input, "args"),
+                        args: arg("args"),
                     })),
                     "Task" | "Agent" => events.push(mk(EventKind::Agent {
                         agent_type: s(&input, "subagent_type")
                             .unwrap_or_else(|| "general-purpose".into()),
-                        description: s(&input, "description"),
+                        description: arg("description"),
                     })),
                     _ => {}
                 }
@@ -513,6 +521,59 @@ mod tests {
         );
         assert!(events.iter().any(|e| matches!(&e.kind,
             EventKind::Agent { agent_type, .. } if agent_type == "Explore")));
+    }
+
+    /// `args` and `description` are tool input under another name, and a
+    /// deployment that turned `tool_inputs` off does not stop meaning it
+    /// because the field is spelled differently. The skill and agent names
+    /// are the record of what ran and survive either way.
+    #[test]
+    fn skill_args_and_agent_descriptions_respect_the_tool_input_flag() {
+        let cfg = CaptureCfg {
+            tool_inputs: false,
+            ..CaptureCfg::default()
+        };
+        let events = adapters::parse(
+            env(json!({
+                "hook_event_name": "PreToolUse", "tool_name": "Skill",
+                "tool_input": {"skill": "deploy", "args": "--token=abcdefgh12345678"}
+            })),
+            &cfg,
+        );
+        let skill = events
+            .iter()
+            .find_map(|e| match &e.kind {
+                EventKind::Skill { name, args } => Some((name, args)),
+                _ => None,
+            })
+            .expect("a skill event");
+        assert_eq!(skill.0, "deploy", "the skill name is metadata, not content");
+        assert_eq!(skill.1.as_deref(), None, "args shipped: {:?}", skill.1);
+
+        let events = adapters::parse(
+            env(json!({
+                "hook_event_name": "PreToolUse", "tool_name": "Task",
+                "tool_input": {"subagent_type": "Explore", "description": "creds are in vault X"}
+            })),
+            &cfg,
+        );
+        let agent = events
+            .iter()
+            .find_map(|e| match &e.kind {
+                EventKind::Agent {
+                    agent_type,
+                    description,
+                } => Some((agent_type, description)),
+                _ => None,
+            })
+            .expect("an agent event");
+        assert_eq!(agent.0, "Explore", "the agent type is metadata");
+        assert_eq!(
+            agent.1.as_deref(),
+            None,
+            "description shipped: {:?}",
+            agent.1
+        );
     }
 
     #[test]

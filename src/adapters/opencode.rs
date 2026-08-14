@@ -149,7 +149,16 @@ pub fn parse(env: &Envelope, capture: &CaptureCfg) -> Vec<Event> {
                     .unwrap_or("unknown")
                     .into(),
                 action: action.into(),
-                input: crate::adapters::cap_value(props.clone(), max),
+                // The prompt quotes the call it gates — pattern, title and all
+                // — so it is tool input by another name and answers to the same
+                // flag. The tool type and `callID` below are metadata and stay:
+                // "opencode asked about a bash command" is the record, and it
+                // does not require the command.
+                input: if capture.tool_inputs {
+                    crate::adapters::cap_value(props.clone(), max)
+                } else {
+                    Value::Null
+                },
             });
             // Same id the tool events carry, so the prompt and the call it
             // gated are one join rather than a guess from adjacency. Only the
@@ -262,10 +271,20 @@ pub fn parse(env: &Envelope, capture: &CaptureCfg) -> Vec<Event> {
                 .and_then(Value::as_str)
                 .unwrap_or("unknown")
                 .into(),
-            args: props
-                .get("arguments")
-                .and_then(Value::as_str)
-                .map(String::from),
+            // Gated for the same reason the permission prompt's input is: a
+            // command's arguments are what the user typed after the command,
+            // and `tool_inputs = false` is a deployment saying it does not
+            // want that. The command name still goes, so the record of what
+            // ran survives.
+            args: capture
+                .tool_inputs
+                .then(|| {
+                    props
+                        .get("arguments")
+                        .and_then(Value::as_str)
+                        .map(String::from)
+                })
+                .flatten(),
         })],
         e if e.starts_with("session.")
             || e == "todo.updated"
@@ -504,6 +523,73 @@ mod tests {
         };
         assert!(input.is_null());
         assert_eq!(files.len(), 1, "metadata still extracted");
+    }
+
+    /// A permission prompt quotes the call it is gating, so it carries the same
+    /// arguments the tool event does — and the flag that says not to record
+    /// those has to reach it too, or `tool_inputs = false` is a setting that
+    /// suppresses the copy and ships the original.
+    #[test]
+    fn a_permission_prompt_respects_the_tool_input_flag() {
+        let cfg = CaptureCfg {
+            tool_inputs: false,
+            ..CaptureCfg::default()
+        };
+        for event in ["permission.updated", "permission.replied"] {
+            let events = adapters::parse(
+                env(json!({
+                    "event": event,
+                    "properties": {
+                        "type": "bash", "callID": "call_1",
+                        "pattern": "git push *",
+                        "title": "git push --force origin main",
+                    },
+                })),
+                &cfg,
+            );
+            let EventKind::Permission { tool, input, .. } = &events[0].kind else {
+                panic!("not a permission: {:?}", events[0].kind)
+            };
+            assert_eq!(tool, "bash", "the tool name is metadata, not content");
+            assert!(input.is_null(), "{event} shipped: {input}");
+            assert_eq!(
+                events[0].meta.tool_use_id.as_deref(),
+                Some("call_1"),
+                "the join key is metadata too"
+            );
+        }
+    }
+
+    /// A slash command's arguments are tool input spelled differently — what
+    /// the user typed after the command name, which is where a pasted key or
+    /// token lands. The command name is the record of what ran and stays.
+    #[test]
+    fn a_command_respects_the_tool_input_flag() {
+        let payload = json!({
+            "event": "command.executed",
+            "properties": {"command": "deploy", "arguments": "--token=abcdefgh12345678"},
+        });
+        let off = adapters::parse(
+            env(payload.clone()),
+            &CaptureCfg {
+                tool_inputs: false,
+                ..CaptureCfg::default()
+            },
+        );
+        let EventKind::Skill { name, args } = &off[0].kind else {
+            panic!("not a skill: {:?}", off[0].kind)
+        };
+        assert_eq!(name, "deploy", "the command name is metadata, not content");
+        assert_eq!(args.as_deref(), None, "arguments shipped: {args:?}");
+
+        let on = adapters::parse(env(payload), &CaptureCfg::default());
+        let EventKind::Skill { args, .. } = &on[0].kind else {
+            panic!("not a skill")
+        };
+        assert!(
+            args.as_deref().is_some_and(|a| a.contains("--token=")),
+            "the flag defaults on and must still carry arguments: {args:?}"
+        );
     }
 
     #[test]
