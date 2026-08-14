@@ -1,0 +1,26 @@
+{
+  "source": "claude-code",
+  "received_at": "2026-01-01T00:00:00Z",
+  "payload": {
+    "session_id": "sess-claude-001",
+    "cwd": "/Users/dev/project",
+    "transcript_path": "/Users/dev/.claude/projects/project/sess-claude-001.jsonl",
+    "permission_mode": "default",
+    "model": "claude-opus-5",
+    "hook_event_name": "PostToolBatch",
+    "tool_calls": [
+      {
+        "tool_name": "Read",
+        "tool_use_id": "toolu_03BatchRead",
+        "tool_input": { "file_path": "/Users/dev/project/src/main.rs" },
+        "tool_response": { "type": "text", "file": { "numLines": 42 } }
+      },
+      {
+        "tool_name": "Bash",
+        "tool_use_id": "toolu_04BatchBash",
+        "tool_input": { "command": "curl -s https://api.example.com/v1/status" },
+        "tool_response": { "stdout": "ok", "stderr": "", "interrupted": false }
+      }
+    ]
+  }
+}

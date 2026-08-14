@@ -1,0 +1,16 @@
+{
+  "source": "copilot",
+  "received_at": "2026-01-01T00:00:00Z",
+  "event": "subagentStop",
+  "payload": {
+    "sessionId": "sess-copilot-001",
+    "cwd": "/Users/dev/project",
+    "transcriptPath": "/Users/dev/.copilot/history/sess-copilot-001-sub.json",
+    "agentId": "sub-7f21",
+    "agentType": "reviewer",
+    "agentName": "reviewer-1",
+    "agentDisplayName": "Code reviewer",
+    "response": "No blocking issues. Two nits in src/auth.ts.",
+    "stopReason": "end_turn"
+  }
+}

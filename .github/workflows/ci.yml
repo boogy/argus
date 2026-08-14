@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+# Read-only: this workflow builds and tests, it never writes to the repo.
+permissions:
+  contents: read
+
+# Cancels superseded runs of the same ref: push three commits in a minute and
+# only the last one finishes, instead of three runs racing to report on code
+# nobody has anymore.
+#
+# It deliberately does NOT collapse the `push` and `pull_request` runs a commit
+# on a PR'd branch produces. Sharing one group between them is possible
+# (`head_ref || ref_name` — note `ref_name`, since `head_ref` is empty on push
+# and `github.ref` would fall back to the full `refs/heads/…` form and key
+# differently anyway), but it makes the two events cancel each other, and which
+# one survives is a race. Losing the `pull_request` run leaves a cancelled
+# check sitting on the PR, which reads as a failure and blocks the merge under
+# branch protection. Minutes are free on a public repo; a merge blocked by a
+# check that was never allowed to run is not a good trade for them.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: verify (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry and build
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      # `make verify` is fmt-check + lint + test, but `make` isn't present by
+      # default on windows-latest runners — run the three cargo commands
+      # directly so every OS runs identical steps.
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Clippy (warnings as errors)
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test

@@ -1,0 +1,16 @@
+{
+  "source": "copilot",
+  "received_at": "2026-01-01T00:00:00Z",
+  "event": "postToolUseFailure",
+  "payload": {
+    "sessionId": "sess-copilot-001",
+    "cwd": "/Users/dev/project",
+    "agentName": "copilot",
+    "transcriptPath": "/Users/dev/.copilot/history/sess-copilot-001.json",
+    "toolName": "str_replace_editor",
+    "toolArgs": {
+      "path": "/Users/dev/project/src/index.ts"
+    },
+    "error": "permission denied"
+  }
+}

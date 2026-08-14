@@ -1,0 +1,20 @@
+{
+  "source": "opencode",
+  "received_at": "2026-01-01T00:00:00Z",
+  "payload": {
+    "sessionID": "ses_opencode_001",
+    "event": "permission.updated",
+    "cwd": "/repo",
+    "properties": {
+      "id": "per_opencode_001",
+      "type": "bash",
+      "pattern": "git push *",
+      "sessionID": "ses_opencode_001",
+      "messageID": "msg_opencode_001",
+      "callID": "call_opencode_001",
+      "title": "git push --force origin main",
+      "metadata": {},
+      "time": { "created": 1767225600 }
+    }
+  }
+}

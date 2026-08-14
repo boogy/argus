@@ -1,0 +1,12 @@
+{
+  "source": "pi",
+  "received_at": "2026-01-01T00:00:00Z",
+  "payload": {
+    "sessionID": "ses_pi_001",
+    "cwd": "/Users/dev/src/argus",
+    "event": "input",
+    "text": "wire the release workflow up to the new signing key",
+    "inputSource": "interactive",
+    "images": 0
+  }
+}

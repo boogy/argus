@@ -1,0 +1,20 @@
+{
+  "source": "pi",
+  "received_at": "2026-01-01T00:00:00Z",
+  "payload": {
+    "sessionID": "ses_pi_001",
+    "cwd": "/Users/dev/src/argus",
+    "event": "tool_call",
+    "toolCallId": "tc_01H9",
+    "toolName": "edit",
+    "input": {
+      "path": "/Users/dev/src/argus/.github/workflows/release.yml",
+      "edits": [
+        {
+          "oldText": "gpg --sign",
+          "newText": "cosign sign"
+        }
+      ]
+    }
+  }
+}

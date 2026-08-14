@@ -1,0 +1,18 @@
+{
+  "source": "opencode",
+  "received_at": "2026-01-01T00:00:00Z",
+  "payload": {
+    "sessionID": "ses_opencode_001",
+    "event": "chat.message",
+    "message": {
+      "role": "user",
+      "id": "msg_1"
+    },
+    "parts": [
+      {
+        "type": "text",
+        "text": "why is the build slow?"
+      }
+    ]
+  }
+}

@@ -1,0 +1,90 @@
+<svg width="900" height="370" viewBox="0 0 900 370" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="pipeTitle pipeDesc">
+  <title id="pipeTitle">The argus pipeline</title>
+  <desc id="pipeDesc">Coding agents (Claude Code, opencode, Codex, Copilot CLI, pi) emit events through each tool's own hook or plugin surface into the argus hook shim, which has a 250 ms budget and is the only part on the coding tool's critical path. The shim hands off to the argus daemon, which runs off that path: capture and adapter parsing, redaction, a SQLite buffer with spool fallback, and batched export with backoff, exported as OTLP/JSON to an observability backend.</desc>
+
+  <defs>
+    <linearGradient id="pipeBg" x1="0" y1="0" x2="900" y2="370" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0B1220"/>
+      <stop offset="1" stop-color="#111C2E"/>
+    </linearGradient>
+    <linearGradient id="pipeRust" x1="45" y1="216" x2="665" y2="312" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#F5A623"/>
+      <stop offset="1" stop-color="#E8743B"/>
+    </linearGradient>
+    <marker id="pArrowBlue" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0 0 L6 3 L0 6 Z" fill="#58A6FF"/>
+    </marker>
+    <marker id="pArrowGreen" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0 0 L6 3 L0 6 Z" fill="#3FB950"/>
+    </marker>
+    <marker id="pArrowTiny" markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0 0 L4 2.5 L0 5 Z" fill="#8B98A5"/>
+    </marker>
+  </defs>
+
+  <rect x="1" y="1" width="898" height="368" rx="18" fill="url(#pipeBg)" stroke="#22304A" stroke-width="2"/>
+
+  <!-- ===================== row 1: the synchronous half ===================== -->
+  <text x="450" y="48" text-anchor="middle" font-family="ui-sans-serif, -apple-system, Segoe UI, Roboto, sans-serif" font-size="10" letter-spacing="1.6" fill="#6E7B8A">ON THE CODING TOOL'S CRITICAL PATH</text>
+
+  <!-- coding agents -->
+  <rect x="100" y="70" width="205" height="70" rx="8" fill="#152238" stroke="#58A6FF" stroke-width="1.5"/>
+  <text x="202" y="98" text-anchor="middle" font-family="ui-sans-serif, -apple-system, Segoe UI, Roboto, sans-serif" font-size="13" font-weight="600" fill="#E6EDF3">Coding agents</text>
+  <text x="202" y="116" text-anchor="middle" font-family="ui-sans-serif, -apple-system, Segoe UI, Roboto, sans-serif" font-size="10" fill="#8B98A5">Claude Code · opencode · Codex</text>
+  <text x="202" y="130" text-anchor="middle" font-family="ui-sans-serif, -apple-system, Segoe UI, Roboto, sans-serif" font-size="10" fill="#8B98A5">Copilot CLI · pi</text>
+
+  <line x1="309" y1="105" x2="351" y2="105" stroke="#58A6FF" stroke-width="2" marker-end="url(#pArrowBlue)"/>
+
+  <!-- hook / plugin surface -->
+  <rect x="355" y="70" width="185" height="70" rx="8" fill="#152238" stroke="#58A6FF" stroke-width="1.5"/>
+  <text x="447" y="104" text-anchor="middle" font-family="ui-sans-serif, -apple-system, Segoe UI, Roboto, sans-serif" font-size="13" font-weight="600" fill="#E6EDF3">Hook / plugin surface</text>
+  <text x="447" y="122" text-anchor="middle" font-family="ui-sans-serif, -apple-system, Segoe UI, Roboto, sans-serif" font-size="10" fill="#8B98A5">each tool's own API</text>
+
+  <line x1="544" y1="105" x2="586" y2="105" stroke="#58A6FF" stroke-width="2" marker-end="url(#pArrowBlue)"/>
+
+  <!-- argus hook shim -->
+  <rect x="590" y="70" width="210" height="70" rx="8" fill="#152238" stroke="#58A6FF" stroke-width="1.5"/>
+  <text x="695" y="96" text-anchor="middle" font-family="ui-sans-serif, -apple-system, Segoe UI, Roboto, sans-serif" font-size="13" font-weight="600" fill="#E6EDF3">argus hook shim</text>
+  <text x="695" y="114" text-anchor="middle" font-family="ui-sans-serif, -apple-system, Segoe UI, Roboto, sans-serif" font-size="10" fill="#8B98A5">250 ms budget</text>
+  <text x="695" y="130" text-anchor="middle" font-family="ui-sans-serif, -apple-system, Segoe UI, Roboto, sans-serif" font-size="10" fill="#3FB950">no proxy, no MITM</text>
+
+  <!-- ============ hand-off: down the right, back along the margin ============ -->
+  <text x="360" y="168" text-anchor="middle" font-family="ui-sans-serif, -apple-system, Segoe UI, Roboto, sans-serif" font-size="11" fill="#8B98A5">handed off · everything below runs off that path</text>
+  <path d="M695 140 V166 q0 10 -10 10 H38 q-10 0 -10 10 V254 q0 10 10 10 H41" fill="none" stroke="#58A6FF" stroke-width="2" stroke-dasharray="5 4" marker-end="url(#pArrowBlue)"/>
+
+  <!-- ===================== row 2: the argus daemon ===================== -->
+  <text x="355" y="206" text-anchor="middle" font-family="ui-sans-serif, -apple-system, Segoe UI, Roboto, sans-serif" font-size="13" font-weight="600" fill="#F5A623">argus daemon</text>
+  <rect x="45" y="216" width="620" height="96" rx="14" fill="#152238" stroke="url(#pipeRust)" stroke-width="2.5"/>
+
+  <rect x="65" y="236" width="124" height="56" rx="6" fill="#1E304C" stroke="#F5A623" stroke-width="1"/>
+  <text x="127" y="260" text-anchor="middle" font-family="ui-sans-serif, -apple-system, Segoe UI, Roboto, sans-serif" font-size="12" fill="#E6EDF3">capture</text>
+  <text x="127" y="277" text-anchor="middle" font-family="ui-sans-serif, -apple-system, Segoe UI, Roboto, sans-serif" font-size="9.5" fill="#8B98A5">adapter parse</text>
+
+  <line x1="193" y1="264" x2="213" y2="264" stroke="#8B98A5" stroke-width="1.5" marker-end="url(#pArrowTiny)"/>
+
+  <rect x="217" y="236" width="124" height="56" rx="6" fill="#1E304C" stroke="#F5A623" stroke-width="1"/>
+  <text x="279" y="260" text-anchor="middle" font-family="ui-sans-serif, -apple-system, Segoe UI, Roboto, sans-serif" font-size="12" fill="#E6EDF3">redact</text>
+  <text x="279" y="277" text-anchor="middle" font-family="ui-sans-serif, -apple-system, Segoe UI, Roboto, sans-serif" font-size="9.5" fill="#8B98A5">before it lands</text>
+
+  <line x1="345" y1="264" x2="365" y2="264" stroke="#8B98A5" stroke-width="1.5" marker-end="url(#pArrowTiny)"/>
+
+  <rect x="369" y="236" width="124" height="56" rx="6" fill="#1E304C" stroke="#F5A623" stroke-width="1"/>
+  <text x="431" y="260" text-anchor="middle" font-family="ui-sans-serif, -apple-system, Segoe UI, Roboto, sans-serif" font-size="12" fill="#E6EDF3">buffer</text>
+  <text x="431" y="277" text-anchor="middle" font-family="ui-sans-serif, -apple-system, Segoe UI, Roboto, sans-serif" font-size="9.5" fill="#8B98A5">SQLite + spool</text>
+
+  <line x1="497" y1="264" x2="517" y2="264" stroke="#8B98A5" stroke-width="1.5" marker-end="url(#pArrowTiny)"/>
+
+  <rect x="521" y="236" width="124" height="56" rx="6" fill="#1E304C" stroke="#F5A623" stroke-width="1"/>
+  <text x="583" y="260" text-anchor="middle" font-family="ui-sans-serif, -apple-system, Segoe UI, Roboto, sans-serif" font-size="12" fill="#E6EDF3">export</text>
+  <text x="583" y="277" text-anchor="middle" font-family="ui-sans-serif, -apple-system, Segoe UI, Roboto, sans-serif" font-size="9.5" fill="#8B98A5">batched · backoff</text>
+
+  <!-- export hop -->
+  <line x1="669" y1="264" x2="756" y2="264" stroke="#3FB950" stroke-width="2" marker-end="url(#pArrowGreen)"/>
+  <text x="712" y="250" text-anchor="middle" font-family="ui-sans-serif, -apple-system, Segoe UI, Roboto, sans-serif" font-size="11" fill="#8B98A5">OTLP / JSON</text>
+
+  <!-- observability backend -->
+  <path d="M766 262 v44 a34 9 0 0 0 68 0 v-44" fill="#152238" stroke="#58A6FF" stroke-width="2"/>
+  <ellipse cx="800" cy="262" rx="34" ry="9" fill="#1E304C" stroke="#58A6FF" stroke-width="2"/>
+  <text x="800" y="332" text-anchor="middle" font-family="ui-sans-serif, -apple-system, Segoe UI, Roboto, sans-serif" font-size="12" fill="#8B98A5">observability</text>
+  <text x="800" y="347" text-anchor="middle" font-family="ui-sans-serif, -apple-system, Segoe UI, Roboto, sans-serif" font-size="12" fill="#8B98A5">backend</text>
+</svg>

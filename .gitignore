@@ -1,8 +1,20 @@
 .claude/worktrees
 /target
+
+# Written by `make release-notes` — one version's CHANGELOG.md section, cut out
+# for the release job to use as the release body. Always derived, never edited.
+/CHANGES.md
+
+# Company-restricted deployment artifacts — keep out of this repo
+deploy/
 /.superpowers
 .superpowers/
 docs/superpowers/
+
+# Working ledger and plans: they track how the work was sequenced, which is
+# not what a reader of this repo needs. The record that survives is the commit
+# history, where each change carries its own reasoning.
+tasks/
 
 
 # Added by cargo

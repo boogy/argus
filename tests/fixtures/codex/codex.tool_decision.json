@@ -1,0 +1,14 @@
+{
+  "source": "codex",
+  "received_at": "2026-01-01T00:00:00Z",
+  "payload": {
+    "event_name": "codex.tool_decision",
+    "attributes": {
+      "conversation.id": "conv-9",
+      "tool_name": "shell",
+      "command": "curl https://crates.io/api/v1/crates/serde",
+      "decision": "approved",
+      "source": "config"
+    }
+  }
+}

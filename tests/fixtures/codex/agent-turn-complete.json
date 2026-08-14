@@ -1,0 +1,12 @@
+{
+  "source": "codex",
+  "received_at": "2026-01-01T00:00:00Z",
+  "payload": {
+    "type": "agent-turn-complete",
+    "turn-id": "turn-42",
+    "input-messages": [
+      "refactor the exporter"
+    ],
+    "last-assistant-message": "Exporter split into two functions."
+  }
+}

@@ -6,11 +6,15 @@
 #[tokio::test(flavor = "multi_thread")]
 async fn hook_event_flows_to_mock_collector() {
     let dir = tempfile::tempdir().unwrap();
-    std::env::set_var("LLM_MONITOR_DATA_DIR", dir.path());
-    std::env::set_var(
-        "LLM_MONITOR_SOCKET",
-        std::env::temp_dir().join(format!("lm-e2e-{}.sock", std::process::id())),
-    );
+    // edition 2024: env mutators are unsafe (not thread-safe); fine in this test
+    // which sets them before spawning anything.
+    unsafe {
+        std::env::set_var("ARGUS_DATA_DIR", dir.path());
+        std::env::set_var(
+            "ARGUS_SOCKET",
+            std::env::temp_dir().join(format!("lm-e2e-{}.sock", std::process::id())),
+        );
+    }
 
     // Mock OTLP collector.
     let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
@@ -33,15 +37,16 @@ async fn hook_event_flows_to_mock_collector() {
     )
     .unwrap();
 
-    tokio::spawn(async { llm_monitor::daemon::run().await.unwrap() });
+    tokio::spawn(async { argus::daemon::run().await.unwrap() });
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
     // Simulate a Claude Code hook firing, including a secret to test redaction.
-    llm_monitor::hook::deliver(
+    argus::hook::deliver(
         "claude-code",
         None,
         r#"{"hook_event_name":"PreToolUse","session_id":"e2e","tool_name":"Bash",
             "tool_input":{"command":"curl -H 'Authorization: Bearer ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789' https://api.internal.example.com/v1"}}"#,
+        false,
     );
 
     let body = rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
@@ -55,12 +60,13 @@ async fn hook_event_flows_to_mock_collector() {
     // Copilot flow through the same daemon (merged into this test because
     // both flows set process-global env vars and would race as separate
     // #[tokio::test] functions).
-    llm_monitor::hook::deliver(
+    argus::hook::deliver(
         "copilot",
         Some("postToolUse"),
         r#"{"sessionId":"cp-e2e","cwd":"/repo","toolName":"bash",
             "toolArgs":{"command":"curl https://api.copilot-test.example.com/v1"},
             "toolResult":{"resultType":"success","textResultForLlm":"ok"}}"#,
+        false,
     );
 
     let body = rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();

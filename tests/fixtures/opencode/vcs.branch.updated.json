@@ -1,0 +1,12 @@
+{
+  "source": "opencode",
+  "received_at": "2026-01-01T00:00:00Z",
+  "payload": {
+    "sessionID": "ses_opencode_001",
+    "event": "vcs.branch.updated",
+    "cwd": "/repo",
+    "properties": {
+      "branch": "release/2.4"
+    }
+  }
+}

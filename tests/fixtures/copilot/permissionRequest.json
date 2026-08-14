@@ -1,0 +1,15 @@
+{
+  "source": "copilot",
+  "received_at": "2026-01-01T00:00:00Z",
+  "event": "permissionRequest",
+  "payload": {
+    "sessionId": "sess-copilot-001",
+    "cwd": "/Users/dev/project",
+    "agentName": "copilot",
+    "transcriptPath": "/Users/dev/.copilot/history/sess-copilot-001.json",
+    "toolName": "shell",
+    "toolArgs": {
+      "command": "git push"
+    }
+  }
+}

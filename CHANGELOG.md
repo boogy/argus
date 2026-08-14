@@ -1,0 +1,212 @@
+# Changelog
+
+All notable changes to this project are documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [0.2.0] - 2026-08-15
+
+First tagged release of argus: a single cross-platform Rust binary that captures
+what AI coding agents actually did and exports it as OTLP/JSON.
+
+### Highlights
+
+- **Native hook/plugin capture** for Claude Code, opencode, OpenAI Codex,
+  GitHub Copilot CLI and pi — read through each tool's own hook/plugin surface,
+  with no TLS proxying and no MITM.
+- **Redacted before it leaves the machine.** Built-in secret patterns scrub API
+  keys, tokens and credentials before anything touches disk or network.
+- **Offline-first pipeline.** A 250 ms hook shim is the only thing on the host
+  tool's critical path; it falls back to an on-disk JSONL spool. The daemon does
+  adapter parsing, redaction, capped SQLite buffering, and batched OTLP/JSON
+  export with exponential backoff off that path.
+- **Enrichment**: opt-in file-content capture with hashing and size caps, FQDN
+  and endpoint extraction from tool calls, MCP server identity, and the cloud
+  identity an agent was holding (AWS/Azure/GCP/K8s/Vault) — role, account and
+  project, never credentials.
+- **Three independent install scopes**: per-user, per-repository, and
+  administrator-managed (`--managed`).
+- **Fleet operation**: ETag-conditional remote config polling cached to disk so
+  policy still applies offline, plus `argus check` to verify hooks and plugins
+  have not been tampered with or silently disabled.
+
+Supported platforms: Linux (x86_64, aarch64 — static musl), macOS (Apple
+silicon, Intel), Windows (x86_64).
+
+<details>
+<summary>Every commit in this release</summary>
+
+### 🚀 Features
+
+- scaffold llm-monitor CLI with cross-platform paths ([d3e2c9c](https://github.com/boogy/argus/commit/d3e2c9c55e06892ed0f1f16f100598f89e0037e5))
+- add canonical event model and hook envelope ([138d101](https://github.com/boogy/argus/commit/138d10157f3a81072623fb8c411930a11eabd046))
+- add cross-platform IPC framing over local sockets ([df4de82](https://github.com/boogy/argus/commit/df4de82daed075faa57018a7e3673fd7ee6bef96))
+- add JSONL spool fallback for offline daemon ([e1d4f11](https://github.com/boogy/argus/commit/e1d4f1109bb48b62877f3c33d46fd7ad86209774))
+- add hook shim hot path with spool fallback and daemon autospawn ([e683921](https://github.com/boogy/argus/commit/e68392173eb44bb2522ddacbfc6bbc611158880e))
+- add layered config with remote polling and offline cache ([2086356](https://github.com/boogy/argus/commit/2086356eeb56018256e8e881e00670af0f67312e))
+- add regex secret redaction engine ([6e02815](https://github.com/boogy/argus/commit/6e02815a8c116aa19f8f438f56f794880a71dece))
+- add capped SQLite durable event buffer ([4b60d2b](https://github.com/boogy/argus/commit/4b60d2b675719ed1b656c6d5d1d8698c4f03f910))
+- add Claude Code hook adapter with file/fqdn/skill/agent extraction ([9d6b595](https://github.com/boogy/argus/commit/9d6b595e76dacfe742dd6ecdd0a25b30f5a75a65))
+- add OTLP/JSON log exporter ([5fbdfe7](https://github.com/boogy/argus/commit/5fbdfe7e62880b564a83d7db8e9b1585bda36a76))
+- assemble daemon pipeline with export loop and e2e test ([94a1300](https://github.com/boogy/argus/commit/94a1300ba84aad49dde6189cf56f5f0d77b67d64))
+- add opencode adapter and TypeScript plugin shim ([38535bb](https://github.com/boogy/argus/commit/38535bb5e3a07e5c81c7607bdaeedba4b9fafc8a))
+- add Codex OTLP/JSON receiver and event adapter ([3ac8dc6](https://github.com/boogy/argus/commit/3ac8dc657512e76cbfbcf269a1053d62bb5cf89d))
+- add install/uninstall wiring and README ([db3cac6](https://github.com/boogy/argus/commit/db3cac629b497977da38bead32171d4c5156df60))
+- extend event model with meta context, tool outputs/errors, permission/compact/notification/error kinds ([87e93cc](https://github.com/boogy/argus/commit/87e93cc1d2b75d2b803d36034cb8147702d93a58))
+- adapter registry plus shared file/fqdn/patch extraction and truncation helpers ([74f1433](https://github.com/boogy/argus/commit/74f143357915b86cec249bbc29e73c369a4a0bda))
+- hook shim --event hint and 8MiB stdin cap ([f12fe43](https://github.com/boogy/argus/commit/f12fe4393300ad1f13f292a5f19bc7face1deaa7))
+- full claude code hook coverage with shared parse_hook ([e72dee1](https://github.com/boogy/argus/commit/e72dee1f2a58549b9518fdd0c083bb356e62de44))
+- wire all telemetry-bearing claude code hooks with bounded timeout ([d6881dc](https://github.com/boogy/argus/commit/d6881dcfbe9b03ee33ce4d06e8e0c5973b2c73b3))
+- parse codex hooks-system payloads via shared parse_hook ([0fd3b2b](https://github.com/boogy/argus/commit/0fd3b2bd059a6f258ec9620ac29ba1ced81024e5))
+- wire codex hooks.json for prompt/tool/subagent/compact telemetry ([c0a2940](https://github.com/boogy/argus/commit/c0a2940c4221815097c95cfce2d014b35ba18094))
+- opencode plugin forwards full event set over persistent socket fast path ([0605cf3](https://github.com/boogy/argus/commit/0605cf3e192c5b7fb03d5c9b237827f8bbc572e5))
+- opencode adapter covers assistant messages, tool results, permissions, file and session bus events ([a4c31c1](https://github.com/boogy/argus/commit/a4c31c1ee96c457c1681ac0ffbe1ec5dd40e1f09))
+- github copilot cli adapter ([91095df](https://github.com/boogy/argus/commit/91095df6ce42fbf33976ede5589e069252ed3881))
+- wire github copilot cli hooks with per-event hints ([951d3ed](https://github.com/boogy/argus/commit/951d3ed4e57f927e95a6a7d47134a6f566e597c6))
+- add liveness heartbeat and hook-wiring integrity self-check ([a03f3f0](https://github.com/boogy/argus/commit/a03f3f0c34137c19a13d27bcc9cc831fc4a23c34))
+- add `llm-monitor check`, drop the heartbeat ([45122a7](https://github.com/boogy/argus/commit/45122a73e872448c18efb326bee33a3b381a8c27))
+- verify remote policy in `check` (config integrity + --remote-url) ([aac3c24](https://github.com/boogy/argus/commit/aac3c24b98f4dbe23b8e2f896a78521f3f6a22dd))
+- make `check` prove capture works, not just that files exist ([4b7d9c7](https://github.com/boogy/argus/commit/4b7d9c7ccc95d7b79be6d6ba29c1dd92b1879586))
+- optional request gzip on the export path ([5e82ff4](https://github.com/boogy/argus/commit/5e82ff4c1aeb8b29e333dc14cb1ccc3c86d92494))
+- carry the tool-call id and the effort level in Meta ([d6b4b50](https://github.com/boogy/argus/commit/d6b4b5018f6887cbf25977fe4d84bac56eda79d1))
+- record how long a tool call took and whether a human stopped it ([df8cc27](https://github.com/boogy/argus/commit/df8cc270c7cb2630b4d0f05ecd77b5e4e12f3463))
+- wire PostToolBatch, DirectoryAdded and UserPromptExpansion ([bf42ae5](https://github.com/boogy/argus/commit/bf42ae511dfee6725aa898c5220077cf3858a6ec))
+- subscribe to Codex SessionEnd with a 3s timeout ([a571828](https://github.com/boogy/argus/commit/a571828aafa5c877efa23eacea740e27b7d0fe25))
+- detect Codex kill switches in `check` ([d96c783](https://github.com/boogy/argus/commit/d96c783e54937a685a0154928121675a7a56490d))
+- report hook entries that are not the ones argus writes ([aeb5037](https://github.com/boogy/argus/commit/aeb5037e7b6cc8311196b64e8b7dec89f2fcebef))
+- wire a single repository with `--project` ([b7de4a0](https://github.com/boogy/argus/commit/b7de4a0a56b05c89991f0ea0ef4be6756a51e0c1))
+- capture the prompt as rewritten en route ([081c011](https://github.com/boogy/argus/commit/081c011784f38788743fa1cd6b168479d8f7ab55))
+- detect the Copilot settings that stop wired hooks from running ([8af38b6](https://github.com/boogy/argus/commit/8af38b635b7f475ac6af04c554c3f6f6da9adc54))
+- give Copilot per-event hook timeouts ([047a925](https://github.com/boogy/argus/commit/047a925bcfd6be46d33c6cf7e2b325d3bbf737d6))
+- give opencode events a cwd and a tool call id ([0274ce6](https://github.com/boogy/argus/commit/0274ce6e579d27a3dc71fd8f65ae9ecfbe08aed6))
+- record what an opencode turn cost ([f69cb28](https://github.com/boogy/argus/commit/f69cb28df645e239bcda0ec20ddd3a4c39941c44))
+- record the terminals opencode opens ([0b5b5c1](https://github.com/boogy/argus/commit/0b5b5c1cc8386f3f093e3fb6d93b937091d42e31))
+- map pi.dev's extension events ([2c862a0](https://github.com/boogy/argus/commit/2c862a0e3d379b4c4c643f64b3ce0b7e36210a3b))
+- wire argus into pi ([871e03a](https://github.com/boogy/argus/commit/871e03a07768e14a8dd6cc539dc2733c06aac8a2))
+- pin the settings that decide whether hooks run ([fc6031f](https://github.com/boogy/argus/commit/fc6031f04cdbe23b58864838d0c2429399baf8c7))
+- see the switches that stop a wired hook running ([e17390e](https://github.com/boogy/argus/commit/e17390ec87658c62272621b47755a3d99d37b487))
+- wire codex's machine-wide layer ([17db8f9](https://github.com/boogy/argus/commit/17db8f9eee470d6ecc66628afb67a153b0610678))
+- see codex's machine-wide kill switches ([ed36605](https://github.com/boogy/argus/commit/ed3660573c46664db481fe193e2e9ded2aa141ad))
+- cap after redaction, with a configurable mode ([801fc5c](https://github.com/boogy/argus/commit/801fc5c7184ff7a88087fc89e6f8f0f73276e833))
+- put FileSnapshot on the wire ([daa0e50](https://github.com/boogy/argus/commit/daa0e50358c2c1f474482e5e3cace84f2137059f))
+- decide which files may have their contents captured ([2da148a](https://github.com/boogy/argus/commit/2da148ac9a7f32d9bc00605330d5cd380f77a119))
+- capture what the payload already carried ([79b183f](https://github.com/boogy/argus/commit/79b183fd2d566f23db221bda3e35f7ae849f2ba0))
+- read the file the tool only named ([6158e0d](https://github.com/boogy/argus/commit/6158e0d1104d23bef3228a4431a2af698a37904e))
+- record which cloud identity the agent was holding ([9037643](https://github.com/boogy/argus/commit/9037643c2b4ce837a956b7a6c7d888f5a2739f4d))
+- read the whole input for hosts, keep the scheme and the port ([7878114](https://github.com/boogy/argus/commit/78781143bdd16bdf2c3e72d4652dbfe13d6d2a99))
+- read the hosts a result named, apart from the ones it was asked for ([43fe993](https://github.com/boogy/argus/commit/43fe9935908a43f91512e6661a827394ed24c853))
+- name the files a Codex tool call touched ([687686c](https://github.com/boogy/argus/commit/687686c92566f77d14a49721bda2ace06e0e3fdf))
+- say which MCP server a tool call went to ([cc58811](https://github.com/boogy/argus/commit/cc58811557f52aeaedd2a8884894e00f680d45e0))
+- read the files a shell command names ([828434f](https://github.com/boogy/argus/commit/828434f9919972e439784e17e27142c2a25791eb))
+- pair a Codex tool call with its result, and say how long it took ([816b7dd](https://github.com/boogy/argus/commit/816b7ddee1831c0f72ab94204986582ca90c3033))
+- say where an MCP server is, not just what it is called ([5d3a801](https://github.com/boogy/argus/commit/5d3a801bf2e66bbe79ac200a596e876bcf0bed3b))
+
+### 🐛 Fixes
+
+- platform-aware IPC name resolution and malformed-frame test ([5eeba8b](https://github.com/boogy/argus/commit/5eeba8be04f635b578793c33738152f1f0aff794))
+- avoid duplicate drain delivery on failed delete; test corrupt-file path ([6477313](https://github.com/boogy/argus/commit/6477313a40d696449908b4c8287969aa4eb5e2ae))
+- bound hook IPC attempt with 250ms deadline ([fa080fb](https://github.com/boogy/argus/commit/fa080fbb72c0bd7afae1a861aad7f86c91e2f479))
+- reject invalid remote config layers instead of resetting to defaults ([0ead554](https://github.com/boogy/argus/commit/0ead5540f8b86e1ea9fa1689cd70d87349c9f2e4))
+- close PEM body and unquoted-assignment redaction leaks ([4b11361](https://github.com/boogy/argus/commit/4b113615094aa702477d3c787a575c3cb58d8e62))
+- redact underscore-prefixed env var secret assignments ([51d9ee0](https://github.com/boogy/argus/commit/51d9ee0c230c114c2c96ce5e3c7c679ff985b5d0))
+- recover from poisoned buffer lock; test corrupt-row skip ([8a869f3](https://github.com/boogy/argus/commit/8a869f307bf691842e11b354ec0a985cc276da39))
+- harden fqdn extraction against credentials and punctuation ([1a1d6a3](https://github.com/boogy/argus/commit/1a1d6a3d471f044bf64a25bd4f3cf37fe8555383))
+- stop userinfo skip at query/fragment in fqdn extraction ([fb86191](https://github.com/boogy/argus/commit/fb86191d28380fe2b35c8a5f72f5967efe699176))
+- real single-instance guard, drain channel and stop exporter on shutdown ([8e69bea](https://github.com/boogy/argus/commit/8e69bea8f6b645a1a70d286256c5934ea3e2c79e))
+- guard shim stdin errors; cover opencode adapter branches ([2507108](https://github.com/boogy/argus/commit/250710862af271e20c6121a6425b68af1bcbdde2))
+- harden codex http listener against oversized length and slow reads ([f3b8ab3](https://github.com/boogy/argus/commit/f3b8ab338b0d44742e60265f62b42b4af3b55ebe))
+- preserve user config formatting in claude and codex install wiring ([81b400a](https://github.com/boogy/argus/commit/81b400adfd378a7122a1ec655c56d037826f28d9))
+- codex notify argv payload, 0600 on-disk artifacts, max_events and endpoint guards ([f43fc04](https://github.com/boogy/argus/commit/f43fc04f0771e95ef6cdbcb051810689df4b7207))
+- detect tools by four independent signals, not one directory ([1de5706](https://github.com/boogy/argus/commit/1de57062b6f102f09aaca64aab8a82d7fd72be55))
+- stop paying a process spawn and 10 rewrites per event ([2b9d12f](https://github.com/boogy/argus/commit/2b9d12f9d3b0f76063ef3292c99bfb214cb1d7f4))
+- stop re-clone, re-trim and re-handshake on every cycle ([a6bfdd7](https://github.com/boogy/argus/commit/a6bfdd7ff6c4f6c1402edbbbd4384bb8afecf59b))
+- get the buffer off the roaming profile ([fcc8b04](https://github.com/boogy/argus/commit/fcc8b04301d578ce204aa38208debb3e82022130))
+- make buffer overflow visible instead of silent ([7edc07f](https://github.com/boogy/argus/commit/7edc07fee1a6048dbbf5923f8ce929abd5b9cd9b))
+- report shim stdin truncation instead of hiding it ([92b7077](https://github.com/boogy/argus/commit/92b70771892a6671d22fe5d2e47b7fa6d492a4f2))
+- cap the buffer by bytes, and let a running daemon adopt the cap ([4755c5d](https://github.com/boogy/argus/commit/4755c5de7d1b4eba1b743ece3365f3b68fd136ae))
+- stop deleting spool files before the events reach the buffer ([66f64ae](https://github.com/boogy/argus/commit/66f64ae8e8e0ec77405f57cbd66aa15f45a8e0a2))
+- bound the hand-off spool and report what it deletes ([e2da3c7](https://github.com/boogy/argus/commit/e2da3c70b6e4ee2a2172461d7c58b978ec0a4eef))
+- bound the IPC frame so one peer cannot exhaust the daemon ([b2d5dfd](https://github.com/boogy/argus/commit/b2d5dfdeec2d6d15896bad2b70a2b07144513ebb))
+- give each user their own endpoint on Windows ([bdd0134](https://github.com/boogy/argus/commit/bdd013423ff5dbf9bfcd3f24c6606287beb9e78e))
+- bind only an endpoint this account owns (Unix) ([bde92ff](https://github.com/boogy/argus/commit/bde92ffac6a0e8b9189d332f8b433169aca84199))
+- grant the Windows pipe to one account, not to Everyone ([55f024c](https://github.com/boogy/argus/commit/55f024c31b873395f78510410753bda388ca0cd4))
+- give each install its own Codex OTLP port, and hold `check` to it ([afc355d](https://github.com/boogy/argus/commit/afc355d1c6d76b87d533d41f8f2d6d3b5f0aabb5))
+- require a bearer token on the Codex OTLP receiver ([d6f6eb9](https://github.com/boogy/argus/commit/d6f6eb926084f9bf692ec80b66d65eb3db9bbef8))
+- hold Codex's OTLP token in `check` without printing it ([e197e3d](https://github.com/boogy/argus/commit/e197e3d867c61c1a67df11b9329feab27514c7b9))
+- stop retrying an export the collector will never accept ([a1fd3a4](https://github.com/boogy/argus/commit/a1fd3a4a37fea8c3f992abdb0400584844c52536))
+- bound an export batch by bytes, and count bytes as bytes ([13551a2](https://github.com/boogy/argus/commit/13551a2f56f4350fd3eafa69b967ada18106d68d))
+- read Claude Code's non-tool hook payloads by their real field names ([a61efd2](https://github.com/boogy/argus/commit/a61efd2fa7f8871f65405fbb93acb4368784b041))
+- keep the last assistant message when the turn failed ([9f0b0ee](https://github.com/boogy/argus/commit/9f0b0ee98680eca04b66af7a232c3ca8cf75b653))
+- sort before dedup in extract_files_for_tool ([55eb49d](https://github.com/boogy/argus/commit/55eb49dfad05b7f108c270b27fcf17eb2f6e9d00))
+- refresh stale argus hook entries on install ([1a72742](https://github.com/boogy/argus/commit/1a727428c9116a8c7b392d15bd380535538656da))
+- keep the payload fields that were being read past ([5e6a508](https://github.com/boogy/argus/commit/5e6a508564d47bc784b6579789bd54d3bb4e7ed5))
+- stop the opencode shim sending the same event twice ([01e2247](https://github.com/boogy/argus/commit/01e2247063562ff5d389a7acd0e843b5d85b4751))
+- install into whichever plugin directory opencode already has ([a22acf6](https://github.com/boogy/argus/commit/a22acf6e78ba69c237a41dbf07c0c0dcae1d323e))
+- stop forwarding an opencode event that does not exist ([1d2c14b](https://github.com/boogy/argus/commit/1d2c14b72f6b8266e1c361adc6255695946b605d))
+- keep a machine-wide install pointed at the machine ([fce3185](https://github.com/boogy/argus/commit/fce31859eb3e4421d1e6c68d846a4e98f7b67f31))
+- bound the daemon's ingress by bytes as well as rows ([8e8a4c2](https://github.com/boogy/argus/commit/8e8a4c2095616baf2864ebbe59041bebc3023bf0))
+- cap each string leaf instead of the whole value ([4f3a343](https://github.com/boogy/argus/commit/4f3a343e0fa86fa3244873477fbc1ec8d9fdbacb))
+- stop waiting on a read that stopped returning ([3b18bab](https://github.com/boogy/argus/commit/3b18bab65eedccb9e58e2379cc908bf86577609d))
+- restore the line a killed mutation run left mutated ([430bbff](https://github.com/boogy/argus/commit/430bbffb549d3b1703cca4ad17f3dcd5dcfd2bff))
+- stop promising a coverage the code does not have ([f3d5c6f](https://github.com/boogy/argus/commit/f3d5c6f26ded4b7ecfba3d1c916e28af45503cd7))
+- order the spool by something the filesystem can express ([1bfff78](https://github.com/boogy/argus/commit/1bfff7830a734c5154f1377f2003d0fe31e2768f))
+- quote the bash hook command for bash, not for the host ([6c93173](https://github.com/boogy/argus/commit/6c93173999fd493b43d49eda5493a29e3ad2a46c))
+- compare the pipe's trustee, not its spelling ([e5bf7c3](https://github.com/boogy/argus/commit/e5bf7c3812b11e894be29b4927b20d8f90e1ad78))
+- identify an excluded file in a payload, the way the disk path does ([c488282](https://github.com/boogy/argus/commit/c48828242abfaf445919bf06ab43b1ed9c57ef93))
+- stop the two accept loops spinning on a persistent error ([90d4ca0](https://github.com/boogy/argus/commit/90d4ca0a181b9130a00b0d798f2dbb9404f2772d))
+- stop one failed cache write from silencing fleet policy forever ([be8c493](https://github.com/boogy/argus/commit/be8c49378b4cc8095d4496c6968360c5a15ed2ec))
+- stop the legacy-data walk from following symlinks back into itself ([a1a2353](https://github.com/boogy/argus/commit/a1a23533172bb26bb3b736cc77486763f454a47d))
+- replace the host tools' config files whole, never in place ([2567048](https://github.com/boogy/argus/commit/2567048277cb4b32cf6463936b2a0b0d05b0dc14))
+- hold the executed plugin files to the bytes this binary writes ([3a6b5a4](https://github.com/boogy/argus/commit/3a6b5a4d616cfdf80bdde47f3da154ef608e4462))
+- read the role a profile names, not just the profile's name ([d09c654](https://github.com/boogy/argus/commit/d09c654ab6e9301e21d88ed302a8005940d52458))
+- assert where gcloud keeps its ADC file, not that it is under $HOME ([44dbd90](https://github.com/boogy/argus/commit/44dbd9011d90041230eb8138c096657c0e0b6f73))
+- create private, rather than create and then chmod ([47c99ce](https://github.com/boogy/argus/commit/47c99ce6410040110fbe179d5ebe7d6f0aebe82c))
+- a marker inside a key name is still a secret, and two fields nothing visited ([48bf060](https://github.com/boogy/argus/commit/48bf060e497146a780a8bbcbdb6353f2213e89ee))
+- tool_inputs = false has to reach every field carrying tool input ([b3df831](https://github.com/boogy/argus/commit/b3df831069818d0968502630c9f2c9062add195d))
+- record a Codex permission decision even with tool inputs off ([61dd839](https://github.com/boogy/argus/commit/61dd83923ebb01146ed984f827f3f788e8560087))
+- an include anchored at the root was satisfied from any directory ([2ab83f9](https://github.com/boogy/argus/commit/2ab83f9d77deb67769e97a148c8b2daaab4d30f3))
+- ARGUS_LOG turned up the HTTP stack along with the daemon ([66ed1a8](https://github.com/boogy/argus/commit/66ed1a8d01aba3f7820d6b3f137c87b25850e4c5))
+- three ways the daemon lost events and reported success ([46e1f71](https://github.com/boogy/argus/commit/46e1f7108c1fee1e5f92e07245715f02521e2e0e))
+- keep a spool file that could not be read ([1da8ad6](https://github.com/boogy/argus/commit/1da8ad637f1ee34773d7a46f8c18e9142ecb7513))
+- a file already at the plugin path could block the install or evade the check ([108e425](https://github.com/boogy/argus/commit/108e425591b5b485a0c64a29abf6021a299ec858))
+
+### 📝 Documentation
+
+- per-tool fidelity, config reference, adding-a-tool guide; e2e copilot flow ([e2080f8](https://github.com/boogy/argus/commit/e2080f8b1801e3bf53830a75c1ddfc7dbdb9c46f))
+- 📝 docs: local event DB query guide and telemetry gap review ([539cc52](https://github.com/boogy/argus/commit/539cc529f8e7e932c5cd4fc8e9cd47fc7079b016))
+- point T11b's deferral note at T11d, not T11c ([e8eb32c](https://github.com/boogy/argus/commit/e8eb32c113a8afdf547127003c7163d507c37586))
+- document the machine-wide layer ([1bdd284](https://github.com/boogy/argus/commit/1bdd2848fe828cf9f5822cc5f809652dba8bfe6c))
+- document file-content capture and the spool's un-redacted window ([9c2892f](https://github.com/boogy/argus/commit/9c2892fc36087715991a1aefb284a6fb3a03eaa2))
+- tell an adapter author what file capture needs from them ([f13008e](https://github.com/boogy/argus/commit/f13008e2aa07cb9585cb24419e6dfe79b4b24495))
+- say which telemetry gaps the waves closed, and how ([d31cf93](https://github.com/boogy/argus/commit/d31cf935fef2976c58894f52b8f85e3afe40bdf1))
+- fix a doc comment that cited a doc it does not match ([7d4f559](https://github.com/boogy/argus/commit/7d4f5597b3a0799fd2a884db9d16d3a096bd773e))
+- correct four comments that describe behavior the code does not have ([89559a3](https://github.com/boogy/argus/commit/89559a36c72e6abee688e7a68c9ffee276e779a7))
+- correct two comments that outlived the code ([2bd4124](https://github.com/boogy/argus/commit/2bd41248798419f7f530d776bfa1a13fa9d3e404))
+- say where detection's compile-time checks actually are ([ef58acd](https://github.com/boogy/argus/commit/ef58acdc38604de220166398b8feb87b101c60c0))
+- correct four config docs against the code they describe ([76dff75](https://github.com/boogy/argus/commit/76dff75da7c6b14e4b34191f85abff6bf65d2b2d))
+- correct five comments that misstate what the code does ([d46a829](https://github.com/boogy/argus/commit/d46a829f830bbdf6376ae07daff55e9b8419fbb5))
+- stop claiming copilot suppresses an assistant message the way the others do ([ec1c764](https://github.com/boogy/argus/commit/ec1c764b079467a040809e8fca1630988bdba387))
+- reattach a doc to the function it describes, and two byte counts to UTF-8 ([c693958](https://github.com/boogy/argus/commit/c6939588c9b7dc012687caa32fd298c2f05ed6b7))
+- keep the working ledger out of the repo, leave the record that reads ([bf67dfd](https://github.com/boogy/argus/commit/bf67dfd55610168ff3a8bb3f552ac90c19b36d8c))
+- drop task ids from comments, keep the reason they carried ([791a282](https://github.com/boogy/argus/commit/791a2821fd58d64297f3306062db4c9ebdb60cdd))
+- split the README into a docs/ tree and add SVG diagrams ([a238e00](https://github.com/boogy/argus/commit/a238e000f9735ff38efc38474010ec61dd51e95f))
+
+### 🔧 CI / Build
+
+- CI matrix (ubuntu/macos/windows) and task ledger ([68872b2](https://github.com/boogy/argus/commit/68872b2b8de1c160f69ffc05e614e6cdf9a21886))
+- tag-driven release workflow, pinned actions, dependabot, changelog ([2a13580](https://github.com/boogy/argus/commit/2a1358063cd64972b720b893ae9dc079be4ae46d))
+
+### Other Changes
+
+- Initial commit ([f2041d8](https://github.com/boogy/argus/commit/f2041d842b13bc071e658399dd2a4291d13c0639))
+- lock flattened event wire shape ([3520643](https://github.com/boogy/argus/commit/3520643af8d6d3a1ec04d587054675770447243d))
+- serialize test execution (tests mutate process-global env vars) ([fc311a2](https://github.com/boogy/argus/commit/fc311a2998944d313ff72f137bb0a1919ce7338b))
+- cover non-2xx export error path ([b2822b7](https://github.com/boogy/argus/commit/b2822b77e19d22a0174258ccb101909785f4a544))
+- rename project llm-monitor → argus ([58b8f0c](https://github.com/boogy/argus/commit/58b8f0c3d547b680ed2867774f7be9b10205970b))
+- collapse per-tool install/detect/parse onto one Harness registry ([934a097](https://github.com/boogy/argus/commit/934a09795b3c9c69de4df4605e54d0f5e09f5474))
+- record real payloads, promote them into fixtures ([ee44eb3](https://github.com/boogy/argus/commit/ee44eb3952828839f73a6142da5f1cd5fb3f3fe1))
+- share one transport between TypeScript plugin hosts ([d13d896](https://github.com/boogy/argus/commit/d13d8963ead203f5a5adf9332d8979df3340885a))
+- split the daemon pipeline into three stages ([f1507e1](https://github.com/boogy/argus/commit/f1507e16a689b5f054a3e3314c3821d3f6898984))
+
+</details>

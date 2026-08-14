@@ -6,13 +6,13 @@ cookbook for investigating sessions, tools, files, and network activity locally.
 
 ## Location
 
-| Platform | Path                                                  |
-| -------- | ----------------------------------------------------- |
-| macOS    | `~/Library/Application Support/llm-monitor/events.db` |
-| Linux    | `~/.local/share/llm-monitor/events.db`                |
-| Windows  | `%APPDATA%\llm-monitor\events.db`                     |
+| Platform | Path                                            |
+| -------- | ----------------------------------------------- |
+| macOS    | `~/Library/Application Support/argus/events.db` |
+| Linux    | `~/.local/share/argus/events.db`                |
+| Windows  | `%APPDATA%\argus\events.db`                     |
 
-`LLM_MONITOR_DATA_DIR` overrides the data dir. The file is `0600` (owner-only)
+`ARGUS_DATA_DIR` overrides the data dir. The file is `0600` (owner-only)
 on Unix because buffered rows may predate redaction config changes.
 
 ## Retention semantics — read this first
@@ -22,17 +22,25 @@ The database is an **export buffer, not an archive**:
 - If `export.otlp_endpoint` is set, rows are **deleted** after each successful
   export batch (`ack`). The table is usually near-empty on a healthy machine.
 - If no endpoint is configured (the default), events accumulate up to
-  `buffer.max_events` (default 100 000); the oldest rows are then dropped.
+  `buffer.max_events` (default 100 000) or `buffer.max_bytes` (default
+  256 MiB), whichever binds first; the oldest rows are then dropped, and the
+  gap is recorded as a `loss` event rather than vanishing.
+- Events lost _before_ they reached the database are recorded the same way, so
+  `SELECT ... WHERE type = 'loss'` is the one query that tells you whether the
+  rest of the table is the whole story. `reason` says which mechanism:
+  `buffer_full` (this cap), `spool_full` (the shim deleted undelivered events
+  while the daemon was down), `stdin_truncated` (a hook payload over the 8 MiB
+  cap, so the event _after_ the marker is incomplete rather than missing).
 - For local-only analysis, leave `export.otlp_endpoint` unset.
 
 The DB runs in WAL mode. Reading while the daemon is running is safe, but:
 
 ```bash
 # always open read-only so you can't take a write lock under the daemon
-sqlite3 -readonly "~/Library/Application Support/llm-monitor/events.db"
+sqlite3 -readonly "~/Library/Application Support/argus/events.db"
 
 # for heavy analysis (or to create indexes), work on a snapshot instead
-sqlite3 "~/Library/Application Support/llm-monitor/events.db" ".backup /tmp/events-copy.db"
+sqlite3 "~/Library/Application Support/argus/events.db" ".backup /tmp/events-copy.db"
 ```
 
 ## Schema
@@ -65,31 +73,35 @@ builds use `json_extract(body, '$.path')` — they are equivalent.
 
 ### Optional `meta` context (present when the tool exposed it)
 
-| JSON path                | Meaning                            |
-| ------------------------ | ---------------------------------- |
-| `$.meta.turn_id`         | prompt/turn id                     |
-| `$.meta.agent_id`        | subagent id                        |
-| `$.meta.agent_type`      | subagent type (e.g. `Explore`)     |
-| `$.meta.permission_mode` | e.g. `acceptEdits`                 |
-| `$.meta.model`           | model id in use                    |
-| `$.meta.transcript_path` | path to the tool's transcript file |
+| JSON path                | Meaning                                                                                                                   |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------- |
+| `$.meta.turn_id`         | prompt/turn id                                                                                                            |
+| `$.meta.agent_id`        | subagent id                                                                                                               |
+| `$.meta.agent_type`      | subagent type (e.g. `Explore`)                                                                                            |
+| `$.meta.permission_mode` | e.g. `acceptEdits`                                                                                                        |
+| `$.meta.model`           | model id in use                                                                                                           |
+| `$.meta.transcript_path` | path to the tool's transcript file                                                                                        |
+| `$.meta.tool_use_id`     | id of one tool call; the `pre` and `post` rows of the same call share it                                                  |
+| `$.meta.effort`          | reasoning effort asked of the model this turn (e.g. `high`)                                                               |
+| `$.meta.mcp_server`      | the MCP server a tool call or permission prompt went to, from a `mcp__<server>__<tool>` name                              |
+| `$.meta.mcp_endpoint`    | where that server actually is — a URL, or `stdio:<command line>` for a local one. Only when `capture.mcp_endpoints` is on |
 
 ### Per-kind fields (flattened at top level, discriminated by `$.type`)
 
-| `$.type`            | Fields                                                                                                                                                |
-| ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `prompt`            | `text`                                                                                                                                                |
-| `assistant_message` | `text`                                                                                                                                                |
-| `tool_use`          | `tool`, `phase` (`pre`/`post`/`error`), `input` (JSON), `output` (JSON, post only), `error` (string, failures only), `files` (array), `fqdns` (array) |
-| `skill`             | `name`, `args`                                                                                                                                        |
-| `agent`             | `agent_type`, `description`                                                                                                                           |
-| `permission`        | `tool`, `action` (`requested`/`denied`/`replied`/`updated`), `input`                                                                                  |
-| `notification`      | `message`, `category`                                                                                                                                 |
-| `compact`           | `phase`, `trigger`, `tokens_before`, `tokens_after`                                                                                                   |
-| `file_change`       | `path`, `action` (`edited`, `config_changed:<src>`, `instructions_loaded`, …)                                                                         |
-| `error`             | `message`, `context`                                                                                                                                  |
-| `session`           | `action` (`SessionStart`, `Stop`, `session.created`, `turn-complete`, …), `detail` (JSON)                                                             |
-| `raw`               | `payload` (unmapped upstream event, kept verbatim)                                                                                                    |
+| `$.type`            | Fields                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `prompt`            | `text`                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `assistant_message` | `text`                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `tool_use`          | `tool`, `phase` (`pre`/`post`/`error`), `input` (JSON), `output` (JSON, post only), `error` (string, failures only), `duration_ms` (post legs only), `interrupted` (present only when a human stopped the call), `files` (array), `fqdns` (array), `endpoints` (array of `scheme://host[:port]`), `output_fqdns` / `output_endpoints` (the same two read out of the _result_, post legs only, minus whatever the input already named) |
+| `skill`             | `name`, `args`                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `agent`             | `agent_type`, `description`                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `permission`        | `tool`, `action` (`requested`/`denied`/`replied`/`updated`), `input`                                                                                                                                                                                                                                                                                                                                                                  |
+| `notification`      | `message`, `category`                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `compact`           | `phase`, `trigger`, `tokens_before`, `tokens_after`                                                                                                                                                                                                                                                                                                                                                                                   |
+| `file_change`       | `path`, `action` (`edited`, `config_changed:<src>`, `instructions_loaded:<tier>`, `directory_added:<how>`, …)                                                                                                                                                                                                                                                                                                                         |
+| `error`             | `message`, `context`                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `session`           | `action` (`SessionStart`, `Stop`, `UserPromptExpansion`, `PostToolBatch`, `session.created`, `turn-complete`, …), `detail` (JSON)                                                                                                                                                                                                                                                                                                     |
+| `raw`               | `payload` (unmapped upstream event, kept verbatim)                                                                                                                                                                                                                                                                                                                                                                                    |
 
 Fields that are null/empty may be omitted entirely (`output`, `error`, `meta`,
 `detail`), so prefer `->>` (returns NULL on missing paths) over assuming presence.
@@ -161,6 +173,22 @@ ORDER BY hits DESC;
 
 (Filtering on `phase = 'pre'` avoids double-counting the matching post event.)
 
+### Network: connections on an unusual scheme or port
+
+`fqdns` answers "who", `endpoints` answers "how" — the same host reached over
+`https` and over `ssh` is two different findings. A port appears only when the
+call stated one, so this returns the calls that chose a port rather than every
+call that had one by default:
+
+```sql
+SELECT e.value AS endpoint, COUNT(*) AS hits
+FROM events, json_each(events.body, '$.endpoints') AS e
+WHERE body->>'$.type' = 'tool_use' AND body->>'$.phase' = 'pre'
+  AND (e.value NOT LIKE 'http%' OR e.value GLOB '*:[0-9]*')
+GROUP BY 1
+ORDER BY hits DESC;
+```
+
 ### Network: which session/command contacted a given host
 
 ```sql
@@ -170,6 +198,44 @@ FROM events, json_each(events.body, '$.fqdns') AS f
 WHERE f.value = 'evil.example.com';
 ```
 
+### Network: hosts that only the result named
+
+A host in `output_fqdns` was never asked for — it is where a fetch was
+redirected, or what a search result or an error message pointed at. Keeping it
+out of `fqdns` is deliberate (a tool result is content, not an instruction), so
+this is its own query rather than a wider one:
+
+```sql
+SELECT body->>'$.tool' AS tool, o.value AS host, COUNT(*) AS hits
+FROM events, json_each(events.body, '$.output_fqdns') AS o
+WHERE body->>'$.type' = 'tool_use'
+GROUP BY 1, 2
+ORDER BY hits DESC;
+```
+
+Swap `json_each` to `'$.output_endpoints'` for the scheme and port, on the same
+terms as `endpoints` above.
+
+### MCP: which third-party servers this machine reaches
+
+Present on tool calls and on the permission prompts that gated them, so a
+server that only ever appears in denials still shows up:
+
+```sql
+SELECT body->>'$.meta.mcp_server' AS server,
+       body->>'$.source'          AS source,
+       COUNT(*)                   AS calls,
+       COUNT(DISTINCT body->>'$.session_id') AS sessions
+FROM events
+WHERE server IS NOT NULL
+GROUP BY 1, 2
+ORDER BY calls DESC;
+```
+
+With `capture.mcp_endpoints` on, add `body->>'$.meta.mcp_endpoint'` to the
+select and the grouping: the same server name can resolve to a different place
+on two machines, and that difference is the interesting one.
+
 ### Files: everything touched, by session
 
 ```sql
@@ -178,6 +244,18 @@ SELECT body->>'$.session_id' AS session, f.value AS path,
 FROM events, json_each(events.body, '$.files') AS f
 WHERE body->>'$.type' = 'tool_use' AND body->>'$.phase' = 'pre'
 GROUP BY 1, 2, 3;
+```
+
+`files` includes what a shell command named — a redirect target, a `cp`/`mv`/
+`rm`/`tee`/`touch` argument, a `sed -i` file — so this query covers writes that
+never went through a file tool:
+
+```sql
+SELECT body->>'$.session_id' AS session, f.value AS path, body->>'$.input' AS cmd
+FROM events, json_each(events.body, '$.files') AS f
+WHERE body->>'$.type' = 'tool_use' AND body->>'$.phase' = 'pre'
+  AND body->>'$.tool' IN ('Bash', 'shell', 'bash')
+ORDER BY seq DESC;
 ```
 
 Also include `file_change` events (opencode edits, Claude Code config changes):
@@ -219,6 +297,46 @@ FROM events WHERE body->>'$.type' = 'skill';
 SELECT body->>'$.ts', body->>'$.agent_type', body->>'$.description',
        body->>'$.meta.model'
 FROM events WHERE body->>'$.type' = 'agent';
+```
+
+### What slash commands actually expanded into
+
+The `prompt` row shows what the human typed; this shows the text the command
+turned into, which lives in a file they were not looking at when they typed it.
+
+```sql
+SELECT body->>'$.ts',
+       body->>'$.detail.command_name'   AS command,
+       body->>'$.detail.command_source' AS defined_in,
+       substr(body->>'$.detail.prompt', 1, 200) AS expanded
+FROM events
+WHERE body->>'$.type' = 'session'
+  AND body->>'$.action' = 'UserPromptExpansion'
+ORDER BY seq DESC;
+```
+
+`defined_in = 'project'` means the command body is repo-controlled: whoever can
+push to the repo can change what it expands to.
+
+### Which tool calls ran in the same parallel batch
+
+`PostToolBatch` carries only the grouping (`tool_name` + `tool_use_id`); join
+back to the `tool_use` rows via `$.meta.tool_use_id` for inputs and outputs.
+
+```sql
+SELECT body->>'$.ts', c.value->>'$.tool_name', c.value->>'$.tool_use_id'
+FROM events, json_each(events.body, '$.detail.tool_calls') AS c
+WHERE body->>'$.action' = 'PostToolBatch'
+ORDER BY seq DESC;
+```
+
+### Directory scope expansions (`/add-dir`)
+
+```sql
+SELECT body->>'$.ts', body->>'$.session_id', body->>'$.path', body->>'$.action'
+FROM events
+WHERE body->>'$.type' = 'file_change'
+  AND body->>'$.action' LIKE 'directory_added:%';
 ```
 
 ### Compaction / context pressure

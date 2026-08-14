@@ -1,0 +1,11 @@
+{
+  "source": "pi",
+  "received_at": "2026-01-01T00:00:00Z",
+  "payload": {
+    "sessionID": "ses_pi_001",
+    "cwd": "/Users/dev/src/argus",
+    "event": "session_start",
+    "reason": "startup",
+    "previousSessionFile": null
+  }
+}

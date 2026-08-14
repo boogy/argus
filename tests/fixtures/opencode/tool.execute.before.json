@@ -1,0 +1,14 @@
+{
+  "source": "opencode",
+  "received_at": "2026-01-01T00:00:00Z",
+  "payload": {
+    "sessionID": "ses_opencode_001",
+    "event": "tool.execute.before",
+    "tool": "bash",
+    "callID": "call_1",
+    "args": {
+      "command": "cargo build --timings",
+      "description": "profile the build"
+    }
+  }
+}

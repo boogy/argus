@@ -1,0 +1,29 @@
+{
+  "source": "pi",
+  "received_at": "2026-01-01T00:00:00Z",
+  "payload": {
+    "sessionID": "ses_pi_001",
+    "cwd": "/Users/dev/src/argus",
+    "event": "turn_end",
+    "turnIndex": 4,
+    "messageID": "msg_01HQ",
+    "provider": "anthropic",
+    "model": "claude-opus-5",
+    "stopReason": "toolUse",
+    "toolResults": 1,
+    "usage": {
+      "input": 18422,
+      "output": 640,
+      "reasoning": 214,
+      "cacheRead": 16000,
+      "cacheWrite": 2048,
+      "cost": {
+        "input": 0.0055,
+        "output": 0.0096,
+        "cacheRead": 0.0048,
+        "cacheWrite": 0.0077,
+        "total": 0.0276
+      }
+    }
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "source": "opencode",
+  "received_at": "2026-01-01T00:00:00Z",
+  "payload": {
+    "sessionID": "ses_opencode_001",
+    "event": "tool.execute.after",
+    "tool": "bash",
+    "callID": "call_1",
+    "args": {
+      "command": "cargo build --timings"
+    },
+    "result": {
+      "output": "Finished in 41.2s",
+      "exitCode": 0
+    }
+  }
+}

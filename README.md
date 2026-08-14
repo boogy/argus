@@ -1,4 +1,14 @@
-# llm-monitor
+<p align="center">
+  <img src="assets/banner.svg" alt="argus" width="900">
+</p>
+
+<p align="center">
+  <a href="https://github.com/boogy/argus/actions/workflows/ci.yml"><img src="https://github.com/boogy/argus/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/boogy/argus/releases/latest"><img src="https://img.shields.io/github/v/release/boogy/argus" alt="Release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="License"></a>
+</p>
+
+**See what your AI coding agents actually did — every prompt, tool call, file, host, and credential, captured locally and shipped to your observability stack.**
 
 A single cross-platform Rust binary that gives security/platform teams visibility
 into how AI coding agents are used: which prompts are sent, which tools/files/FQDNs
@@ -6,14 +16,40 @@ they touch, which skills/subagents run — captured through each tool's native
 hook/plugin surface (no TLS proxying, no MITM) and exported as OTLP/JSON logs to
 any observability backend (Splunk, Datadog, Grafana, an OTel Collector, ...).
 
-Supports **Claude Code**, **opencode**, **OpenAI Codex**, and **GitHub Copilot CLI**.
+Supports **Claude Code**, **opencode**, **OpenAI Codex**, **GitHub Copilot CLI**, and **pi**.
+
+<p align="center">
+  <img src="assets/pipeline.svg" alt="argus pipeline: coding agents emit through each tool's hook or plugin surface into the argus hook shim, which has a 250 ms budget and is the only part on the coding tool's critical path; it hands off to the argus daemon, which captures, redacts, buffers to SQLite with a spool fallback, and exports batched OTLP/JSON to an observability backend" width="900">
+</p>
+
+The hook shim is the only thing on the host tool's critical path (a 250ms
+deadline, falling back to an on-disk spool if the daemon isn't reachable); the
+daemon does everything else off that path — adapter parsing, redaction,
+durable buffering, and batched export with backoff.
+
+## Features
+
+|     | Feature                                   |                                                                                                                                                      |
+| --- | ----------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 🪝  | **Native hook/plugin capture**            | Reads each tool's own hook/plugin payloads — no TLS proxying, no MITM.                                                                               |
+| 🔒  | **Redacted before it leaves the machine** | Built-in secret patterns scrub API keys, tokens, and credentials before anything touches disk or network.                                            |
+| 📡  | **OTLP/JSON export, offline-first**       | Durable SQLite buffer, batched export with backoff to any OTel-compatible backend.                                                                   |
+| 📂  | **Opt-in file-content capture**           | Records what a `Write`/`Edit`/patch actually changed, with hashing, size caps, and binary/exclude filters.                                           |
+| 🌐  | **Network & MCP visibility**              | Extracts FQDNs/endpoints from tool calls and names the MCP server each call reached.                                                                 |
+| ☁️  | **Cloud identity, never credentials**     | Captures the AWS/Azure/GCP/K8s/Vault identity an agent was holding — role, account, project — and only the _names_ of credential variables in scope. |
+| 🏢  | **Three independent install scopes**      | Per-user, per-repository, and administrator-managed (`--managed`) installs.                                                                          |
+| 📶  | **Remote fleet config**                   | ETag-conditional polling of a central policy URL, cached to disk so it still applies offline; always wins over the local file.                       |
+| 🛡️  | **Self-integrity checks**                 | `argus check` verifies hooks/plugins haven't been tampered with or silently disabled, for fleet monitoring.                                          |
 
 ## Quick start
 
 ```bash
-cargo install --path .          # or grab a release binary
-llm-monitor install             # detects installed tools, wires hooks/plugins/config
+cargo install --path .    # or grab a release binary
+argus install              # detects installed tools, wires hooks/plugins/config
 ```
+
+`--dry-run` prints the plan, and the detection signals behind it, without
+writing anything.
 
 Point the daemon at your collector — edit `<data-dir>/config.toml`:
 
@@ -22,195 +58,68 @@ Point the daemon at your collector — edit `<data-dir>/config.toml`:
 otlp_endpoint = "https://otel-collector.internal:4318"
 ```
 
-(`<data-dir>` is `~/Library/Application Support/llm-monitor` on macOS,
-`~/.local/share/llm-monitor` on Linux, `%APPDATA%\llm-monitor` on Windows —
-see [Architecture](#architecture).)
+(`<data-dir>` is `~/Library/Application Support/argus` on macOS,
+`~/.local/share/argus` on Linux, `%APPDATA%\argus` on Windows.)
 
 For fleet-wide rollout, skip local `config.toml` entirely and set:
 
 ```toml
 [remote]
-url = "https://config.internal/llm-monitor.toml"
+url = "https://config.internal/argus.toml"
 ```
 
 The daemon polls that URL (ETag-conditional) and caches the result to disk, so
 policy still applies offline after the first successful fetch. Remote config
-always wins over the local file — see [Config reference](#config-reference).
+always wins over the local file.
 
-Run `llm-monitor status` any time to see the resolved config, buffered event
-count, and whether the daemon is reachable. Run `llm-monitor uninstall` to
-cleanly remove all wiring.
+Run `argus status` any time to see the resolved config, buffered event count,
+and whether the daemon is reachable. Run `argus uninstall` to cleanly remove
+all wiring.
 
-## Per-tool fidelity
+There are three install scopes, and they are independent — a machine can carry
+all three at once:
 
-Each tool exposes a different amount of detail through its hook/plugin API;
-llm-monitor captures everything each surface offers.
+| Command                         | Writes into                                     | Who can remove it       |
+| ------------------------------- | ----------------------------------------------- | ----------------------- |
+| `argus install`                 | this user's config (`~/.claude`, `~/.codex`, …) | the user                |
+| `argus install --project <dir>` | a repository (`<dir>/.codex/hooks.json`)        | anyone who can push     |
+| `argus install --managed`       | an administrator-owned system root              | root/Administrator only |
 
-| Signal                      |        Claude Code         |       opencode        |          Codex          |    Copilot CLI    |
-| --------------------------- | :------------------------: | :-------------------: | :---------------------: | :---------------: |
-| Prompts                     |             Y              |           Y           |            Y            |         Y         |
-| Assistant messages          |          Y (Stop)          |           Y           |      Y (Stop hook)      |         —         |
-| Tool use (pre/post)         |             Y              |           Y           |            Y            |         Y         |
-| Tool outputs                |             Y              |           Y           |            Y            |         Y         |
-| Tool failures               |             Y              |           —           | Y (post incl. non-zero) |         Y         |
-| File paths touched          |             Y              |           Y           |     Y (apply_patch)     |         Y         |
-| FQDNs contacted             |             Y              |           Y           |            Y            |         Y         |
-| Skill/command invocations   |             Y              | Y (command.executed)  |            —            |         —         |
-| Subagent runs               |       Y (start+stop)       |           —           |            Y            |         Y         |
-| Permission requests         |     Y (request+denied)     |   Y (asked+replied)   |            Y            |         Y         |
-| Compaction                  | Y (pre+post, token counts) | Y (session.compacted) |            Y            |      Y (pre)      |
-| Errors                      |      Y (StopFailure)       |   Y (session.error)   |            —            | Y (errorOccurred) |
-| Config/instructions changes |             Y              |           —           |            —            |         —         |
-| Session lifecycle           |             Y              |           Y           |            Y            |         Y         |
+Full install detail, remote fleet config, and the `--managed` layer file-by-file:
+see [Installation](docs/installation.md).
 
-Codex is wired three ways at once: its hooks system (`~/.codex/hooks.json`,
-Claude-compatible payloads — note new hooks need one-time trust via `/hooks`
-inside Codex), the `notify` hook for turn completion on older versions, and
-OTLP logs (`[otel]` in `config.toml`) for token/model telemetry.
+## Documentation
 
-### Claude Code hooks deliberately not wired
+The [docs/](docs/README.md) index routes by intent (evaluating, installing,
+operating, extending). Individual pages:
 
-- `MessageDisplay` — fires on every rendered assistant-message chunk
-  (hot-path cost); the final text is already captured via
-  `Stop.last_assistant_message`.
-- `UserPromptExpansion` — expansion input is already captured at
-  `UserPromptSubmit`.
-- `FileChanged` — requires literal filename matchers, not wildcardable.
-- `WorktreeCreate`/`WorktreeRemove` — `WorktreeCreate` interprets hook stdout
-  as a replacement worktree path and a non-zero exit fails creation; too
-  risky for observe-only wiring.
-- `Setup`, `TeammateIdle`, `Elicitation`/`ElicitationResult` — control-flow
-  hooks that expect decision output; `Elicitation` form content is
-  user-sensitive.
+| Doc                                                                  | What's in it                                                                                        |
+| -------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| [Architecture](docs/architecture.md)                                 | Hook shim → daemon → buffer → export pipeline; the data directory.                                  |
+| [Per-tool fidelity](docs/tool-support.md)                            | Signal-by-signal comparison across all five host tools.                                             |
+| [Configuration](docs/configuration.md)                               | Remote fleet config, the full `config.toml` key reference, environment variables.                   |
+| [Capture and enrichment](docs/capture.md)                            | File-content capture, network/FQDN extraction, MCP server identity, cloud identity.                 |
+| [Privacy and redaction](docs/privacy.md)                             | Built-in redaction, metadata-only mode, the un-redacted hand-off spool.                             |
+| [Installation](docs/installation.md)                                 | Quick start, install scopes, the machine-wide `--managed` layer.                                    |
+| [Troubleshooting](docs/troubleshooting.md)                           | `argus status` / `argus check` output, settings that silently stop hooks firing, known limitations. |
+| [Adding a new tool](docs/adding-a-tool.md)                           | The adapter/hook-or-plugin/install pieces a new integration needs.                                  |
+| [Querying the local event database](docs/querying-local-database.md) | Where `events.db` lives per platform, its schema, and a query cookbook.                             |
+| [Telemetry gap review](docs/telemetry-gaps.md)                       | Standing review of what each surface could still capture but doesn't yet.                           |
 
-## Config reference
-
-Resolved with precedence **defaults < local `config.toml` < cached/fresh remote
-config** (remote is fleet policy and always wins, so a compromised or
-uncooperative developer machine can't locally weaken it). All keys are optional;
-unset keys keep their default.
-
-| Key                          | Default            | Meaning                                                                                                                                                                                                          |
-| ---------------------------- | ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `remote.url`                 | _(unset)_          | HTTPS URL polled for fleet-wide config.                                                                                                                                                                          |
-| `remote.poll_interval_secs`  | `300`              | Poll interval (floor `30`).                                                                                                                                                                                      |
-| `export.otlp_endpoint`       | _(unset)_          | OTLP/JSON logs endpoint (`POST {endpoint}/v1/logs`). No endpoint = events stay buffered locally.                                                                                                                 |
-| `export.headers`             | `{}`               | Extra HTTP headers sent with each export (e.g. auth).                                                                                                                                                            |
-| `export.batch_size`          | `256`              | Max events per export batch.                                                                                                                                                                                     |
-| `export.flush_interval_secs` | `10`               | Export loop interval; backs off exponentially (capped ~30x) on repeated failures.                                                                                                                                |
-| `capture.prompts`            | `true`             | Capture prompt text. `false` → events still emitted, text replaced with `[not captured]` (metadata-only mode).                                                                                                   |
-| `capture.tool_inputs`        | `true`             | Capture tool-call input JSON. `false` → tool events still emitted (name, files, FQDNs) without the input payload.                                                                                                |
-| `capture.tool_outputs`       | `true`             | Capture tool result/output JSON on post-tool events. `false` → output field left null.                                                                                                                           |
-| `capture.assistant_messages` | `true`             | Capture assistant message text (Claude Code/Codex `Stop`, opencode `chat.message`). `false` → assistant-message events suppressed.                                                                               |
-| `capture.max_field_bytes`    | `65536`            | Per-field size cap (serialized bytes) for prompt text, assistant text, tool input/output. Oversized text gets `…[truncated]`; oversized JSON is replaced with `{"_truncated":true,"_bytes":n}`. `0` = unlimited. |
-| `redaction.enabled`          | `true`             | Run the built-in secret scrubber before anything is buffered or exported.                                                                                                                                        |
-| `redaction.extra_patterns`   | `[]`               | Additional regexes scrubbed the same way as built-ins (invalid patterns are skipped with a warning, not fatal).                                                                                                  |
-| `buffer.max_events`          | `100000`           | SQLite buffer cap; oldest events are dropped once full (offline-first, not unbounded).                                                                                                                           |
-| `codex.otlp_listen`          | `"127.0.0.1:4327"` | Local address the daemon listens on for Codex's `[otel]` OTLP/JSON export.                                                                                                                                       |
-
-Example `config.toml`:
-
-```toml
-[export]
-otlp_endpoint = "https://otel-collector.internal:4318"
-flush_interval_secs = 5
-
-[capture]
-prompts = false        # metadata-only: never persist prompt text
-
-[redaction]
-extra_patterns = ["ACME-[0-9]{6}"]
-```
-
-## Privacy and redaction
-
-- Redaction runs **before** anything touches disk or the network — secrets never
-  reach SQLite or the exporter.
-- Built-in patterns cover common credential shapes: Anthropic/OpenAI API keys,
-  bearer tokens, GitHub tokens, AWS access keys, PEM private key blocks, Slack
-  tokens, and generic `key=`/`token:`/`password=` assignments (quoted and
-  unquoted, e.g. `API_KEY=abcd1234efgh`).
-- Add organization-specific patterns via `redaction.extra_patterns` (plain
-  regex strings); matches are replaced with `[REDACTED:<rule-name>]`.
-- For environments that must never capture prompt/tool-input content at all,
-  set `capture.prompts = false` and `capture.tool_inputs = false` — llm-monitor
-  still emits metadata (which tool ran, which files, which hosts, session
-  lifecycle) with content fields replaced by a `[not captured]` marker.
-
-## Architecture
-
-```
- Claude Code hook / opencode plugin / Codex notify+otel
-                    |
-                    v
-        llm-monitor hook  (hot path: parse stdin JSON, forward, exit)
-             |                     |
-        IPC (< 250ms)        spool fallback (JSONL on disk)
-             |                     |
-             +----------+----------+
-                        v
-                 llm-monitor daemon
-                        |
-              adapter parse (per-tool)
-                        |
-                    redaction
-                        |
-              SQLite durable buffer  <-- offline-first, capped, oldest-dropped
-                        |
-              OTLP/JSON export (batched, retried with backoff)
-                        |
-                        v
-              your OTLP backend (Splunk / Datadog / Grafana / Collector)
-```
-
-- **Hook shim** (`llm-monitor hook`) is the only thing on the host tool's
-  critical path. It tries the daemon over a local socket (Unix domain socket /
-  Windows named pipe via `interprocess`) with a 250ms deadline; on timeout or
-  daemon-not-running it falls back to writing a JSONL spool file and
-  autospawns the daemon. It never blocks the host tool and never fails loudly
-  — a broken hook must not break Claude Code, opencode, or Codex.
-- **Daemon** (`llm-monitor daemon`) does everything else off that critical
-  path: per-tool adapter parsing → secret redaction → durable SQLite buffering
-  → batched OTLP/JSON export with exponential backoff. It also drains the
-  spool directory and polls remote config.
-- **Install** (`llm-monitor install`) detects installed tools by home-dir
-  presence (`~/.claude`, `~/.config/opencode`, `~/.codex`, `~/.copilot`) and
-  idempotently wires each one — see the per-tool fidelity table above.
-  `--dry-run` prints planned changes without writing.
-
-## Troubleshooting
-
-- `llm-monitor status` — prints the resolved data dir, effective config
-  (endpoint, batch size, flush interval, redaction on/off), buffered event
-  count, and whether the daemon socket is reachable.
-- **Offline / collector unreachable**: events keep flowing into the SQLite
-  buffer (`<data-dir>/events.db`) instead of being dropped; `buffered events`
-  in `status` grows. Once the collector is reachable again, the export loop's
-  next attempt drains and exports the backlog — nothing needs to be restarted
-  manually. If `buffer.max_events` is reached, oldest events are dropped to
-  keep disk usage bounded.
-- **Spool directory** (`<data-dir>/spool/*.jsonl`): written by the hook shim
-  when it can't reach the daemon within its deadline (daemon not yet started,
-  or briefly wedged). The daemon drains this directory every 5s once running;
-  files with corrupt/unparseable content are dropped (logged as a warning)
-  rather than blocking the drain loop.
-- **Hook not firing**: confirm `llm-monitor install` actually wrote entries —
-  check `~/.claude/settings.json` (`hooks.*`), `~/.config/opencode/plugin/llm-monitor.ts`,
-  `~/.codex/config.toml` (`notify`, `[otel]`), `~/.codex/hooks.json`, or
-  `~/.copilot/hooks/llm-monitor.json`. Re-run `llm-monitor install`
-  (idempotent) if entries are missing. Codex hooks additionally need one-time
-  trust: run `/hooks` inside Codex and trust the llm-monitor entries.
-- **Codex config not touched**: install never overwrites an existing `notify`
-  or `[otel]` block — it warns on stderr and leaves it alone so it can't
-  silently break another integration. Remove the conflicting block manually
-  (or point it at llm-monitor yourself) if you want Codex wired.
-
-## Known limitations (v1)
+## Known limitations
 
 - No OS service management (`launchd`/`systemd`/Windows service) — the daemon
   is autospawned by the first hook invocation instead.
 - Remote config is trusted over HTTPS; no detached-signature verification yet.
-- Bash tool parsing only extracts FQDNs, not file writes via `>`/`tee`.
+- Bash tool parsing reads redirection targets and six file verbs, not the file
+  argument of every program.
 - No Claude Code transcript-path mining for token/model usage stats.
-- Claude Code `MessageDisplay` and `FileChanged` are deliberately not wired —
-  see the wired-hooks notes in [Per-tool fidelity](#per-tool-fidelity).
+- The hand-off spool holds un-redacted payloads while the daemon is down.
+- Claude Code `MessageDisplay` and `FileChanged` are deliberately not wired.
+
+Full list, with links to the relevant detail: [Known
+limitations](docs/troubleshooting.md#known-limitations).
+
+## License
+
+Apache-2.0. See [LICENSE](LICENSE).

@@ -1,0 +1,10 @@
+{
+  "source": "codex",
+  "received_at": "2026-01-01T00:00:00Z",
+  "payload": {
+    "session_id": "01JQ8Z9C4K2M7N3P5R6T8V0W2X",
+    "cwd": "/Users/dev/project",
+    "hook_event_name": "SessionEnd",
+    "reason": "exit"
+  }
+}

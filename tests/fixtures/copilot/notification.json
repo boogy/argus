@@ -1,0 +1,14 @@
+{
+  "source": "copilot",
+  "received_at": "2026-01-01T00:00:00Z",
+  "event": "notification",
+  "payload": {
+    "sessionId": "sess-copilot-001",
+    "cwd": "/Users/dev/project",
+    "agentName": "copilot",
+    "transcriptPath": "/Users/dev/.copilot/history/sess-copilot-001.json",
+    "message": "Waiting for your approval",
+    "notificationType": "permission",
+    "title": "Permission required"
+  }
+}

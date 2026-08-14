@@ -1,0 +1,11 @@
+{
+  "source": "codex",
+  "received_at": "2026-01-01T00:00:00Z",
+  "payload": {
+    "event_name": "codex.conversation_starts",
+    "attributes": {
+      "conversation.id": "conv-9",
+      "model": "gpt-5-codex"
+    }
+  }
+}
