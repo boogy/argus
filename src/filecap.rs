@@ -96,20 +96,64 @@ impl PathFilter {
         }
     }
 
-    /// Whether this path's *content* may be captured. Metadata is not gated by
-    /// it: a file excluded here is still reported as touched.
+    /// Whether this path's *content* may be captured, judged without knowing
+    /// where it was said. Prefer [`PathFilter::allows_in`] anywhere a cwd is in
+    /// hand. Metadata is not gated by either: a file excluded here is still
+    /// reported as touched.
     pub fn allows(&self, path: &str) -> bool {
+        self.allows_in(path, None)
+    }
+
+    /// The same decision, given the directory the tool call was made in.
+    ///
+    /// A tool is free to name `.env` where another names `/repo/.env`, and half
+    /// the shipped exclusions (`/\.env`, `/node_modules/`, `/\.ssh/`) need a
+    /// leading `/` to match. Judging only the string the call happened to use
+    /// meant the same file was excluded or captured depending on how it was
+    /// spelled — so every form of the path that could name it gets tested, and
+    /// any one of them matching an exclusion is enough to refuse it.
+    ///
+    /// `cwd` is what makes a relative path a file, but it is not always known
+    /// and payload mode never needs it to ship the body, so the `/`-anchored
+    /// form stands in when it is missing.
+    pub fn allows_in(&self, path: &str, cwd: Option<&str>) -> bool {
         if self.broken {
             return false;
         }
-        let p = normalize(path);
-        if self.exclude.is_match(&p) {
+        let forms = self.forms(path, cwd);
+        if forms.iter().any(|p| self.exclude.is_match(p)) {
             return false;
         }
         match &self.include {
-            Some(inc) => inc.is_match(&p),
+            // Any form matching is enough here too, for the same reason: an
+            // `include` of `/src/` names the same files whether the call said
+            // `src/a.rs` or `/repo/src/a.rs`. Nothing is widened by it that an
+            // exclusion did not already get to refuse first.
+            Some(inc) => forms.iter().any(|p| inc.is_match(p)),
             None => true,
         }
+    }
+
+    /// Every spelling of `path` that could name the file it names.
+    fn forms(&self, path: &str, cwd: Option<&str>) -> Vec<String> {
+        let p = normalize(path);
+        let mut forms = vec![p.clone()];
+        if Path::new(path).is_relative() && !p.starts_with('/') {
+            if let Some(cwd) = cwd {
+                forms.push(normalize(&Path::new(cwd).join(path).to_string_lossy()));
+            }
+            // Stands in for the resolved form only when there is none — no
+            // cwd, an empty one, or a relative one. It is not free when the
+            // real path is known: `/<relative path>` satisfies a root-anchored
+            // `^/src/` from *any* directory, so adding it alongside a resolved
+            // `/var/vendor/src/a.rs` widens an include the deployment wrote
+            // precisely to keep nested copies out. Unanchored rules are
+            // unaffected either way, which is why this hid.
+            if !forms.iter().any(|f| f.starts_with('/')) {
+                forms.push(format!("/{p}"));
+            }
+        }
+        forms
     }
 }
 
@@ -317,7 +361,7 @@ pub fn capture(event: &mut Event, capture: &CaptureCfg, filter: &PathFilter) {
             // trusting what a tool claims, and handing it the claim anyway
             // would be answering a different question.
             Some(body) if cfg.mode != ContentMode::Disk => {
-                payload_snapshot(&c, &body, capture, filter, &mut budget)
+                payload_snapshot(&c, &body, cwd.as_deref(), capture, filter, &mut budget)
             }
             // A call that only named a file — a `Read` — is where disk mode
             // earns its keep, and the one thing payload mode has nothing to
@@ -361,6 +405,7 @@ fn content_ceiling(capture: &CaptureCfg) -> usize {
 fn payload_snapshot(
     c: &Candidate,
     body: &str,
+    cwd: Option<&str>,
     capture: &CaptureCfg,
     filter: &PathFilter,
     budget: &mut usize,
@@ -385,7 +430,7 @@ fn payload_snapshot(
     // Policy first, then cost, then budget: an excluded file must report the
     // reason it was excluded even on an event that had run out of room, or a
     // deployment cannot tell a policy from a full record.
-    if !filter.allows(&c.path) {
+    if !filter.allows_in(&c.path, cwd) {
         snap.skipped = Some(SkipReason::Excluded);
         return snap;
     }
@@ -599,7 +644,9 @@ fn disk_snapshot(
         return snap;
     };
     let ceiling = content_ceiling(capture);
-    let allowed = filter.allows(&c.path);
+    // Judged on the same path that is about to be opened, not on the string the
+    // tool used to name it.
+    let allowed = filter.allows_in(&c.path, cwd);
     // An excluded file is still opened when `hash` is on, and that is the
     // deliberate part: the digest is what makes one `.env` the same `.env`
     // across forty sessions. It is computed and the bytes are dropped — no
@@ -753,6 +800,65 @@ mod tests {
     fn an_uncompilable_include_also_fails_closed() {
         let f = PathFilter::new(&cfg(&["(unclosed"], &[]));
         assert!(!f.allows("/repo/src/main.rs"));
+    }
+
+    /// Half the shipped exclusions need a leading `/`, and a tool is free to
+    /// name the same file without one. Matching only the string the call
+    /// happened to use let `.env` through while `/repo/.env` was refused.
+    #[test]
+    fn a_relative_path_cannot_dodge_a_slash_anchored_exclusion() {
+        let f = PathFilter::new(&FileContentsCfg::default());
+        for path in [
+            ".env",
+            ".env.local",
+            "sub/.env",
+            "node_modules/pkg/index.js",
+            ".git/config",
+            ".ssh/id_rsa",
+            r"node_modules\pkg\index.js",
+        ] {
+            assert!(!f.allows_in(path, None), "should be excluded: {path}");
+            assert!(
+                !f.allows_in(path, Some("/repo")),
+                "should be excluded with a cwd: {path}"
+            );
+        }
+        assert!(f.allows_in("src/main.rs", None));
+        assert!(f.allows_in("src/main.rs", Some("/repo")));
+    }
+
+    /// The cwd is what turns `src/a.rs` into a file, so an exclusion written
+    /// against the directory the session is in has to be given the chance to
+    /// match. Without the resolved form only the daemon's own view is tested.
+    #[test]
+    fn an_exclusion_can_name_a_directory_the_path_only_has_once_resolved() {
+        let f = PathFilter::new(&cfg(&[], &["/vendor/"]));
+        assert!(f.allows_in("a.rs", None), "nothing says this is in /vendor");
+        assert!(!f.allows_in("a.rs", Some("/repo/vendor")));
+        assert!(!f.allows_in("a.rs", Some(r"C:\repo\vendor")));
+    }
+
+    /// An `include` anchored at the root names one directory, not every
+    /// directory with that name. The synthetic `/`-prefixed form is what a
+    /// relative path is judged by when nothing says where it is — offering it
+    /// alongside the resolved path as well would let `src/secrets.rs` satisfy
+    /// `^/src/` from a vendored tree the deployment anchored the rule to keep
+    /// out, and the file's body would be shipped.
+    #[test]
+    fn a_root_anchored_include_is_not_satisfied_from_another_directory() {
+        let f = PathFilter::new(&cfg(&["^/src/"], &[]));
+        assert!(
+            !f.allows_in("src/secrets.rs", Some("/var/data/vendor")),
+            "the real file is /var/data/vendor/src/secrets.rs, which is not in /src/"
+        );
+        // Still admitted where the path really is under the anchored root, and
+        // still admitted when nothing says where it is — the stand-in's job.
+        assert!(f.allows_in("src/main.rs", Some("/src")));
+        assert!(f.allows_in("src/main.rs", None));
+        // An empty or relative cwd resolves nothing, so the stand-in stays.
+        let e = PathFilter::new(&cfg(&[], &[r"/\.env"]));
+        assert!(!e.allows_in(".env", Some("")));
+        assert!(!e.allows_in(".env", Some("sub/dir")));
     }
 
     // --- payload capture ---
@@ -914,6 +1020,53 @@ mod tests {
         let unhashed = snaps("Write", write, &c);
         assert_eq!(unhashed[0].skipped, Some(SkipReason::Excluded));
         assert_eq!(unhashed[0].sha256, None, "a digest nobody asked for");
+    }
+
+    /// A tool naming `.env` relative to the session's directory means the same
+    /// file as `/repo/.env`, and payload mode ships whatever the call quoted —
+    /// so the string form used to decide whether the secret reached the wire.
+    #[test]
+    fn a_relative_path_is_excluded_in_payload_mode_too() {
+        for cwd in [None, Some("/repo")] {
+            let out = snaps_in(
+                "Write",
+                serde_json::json!({"file_path": ".env", "content": "AWS_SECRET_ACCESS_KEY=leak"}),
+                &on(|_| {}),
+                cwd,
+            );
+            assert_eq!(out.len(), 1);
+            assert_eq!(out[0].skipped, Some(SkipReason::Excluded), "cwd={cwd:?}");
+            assert_eq!(out[0].content, None, "an excluded body was shipped");
+            assert_eq!(out[0].path, ".env", "the path as named is still reported");
+        }
+    }
+
+    /// And the cwd has to reach the decision, not just the read: an exclusion
+    /// naming a directory the path only has once resolved is invisible to
+    /// payload mode otherwise, which is the mode that already holds the bytes.
+    #[test]
+    fn a_payload_body_is_judged_against_the_resolved_path() {
+        let mut c = on(|_| {});
+        c.file_contents.exclude = vec!["/vendor/".into()];
+
+        let out = snaps_in(
+            "Write",
+            serde_json::json!({"file_path": "a.rs", "content": "secret"}),
+            &c,
+            Some("/repo/vendor"),
+        );
+        assert_eq!(out[0].skipped, Some(SkipReason::Excluded));
+        assert_eq!(out[0].content, None, "an excluded body was shipped");
+
+        // Same call from anywhere else is still captured.
+        let out = snaps_in(
+            "Write",
+            serde_json::json!({"file_path": "a.rs", "content": "secret"}),
+            &c,
+            Some("/repo/src"),
+        );
+        assert_eq!(out[0].skipped, None);
+        assert_eq!(out[0].content.as_deref(), Some("secret"));
     }
 
     #[test]
@@ -1253,6 +1406,45 @@ mod tests {
             unopened.bytes, 23,
             "the size came from the stat, not a read"
         );
+    }
+
+    /// Disk mode resolves `.env` against the session's cwd to read it, so it
+    /// has to test the exclusions against that same resolved path — otherwise
+    /// the file it opens and the path it judges are two different things.
+    #[test]
+    fn a_relative_path_is_excluded_in_disk_mode_too() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".env"), "AWS_SECRET_ACCESS_KEY=leak").unwrap();
+
+        let out = snaps_in(
+            "Read",
+            serde_json::json!({"file_path": ".env"}),
+            &disk(),
+            Some(&dir.path().to_string_lossy()),
+        );
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].skipped, Some(SkipReason::Excluded));
+        assert_eq!(out[0].content, None, "an excluded file's body was shipped");
+    }
+
+    /// The file it opens and the path it judges have to be the same one.
+    #[test]
+    fn a_disk_read_is_judged_against_the_resolved_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let vendor = dir.path().join("vendor");
+        std::fs::create_dir(&vendor).unwrap();
+        std::fs::write(vendor.join("a.rs"), "secret").unwrap();
+        let mut c = disk();
+        c.file_contents.exclude = vec!["/vendor/".into()];
+
+        let out = snaps_in(
+            "Read",
+            serde_json::json!({"file_path": "a.rs"}),
+            &c,
+            Some(&vendor.to_string_lossy()),
+        );
+        assert_eq!(out[0].skipped, Some(SkipReason::Excluded));
+        assert_eq!(out[0].content, None, "an excluded file's body was shipped");
     }
 
     /// With hashing off there is no reason to open an excluded file at all,
