@@ -91,7 +91,13 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y musl-tools
 
+      # The only step in this job that runs on every runner, Windows included,
+      # so it is the only one that has to name its shell: the default there is
+      # PowerShell, which reads `set -euo pipefail` as `Set-Variable -euo` and
+      # fails the step before cargo is ever invoked. The steps around it are
+      # either guarded to one OS (`if:`) or already pinned to `pwsh`.
       - name: Build binary
+        shell: bash
         env:
           CC_x86_64_unknown_linux_musl: musl-gcc
           CC_aarch64_unknown_linux_musl: musl-gcc
@@ -110,6 +116,9 @@ jobs:
           mkdir -p "dist/$name"
           cp "target/$target/release/argus" "dist/$name/"
           cp README.md LICENSE "dist/$name/"
+          # README.md references assets/*.svg relatively; without them the
+          # banner and pipeline diagram are broken links in an unpacked archive.
+          cp -R assets "dist/$name/"
           tar -czf "dist/${name}.tar.gz" -C dist "$name"
           ls -l dist
 
@@ -129,6 +138,8 @@ jobs:
           Copy-Item "target/$target/release/argus.exe" "dist/$name/"
           Copy-Item "README.md" "dist/$name/"
           Copy-Item "LICENSE" "dist/$name/"
+          # See the unix step: README.md's asset references are relative.
+          Copy-Item -Recurse "assets" "dist/$name/"
           # Archive the directory, not its contents, so the zip unpacks to an
           # `argus-<version>-<target>/` folder exactly like the unix tarballs.
           Compress-Archive -Path "dist/$name" -DestinationPath "dist/$name.zip"
