@@ -13,21 +13,49 @@ concurrency:
 
 jobs:
   # ---------------------------------------------------------------------------
-  # THE RELEASE GATE. Every other job `needs` this one, so a tag whose version
-  # disagrees with Cargo.toml's `[package] version` fails here, cheaply, before
-  # a single binary is built. `cargo metadata --no-deps` resolves nothing and
-  # hits no network, so the runner's preinstalled cargo is enough — no
-  # toolchain setup needed just to check a version string.
+  # THE RELEASE GATE. Every other job `needs` this one, so a tag that disagrees
+  # with Cargo.toml, or that no changelog section describes, fails here,
+  # cheaply, before a single binary is built. `cargo metadata --no-deps`
+  # resolves nothing and hits no network, so the runner's preinstalled cargo is
+  # enough — no toolchain setup needed just to check a version string.
+  #
+  # This job is also where a tag is classified as a release or a release
+  # candidate, once, and handed to the rest of the workflow. Both kinds are
+  # expected to work: `vX.Y.Z` publishes as the latest release, `vX.Y.Z-rc.N`
+  # publishes as a prerelease of the same version and must never displace it.
   # ---------------------------------------------------------------------------
   setup:
     name: Verify tag matches crate version
     runs-on: ubuntu-latest
+    outputs:
+      prerelease: ${{ steps.classify.outputs.prerelease }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Verify tag matches crate version
         run: make version-check TAG="${GITHUB_REF_NAME}"
+
+      # The release job reads the body out of CHANGELOG.md, and a missing
+      # section fails it. Checking here too costs a second and turns that into
+      # a ten-second failure instead of one that lands after five builds.
+      - name: Verify the changelog describes this tag
+        run: make release-notes TAG="${GITHUB_REF_NAME}"
+
+      # Semver spells a prerelease with a hyphen after the patch version, so
+      # `v0.2.0-rc.1` is a candidate and `v0.2.0` is not. Decided once here
+      # rather than re-evaluated at each use, so the release's prerelease flag
+      # and its latest-release flag cannot end up disagreeing.
+      - name: Classify the tag
+        id: classify
+        run: |
+          set -euo pipefail
+          case "${GITHUB_REF_NAME}" in
+            *-*) prerelease=true ;;
+            *)   prerelease=false ;;
+          esac
+          echo "prerelease=${prerelease}" >> "$GITHUB_OUTPUT"
+          echo "${GITHUB_REF_NAME}: prerelease=${prerelease}"
 
   # ---------------------------------------------------------------------------
   # Build a release binary per platform, natively — no cross-linker anywhere.
@@ -159,7 +187,7 @@ jobs:
   # ---------------------------------------------------------------------------
   release:
     name: GitHub Release
-    needs: build
+    needs: [setup, build]
     runs-on: ubuntu-latest
     permissions:
       contents: write # create the GitHub Release + upload artifacts
@@ -241,7 +269,7 @@ jobs:
           name: ${{ github.ref_name }}
           body_path: CHANGES.md
           generate_release_notes: false
-          prerelease: ${{ contains(github.ref_name, '-') }}
+          prerelease: ${{ needs.setup.outputs.prerelease }}
           draft: true
           fail_on_unmatched_files: true
           files: dist/*
@@ -260,12 +288,20 @@ jobs:
       # Addressed by release id rather than tag name: a draft release has no
       # published tag ref behind it, so `gh release view <tag>` is not a
       # reliable way to find one.
+      # `make_latest` is set explicitly rather than left to the API default,
+      # which is "true": a release candidate that quietly became the repo's
+      # latest release would be handed to everyone landing on the releases page
+      # and to `gh release download` with no version argument.
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_ID: ${{ steps.draft_release.outputs.id }}
+          PRERELEASE: ${{ needs.setup.outputs.prerelease }}
         run: |
           set -euo pipefail
           test -n "$RELEASE_ID" || { echo "no draft release id from the previous step" >&2; exit 1; }
+          if [ "$PRERELEASE" = "true" ]; then make_latest=false; else make_latest=true; fi
+          echo "publishing ${GITHUB_REF_NAME}: prerelease=${PRERELEASE} make_latest=${make_latest}"
           gh api -X PATCH "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" \
-            -F draft=false --jq '"published: " + .html_url'
+            -F draft=false -f make_latest="$make_latest" \
+            --jq '"published: " + .html_url + " (prerelease=" + (.prerelease|tostring) + ")"'
