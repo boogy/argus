@@ -35,7 +35,7 @@ Supported platforms: Linux (x86_64, aarch64 — static musl), macOS (Apple
 silicon, Intel), Windows (x86_64).
 
 <details>
-<summary>All 155 commits in this release</summary>
+<summary>Every commit in this release</summary>
 
 ### 🚀 Features
 
@@ -190,10 +190,12 @@ silicon, Intel), Windows (x86_64).
 - reattach a doc to the function it describes, and two byte counts to UTF-8 ([c693958](https://github.com/boogy/argus/commit/c6939588c9b7dc012687caa32fd298c2f05ed6b7))
 - keep the working ledger out of the repo, leave the record that reads ([bf67dfd](https://github.com/boogy/argus/commit/bf67dfd55610168ff3a8bb3f552ac90c19b36d8c))
 - drop task ids from comments, keep the reason they carried ([791a282](https://github.com/boogy/argus/commit/791a2821fd58d64297f3306062db4c9ebdb60cdd))
+- split the README into a docs/ tree and add SVG diagrams ([a238e00](https://github.com/boogy/argus/commit/a238e000f9735ff38efc38474010ec61dd51e95f))
 
 ### 🔧 CI / Build
 
 - CI matrix (ubuntu/macos/windows) and task ledger ([68872b2](https://github.com/boogy/argus/commit/68872b2b8de1c160f69ffc05e614e6cdf9a21886))
+- tag-driven release workflow, pinned actions, dependabot, changelog ([2a13580](https://github.com/boogy/argus/commit/2a1358063cd64972b720b893ae9dc079be4ae46d))
 
 ### Other Changes
 
