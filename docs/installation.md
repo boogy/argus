@@ -8,8 +8,16 @@ rather than a user.
 ## Quick start
 
 ```bash
-cargo install --path .          # or grab a release binary
+brew install boogy/tap/argus    # macOS and Linux
 argus install             # detects installed tools, wires hooks/plugins/config
+```
+
+The tap formula covers macOS on Apple Silicon and Intel, and Linux on x86-64 and
+arm64. On Windows, or to build it yourself:
+
+```bash
+cargo install --path .          # or grab a release binary
+argus install
 ```
 
 There are three install scopes, and they are independent — a machine can carry

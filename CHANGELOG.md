@@ -34,6 +34,10 @@ what AI coding agents actually did and exports it as OTLP/JSON.
 Supported platforms: Linux (x86_64, aarch64 — static musl), macOS (Apple
 silicon, Intel), Windows (x86_64).
 
+Install with `brew install boogy/tap/argus` on macOS and Linux, or download a
+signed archive from this release — each one carries a cosign signature over
+`checksums.txt` and SLSA build provenance.
+
 There is no 0.1.0 tag. The crate carried that version through early development
 and was bumped to 0.2.0 when it moved to Rust edition 2024, well before the
 first release; 0.2.0 is the version already stamped into every exported record
