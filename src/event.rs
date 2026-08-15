@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-/// Raw frame sent by the hook shim. The shim never parses tool payloads.
+/// Raw frame sent by the hook shim or a plugin. Neither parses tool payloads.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Envelope {
     pub source: String,
@@ -25,12 +25,14 @@ pub struct Envelope {
     pub dropped: u64,
     /// Which cloud identity the agent held when it fired this hook.
     ///
-    /// Collected in the shim rather than the daemon, and it can only be
-    /// collected there: the shim is a child of the host agent and inherits its
-    /// environment, where the daemon's environment describes whoever started
-    /// the daemon. That also bounds the coverage — an envelope arriving from
-    /// the opencode plugin or the Codex OTLP receiver, neither of which runs
-    /// the shim, carries none.
+    /// Collected wherever the envelope is built, never in the daemon: the shim
+    /// is a child of the host agent and inherits its environment, and the
+    /// plugins run inside the agent's own process, where the daemon's
+    /// environment describes only whoever started the daemon. So the shim
+    /// fills it for Claude Code, Copilot and Codex's `notify`, and
+    /// `plugins/shared/transport.ts` fills it for opencode and pi. One channel
+    /// cannot: the Codex OTLP receiver is handed HTTP requests from Codex's own
+    /// process, with no environment of the agent's to read.
     ///
     /// Defaulted rather than optional so an older spooled envelope, or one
     /// from a plugin that never learned the field, deserializes as "nothing

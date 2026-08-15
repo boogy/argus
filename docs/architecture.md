@@ -125,12 +125,16 @@ empty.
 
 ### Usage event
 
-opencode is also the one surface that reports what a turn cost, so it is the
-one that gets a `usage` event: model, provider, the five token counts and the
-host tool's own cost figure, each its own field rather than a JSON blob —
-spend-per-session has to be a query for the number to ever get looked at.
-Token volume is also the cheapest thing that separates a session doing work
-from one looping on the same failure.
+opencode also reports what a turn cost, so it gets a `usage` event: model,
+provider, the five token counts and the host tool's own cost figure, each its
+own field rather than a JSON blob — spend-per-session has to be a query for
+the number to ever get looked at. Token volume is also the cheapest thing
+that separates a session doing work from one looping on the same failure.
+
+It is not opencode's alone: pi's `turn_end` fills the same variant, with the
+same five counts, its own cost total and a `finish` reason. Claude Code,
+Codex and Copilot report no per-turn accounting at all, so nothing fills it
+there and argus does not reconstruct one.
 
 The streaming filter lives in the plugin: `message.updated` fires on every
 delta and only the last one carries totals, so the plugin forwards it only

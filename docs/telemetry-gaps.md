@@ -9,6 +9,12 @@ where it differed from the fix sketched here.
 Everything without a **Closed** note is still open; [Status](#status) lists
 both sides so a reader does not have to scan for the absence of a label.
 
+The file and line references in each item describe the code _as reviewed_. For
+a closed item that is deliberately the before-picture — `NET_KEYS` and
+`extract_fqdns` no longer live at `adapters/mod.rs:39`/`:117` because closing
+#1/#2 is what moved them — so follow the **Closed** note, not the citation, for
+where the behaviour is today.
+
 ## Network connections
 
 ### 1. FQDN extraction only sees three top-level keys
@@ -46,9 +52,10 @@ Not captured from Bash/shell commands:
 
 **Closed, with one deliberate limit.** Both halves are in: any
 `scheme://host` matches, and a command whose program is one of `NET_BINARIES`
-also contributes its schemeless host arguments plus the values of the registry
-and proxy flags (`--index-url`, `--registry`, `--proxy`, …). `user@host:path`
-is read as an scp/rsync target.
+also contributes its schemeless host arguments. The registry and proxy flags
+(`--index-url`, `--registry`, `--proxy`, …) are read in _any_ command, whatever
+the program — `pip` and `npm` are not network binaries and the flag is the
+whole point of the item. `user@host:path` is read as an scp/rsync target.
 
 The limit: a schemeless host is only believed inside a command string whose
 _first word_ is a known network binary, and a `|`/`&&`/`;` resets that word.
@@ -111,9 +118,10 @@ Scanned before the `capture.tool_outputs` check: which hosts a call touched
 is metadata, and turning the payload off is a decision about storing text,
 not about going blind. Two adapters record nothing here, and both because the
 tool never sends it — opencode's pty (the terminal's output does not pass
-through the plugin) and pi's `user_bash`. Codex's OTLP `tool_result` carries
-only `success` and `duration_ms`; its hook payloads go through the shared
-parser, which does scan.
+through the plugin) and pi's `user_bash`. Codex's OTLP `tool_result` carries no
+result text at all — only `success` and `duration_ms` beside the call's own
+attributes — so its OTLP leg has nothing to scan; its hook payloads go through
+the shared parser, which does.
 
 ### 5. Codex OTLP tool events extract no files and few FQDNs
 
@@ -173,9 +181,9 @@ fleet reaches.
 
 **Closed for the richer half.** `Meta.mcp_endpoint`, exported as
 `mcp.endpoint`, resolved in `enrich` from the host tools' own config files:
-`.mcp.json` and `opencode.json` beside the project, then `~/.claude.json`
-(including the per-project servers `claude mcp add` writes by default),
-`~/.claude/settings.json`, `~/.copilot/mcp-config.json`,
+`.mcp.json`, `opencode.json` and `.codex/config.toml` beside the project, then
+`~/.claude.json` (including the per-project servers `claude mcp add` writes by
+default), `~/.claude/settings.json`, `~/.copilot/mcp-config.json`,
 `~/.config/opencode/opencode.json` and `~/.codex/config.toml`. One field, not
 two: a remote server is its URL and a local one is `stdio:<command args>`, so
 "which agents reach off this machine" is the rows that do not start `stdio:`.
@@ -200,10 +208,10 @@ Writes via `>`, `>>`, `tee`, and `cp/mv/rm` targets are invisible to
 `extract_files_for_tool`. A light shell-word pass over Bash commands for
 redirection targets and file-verb arguments would close most of it.
 
-Still open, and it costs more than it did: file-content capture keys off the
-same `FILE_KEYS` path spellings, so a file written through a redirect is not
-merely unnamed — it is the one write whose _contents_ no capture mode can
-reach, because nothing in the payload says which file to read.
+_(As re-assessed before the fix:)_ it costs more than it did — file-content
+capture keys off the same `FILE_KEYS` path spellings, so a file written through
+a redirect is not merely unnamed; it is the one write whose _contents_ no
+capture mode can reach, because nothing in the payload says which file to read.
 
 **Closed.** `adapters::command_files` reads two shapes out of a command
 line and no others: the target of a redirection, and the arguments of the six
@@ -265,7 +273,9 @@ by parsing every row, and cost-per-session is exactly the query that has to be
 cheap for the number to ever get looked at. `EventKind::Usage` carries the five
 counts, the cost, and the stop reason as separate fields; `redact.rs` and
 `export.rs` match `EventKind` exhaustively, so the variant forced both to say
-what they do with it.
+what they do with it. It is not opencode's alone: pi's `turn_end` fills the
+same variant, which is the argument for a kind over a per-tool blob — one
+`gen_ai.usage.*` export answers "what did this fleet spend" across both.
 
 `meta.model` is `providerID/modelID`, not `modelID` alone — the same model name
 is served by more than one provider, and which one saw the turn is the whole
@@ -302,17 +312,16 @@ capture it. With a call id, tool latency, hung-tool detection, and
 output-to-input joins all become simple queries. Without it, only heuristic
 (same session, adjacent seq) pairing is possible.
 
-**Closed for three of five.** Claude Code carries `tool_use_id` and,
+**Closed for four of five.** Claude Code carries `tool_use_id` and,
 since it reports one directly, `duration_ms` — a measured duration
 beats one subtracted from two timestamps stamped on different sides of a
 socket. opencode maps `callID`, pi its tool-call id; opencode's
 permission events carry the same id, so a prompt joins the call it gated
 rather than being matched by adjacency.
 
-**Closed.** The audit that #16 asked for was done, and the two are not
-the same case.
-
-Codex's OTLP attributes carry the ids all along — `call_id`, `turn_id` and
+Codex is the fourth, and the audit that #16 asked for is what settled it — the
+two surfaces are not the same case. Codex's OTLP attributes carry the ids all
+along — `call_id`, `turn_id` and
 `model` were sitting next to the `tool_name` the adapter already read, and the
 comment claiming `codex.tool_result` reports no duration was wrong: it reports
 `duration_ms` and `success`. All four are now read, under each spelling of the
@@ -416,12 +425,14 @@ Closed:
 - **#8** spooled-event timestamps — the item this list called its single
   biggest fidelity fix.
 - **#9** opencode model/tokens/cost, as an `EventKind::Usage` rather
-  than a JSON blob on the session.
+  than a JSON blob on the session — the same variant pi's `turn_end` fills.
 - **#10** opencode `cwd` and `callID`.
 - **#11** call ids, for Claude Code, opencode and pi, plus a reported tool
-  duration on Claude Code; Codex closes the
-  set, with `call_id`, `turn_id`, `model`, `duration_ms` and a `success = false`
-  that finally reads as the error leg.
+  duration on Claude Code; Codex is the fourth,
+  with `call_id`, `turn_id`, `model`, `duration_ms` and a `success = false`
+  that finally reads as the error leg. Copilot is the fifth, and nothing in its
+  payloads carries an id to read — not work outstanding but a limit of the
+  surface, so pairing there stays adjacency-based until a build sends one.
 - **#16** the Copilot audit, whose answer was "nothing to lift" — both
   ids are read speculatively, so Copilot is the one surface still paired by
   adjacency.
@@ -452,9 +463,20 @@ Open, in the order this list would still do them:
 1. **#12** transcript mining, **#13** git enrichment, **#15** Codex `raw`
    inventory, and the rest of **#14**.
 
-Not on this list because it postdates it: file-content capture, which answers
-"what did the agent write" — a question this review did not ask. Off by
-default; see the README.
+Not on this list because they postdate it, and both answer questions this
+review did not ask:
+
+- **File-content capture** — "what did the agent write", not just which file it
+  named. Off by default; see
+  [File-content capture](capture.md#file-content-capture).
+- **Cloud identity** (`capture.cloud_identity`, on by default) — "as whom": the
+  assumed role, subscription, project or cluster the agent held, read wherever
+  the envelope is built inside the agent's own environment — the shim for
+  Claude Code, Copilot and Codex's `notify`, the plugin itself for opencode and
+  pi. One channel cannot carry it: Codex's `[otel]` export posts over HTTP from
+  Codex's own process, so those records arrive with none. See
+  [Cloud identity](capture.md#cloud-identity) for what is read by value and what
+  is only ever named.
 
 ## Suggested priority (as first written)
 
