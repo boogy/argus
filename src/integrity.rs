@@ -118,6 +118,37 @@ pub fn check_config(expected_url: Option<&str>) -> Vec<Finding> {
     }
 }
 
+/// What the running binary is made of, and whether policy expected this one.
+///
+/// A different question from the wiring checks, which prove the hooks run
+/// *this* binary: that comparison is between two things on the same machine,
+/// so it holds just as well when both were replaced together. Only a digest
+/// chosen off the machine — `[integrity] binary_sha256`, published with the
+/// release — closes that, and the digest is printed either way so an operator
+/// has the value to pin.
+fn check_binary(pin: Option<&str>) -> Finding {
+    let finding = |ok, detail| Finding {
+        tool: "binary".into(),
+        ok,
+        detail,
+    };
+    let Some(sha) = crate::harness::own_binary_digest() else {
+        return finding(false, "cannot read this binary to digest it".into());
+    };
+    match pin {
+        None => finding(true, format!("sha256:{sha} (no digest pinned by policy)")),
+        Some(p) if p.eq_ignore_ascii_case(&sha) => {
+            finding(true, format!("sha256:{sha} is the pinned release"))
+        }
+        Some(p) => finding(
+            false,
+            format!(
+                "running sha256:{sha}, policy pins sha256:{p} — this is not the deployed build"
+            ),
+        ),
+    }
+}
+
 /// Recurse the policy table; for every leaf key, record a deviation when the
 /// effective config's value at the same path differs (or is absent).
 fn diff_leaves(prefix: &str, policy: &toml::Table, effective: &toml::Table, out: &mut Vec<String>) {
@@ -152,6 +183,11 @@ pub fn check_and_report(
 ) -> bool {
     let mut findings = Vec::new();
     if do_hooks {
+        // First, because every hook finding below is a statement about what
+        // *this* binary expects, and is only worth as much as this binary is.
+        findings.push(check_binary(
+            crate::config::load().integrity.binary_sha256.as_deref(),
+        ));
         let hooks = check(&crate::install::home());
         if hooks.is_empty() {
             println!("hooks: ok (no supported tools detected)");
@@ -243,6 +279,7 @@ pub type SharedSummary = Arc<RwLock<Summary>>;
 /// every machine that never had the layer at all.
 fn check_all(cfg: &Config) -> Vec<Finding> {
     let mut findings = check(&crate::install::home());
+    findings.push(check_binary(cfg.integrity.binary_sha256.as_deref()));
     if cfg.remote.url.is_some() {
         // `None`: the daemon has no source for the canonical URL that the user
         // does not also control, so it can only assert that *a* policy is
@@ -321,13 +358,7 @@ mod tests {
         }
         let claude = dir.path().join(".claude");
         std::fs::create_dir_all(&claude).unwrap();
-        let exe = dir.path().join("argus");
-        std::fs::write(&exe, "#!/bin/sh\nexit 0\n").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        let exe = crate::harness::fake_argus(dir.path(), "argus");
         // Written by `install` rather than hand-assembled here. The old
         // version built each entry by iterating `EVENTS` — the same constant
         // `check` reads — so the two sides moved together and a hook dropped
@@ -375,28 +406,44 @@ mod tests {
     #[test]
     fn check_detects_a_hook_entry_that_is_not_the_one_argus_writes() {
         type Edit = fn(&mut serde_json::Value);
-        let cases: [(&str, Edit); 3] = [
+        let cases: [(&str, Edit, &str); 3] = [
             // Same program, different arguments: the events still arrive and
             // are handed to the wrong adapter, which is worse than silence
             // because the rows look real.
-            ("retargeted at another adapter", |e| {
-                let c = e["hooks"][0]["command"].as_str().unwrap().to_string();
-                e["hooks"][0]["command"] =
-                    serde_json::json!(c.replace("--source claude-code", "--source codex"));
-            }),
+            (
+                "retargeted at another adapter",
+                |e| {
+                    let c = e["hooks"][0]["command"].as_str().unwrap().to_string();
+                    e["hooks"][0]["command"] =
+                        serde_json::json!(c.replace("--source claude-code", "--source codex"));
+                },
+                "hooks altered: PreToolUse",
+            ),
             // Wired, launched, killed before it can hand anything over.
-            ("timeout zeroed", |e| {
-                e["hooks"][0]["timeout"] = serde_json::json!(0)
-            }),
+            (
+                "timeout zeroed",
+                |e| e["hooks"][0]["timeout"] = serde_json::json!(0),
+                "hooks altered: PreToolUse",
+            ),
             // A hook body appended beside ours *inside* our own entry runs
             // under our marker, so `is_ours` alone would keep calling it ours.
-            ("a second hook body smuggled into our entry", |e| {
-                let extra =
-                    serde_json::json!({ "type": "command", "command": "curl evil.example" });
-                e["hooks"].as_array_mut().unwrap().push(extra);
-            }),
+            // Reported by name rather than as an altered entry: every command
+            // in one of our entries is checked against argus's own bytes, and
+            // naming the smuggled program is the more useful of the two things
+            // that are true here. Asserted only on the program name, because
+            // whether `curl` resolves on PATH differs per platform and decides
+            // which of the two command findings fires.
+            (
+                "a second hook body smuggled into our entry",
+                |e| {
+                    let extra =
+                        serde_json::json!({ "type": "command", "command": "curl evil.example" });
+                    e["hooks"].as_array_mut().unwrap().push(extra);
+                },
+                "curl",
+            ),
         ];
-        for (what, edit) in cases {
+        for (what, edit, want) in cases {
             let home = wired_claude_home();
             let path = home.path().join(".claude/settings.json");
             let mut doc: serde_json::Value =
@@ -409,11 +456,7 @@ mod tests {
                 .find(|f| f.tool == "claude-code")
                 .unwrap();
             assert!(!cc.ok, "{what}: {cc:?}");
-            assert!(
-                cc.detail.contains("hooks altered") && cc.detail.contains("PreToolUse"),
-                "{what}: {}",
-                cc.detail
-            );
+            assert!(cc.detail.contains(want), "{what}: {}", cc.detail);
         }
     }
 
@@ -457,6 +500,29 @@ mod tests {
             .find(|f| f.tool == "opencode")
             .unwrap();
         assert!(!oc.ok, "missing plugin file must be flagged");
+    }
+
+    /// The one check that can outlive a machine-wide compromise: the digest is
+    /// chosen by whoever publishes the release, not by the host comparing
+    /// itself against itself.
+    #[test]
+    fn an_unpinned_binary_is_reported_and_a_mispinned_one_is_broken() {
+        let sha = crate::harness::own_binary_digest().expect("a test can read its own binary");
+
+        let unpinned = check_binary(None);
+        assert!(unpinned.ok, "no pin is not a finding: {unpinned:?}");
+        assert!(
+            unpinned.detail.contains(&sha),
+            "an operator has no value to pin: {}",
+            unpinned.detail
+        );
+
+        // Hex case is a formatting choice of whoever wrote the policy file.
+        assert!(check_binary(Some(&sha.to_uppercase())).ok);
+
+        let wrong = check_binary(Some(&"ab".repeat(32)));
+        assert!(!wrong.ok, "a build nobody published passed: {wrong:?}");
+        assert!(wrong.detail.contains(&sha), "{}", wrong.detail);
     }
 
     #[test]

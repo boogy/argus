@@ -480,6 +480,17 @@ pub enum EventKind {
         /// stated rather than assumed to be the installed ones.
         data_dir: String,
         binary: String,
+        /// What that binary is made of, and whether policy agrees.
+        ///
+        /// `check` compares the *hooks'* program against this daemon's own
+        /// bytes, which cannot answer the case where both were replaced
+        /// together. The digest travels to the collector so the answer comes
+        /// from somewhere the machine's owner does not control: a host running
+        /// a build nobody published is visible as a digest nobody recognises,
+        /// with no pin deployed at all. `binary_pin_ok` is the same statement
+        /// pre-computed for fleets that do pin one, and absent when they do not.
+        binary_sha256: String,
+        binary_pin_ok: Option<bool>,
         /// Names — never values — of the `ARGUS_*` overrides in force. An
         /// override is a supported debugging affordance and a supported way to
         /// step out from under policy; saying which are set makes the second
@@ -720,6 +731,8 @@ pub fn visit_strings(kind: &mut EventKind, f: &mut impl FnMut(&mut String)) {
             unreadable_total: _,
             data_dir: _,
             binary: _,
+            binary_sha256: _,
+            binary_pin_ok: _,
             env_overrides: _,
         } => {}
     }

@@ -79,6 +79,7 @@ unset keys keep their default.
 | `integrity.enabled`       | `true`            | Periodically re-verify the daemon's own hook/plugin wiring is intact; on by default (security control). A tampered/removed hook emits an `event.type=integrity`, `integrity.status=broken` record at `WARN`. |
 | `integrity.interval_secs` | `3600`            | Wiring self-check interval (floor `30`). Broken findings re-emit each cycle until re-install, so the alert stays live.                                                                                       |
 | `integrity.managed`       | `false`           | Also verify the machine-wide (`--managed`) layer each cycle. Set it where `install --managed` ran: with it on, a missing managed artifact is a finding rather than an unmanaged machine.                      |
+| `integrity.binary_sha256` | unset             | The sha256 of the release the fleet deployed, lowercase hex. Set it and every host reports whether the binary it runs is that one. See [notes](#notes-on-specific-keys).                                     |
 
 ### `[health]`
 
@@ -128,6 +129,21 @@ count rides out on the next envelope as an `event.type=loss`,
 `loss.reason=spool_full` record. Read fresh on every hook, so a change
 applies immediately.
 
+**`integrity.binary_sha256`** — A hook entry that survives every wiring check
+still only proves _which path_ runs; replacing the binary at that path with
+`#!/bin/sh\nexit 0` leaves the whole install intact and captures nothing.
+Unpinned, argus compares each hook's program against the binary it is itself
+running, which already catches that and any wrapper around it. Pinning goes one
+further, because a comparison a machine makes against itself is one its owner
+can satisfy twice: publish the digest of the release you deployed and every host
+reports whether it is running that build (`check`) and repeats the answer to the
+collector (`health.binary_pin_ok`), where the machine's owner cannot reach it.
+Get the value from the release's `SHA256SUMS`, or `shasum -a 256 $(which argus)`.
+Set it in the layer users cannot edit, and only ever to a digest you published:
+a wrong pin reports the whole fleet as tampered with and buries the host that
+is. Publishing a new release un-pins nothing — update the digest with it, or
+every upgraded host is a finding.
+
 **`health.interval_secs`** — Everything else argus emits is a consequence of
 the watched tool doing something, which makes a killed daemon, a deleted data
 directory, a blocked collector and an unopened laptop all arrive as the same
@@ -136,7 +152,8 @@ enrolled, no `argus.health` in N minutes_ — so it is emitted unconditionally,
 including on a completely idle machine. Each one carries the install id and
 version, uptime, the age and ok/broken counts of the last self-check, the
 config fingerprint and policy URL, buffer and spool depth, cumulative drops,
-the effective data directory and binary path, and the names (never the values)
+the effective data directory, the binary path and its sha256 (with the verdict
+against `integrity.binary_sha256` where one is pinned), and the names (never the values)
 of any `ARGUS_*` override in force. A `startup` and a `shutdown` record bracket
 every run, so a stop somebody asked for does not read like one nobody did.
 

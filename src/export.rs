@@ -363,6 +363,8 @@ fn record(e: &Event) -> Value {
             unreadable_total,
             data_dir,
             binary,
+            binary_sha256,
+            binary_pin_ok,
             env_overrides,
         } => {
             attrs.push(attr("health.reason", reason));
@@ -395,6 +397,12 @@ fn record(e: &Event) -> Value {
             ));
             attrs.push(attr("health.data_dir", data_dir));
             attrs.push(attr("health.binary", binary));
+            attrs.push(attr("health.binary_sha256", binary_sha256));
+            // Only where a pin exists: `false` is the finding, and an attribute
+            // that is absent everywhere else keeps a rule on it unambiguous.
+            if let Some(ok) = binary_pin_ok {
+                attrs.push(attr("health.binary_pin_ok", &ok.to_string()));
+            }
             // Only when there are any: an empty attribute on every heartbeat
             // from every healthy host is a column nobody reads, and the whole
             // point of this one is that its presence is the signal.

@@ -148,14 +148,50 @@ or flipped. Unlike `--project`, a _missing_ managed artifact is BROKEN rather
 than silent — passing the flag asserts the layer should be there. Reading it
 needs no privilege, so an MDM compliance script can run it as the logged-in user.
 
+### The binary the layer runs
+
+Hooks an ordinary account cannot edit still name a program, and on a stock Apple
+Silicon laptop the path a user-scope install bakes — `/opt/homebrew/bin/argus` —
+is writable with no privilege at all. Replacing it with `#!/bin/sh\nexit 0`
+leaves the managed layer wired, intact and blind.
+
+So `install --managed` deploys its own copy of argus first and bakes that:
+
+| Platform      | Deployed to                       |
+| ------------- | --------------------------------- |
+| macOS / Linux | `/usr/local/libexec/argus/argus`  |
+| Windows       | `C:\Program Files\argus\argus.exe` |
+
+Off `PATH` deliberately — this copy exists to be run by hooks, not found by
+people, and a directory only root can write is the whole of its value. It is
+installed `0755`: every account runs it, no account but root replaces it. The
+source is digested against the running binary before the copy is made, so the
+one moment argus would launder a tampered build into a trusted location under
+`sudo` is refused instead. `uninstall --managed` removes it, after the hooks
+that referenced it are gone.
+
+Only the machine-wide layer bakes that path. User-scope installs keep pointing
+at the `PATH` alias, so removing the managed layer cannot leave every per-user
+install on the machine running a binary that no longer exists.
+
+`check --managed` reports the deployed path as BROKEN if any directory on the
+way to it is owned by a non-root account or is group- or world-writable — a
+writable parent is a rename away from a replaced binary. And every `check`,
+managed or not, compares each hook's program against the argus running the
+check, so a stub or a wrapper is a finding rather than silence. Pin
+`integrity.binary_sha256` to make that comparison against a digest you
+published rather than one the machine chose — see
+[Config reference](configuration.md#notes-on-specific-keys).
+
 ### The multi-user consequence
 
 `--managed` wires **tools, not users**, and everything on the receiving end of a
 hook is per-user. Two things follow, and neither is optional:
 
 - **The `argus` binary must be executable by every account on the machine.**
-  The hook command is a path baked into a file every user reads. Install it
-  somewhere only root can execute, and every hook on the machine fails.
+  The hook command is a path baked into a file every user reads. The deployed
+  copy above is `0755` for exactly this reason; if you point the layer at a
+  binary only root can execute, every hook on the machine fails.
 - **Each account needs its own running daemon.** The socket (`0600` in a
   `0700` directory), the Codex OTLP port (derived from the data directory,
   deliberately not fixed), and the SQLite buffer are all per-user by

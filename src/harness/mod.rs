@@ -441,6 +441,38 @@ pub enum CmdStyle {
 /// opencode plugin shim reads the same variable to find the binary.
 pub const BIN_ENV: &str = "ARGUS_BIN";
 
+/// What tests want `check_command` to treat as argus's own binary.
+///
+/// `check_command` compares a hook's program against the running executable
+/// byte for byte, so a fixture's stand-in argus would have to be a copy of the
+/// 45 MB test binary — sixty of them, each read back in full by every `verify`,
+/// which costs more wall-clock than the rest of the suite together. Tests about
+/// *wiring* declare a small stub to be argus instead; the identity check itself
+/// is exercised against a real copy of this binary in
+/// `argus_recognises_the_binary_it_is_running`.
+#[cfg(test)]
+static OWN_DIGEST_OVERRIDE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// A stand-in installed argus, declared to be argus for as long as the process
+/// lives. Unique per path, so overwriting one with an ordinary stub is still a
+/// mismatch.
+#[cfg(test)]
+pub(crate) fn fake_argus(dir: &Path, name: &str) -> PathBuf {
+    let p = dir.join(name);
+    std::fs::write(
+        &p,
+        format!("#!/bin/sh\n# argus stand-in {}\nexit 0\n", p.display()),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    *OWN_DIGEST_OVERRIDE.lock().unwrap() = file_digest(&p);
+    p
+}
+
 /// Path to argus as baked into every hook command — deliberately *not* raw
 /// `current_exe()`.
 ///
@@ -451,7 +483,16 @@ pub const BIN_ENV: &str = "ARGUS_BIN";
 /// is the alias on `PATH` (`/opt/homebrew/bin/argus`, `~/.npm-global/bin/argus`,
 /// `~/.cargo/bin/argus`), which keeps pointing at whatever version is current,
 /// so it wins whenever it resolves to this very binary.
+/// …unless a machine-wide operation is in flight, in which case the root-owned
+/// copy outranks all of it — see [`MANAGED_BIN`].
 pub fn install_path() -> String {
+    if let Some(p) = MANAGED_BIN
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+    {
+        return p.to_string_lossy().into_owned();
+    }
     if let Ok(v) = std::env::var(BIN_ENV)
         && !v.is_empty()
     {
@@ -465,6 +506,131 @@ pub fn install_path() -> String {
         .unwrap_or(exe)
         .to_string_lossy()
         .into_owned()
+}
+
+/// The binary machine-wide wiring bakes, set for as long as a `--managed`
+/// operation is running and empty otherwise.
+///
+/// The alias on `PATH` is the right answer for a user-scope install and the
+/// wrong one for a machine-wide layer: `/opt/homebrew/bin/argus` is writable
+/// without any privilege at all on a stock Apple Silicon laptop, so hooks no
+/// account can edit would still run a program every account can replace.
+/// `install --managed` deploys a root-owned copy and points the wiring it
+/// writes at that instead.
+///
+/// Deliberately *not* a global preference. If every scope baked the managed
+/// copy, `uninstall --managed` would leave every user-scope hook on the machine
+/// pointing at a path that no longer exists — capture stopped by an operation
+/// that only claimed to remove the machine-wide layer. Scoping it here keeps
+/// the two layers independent, which is what they are.
+static MANAGED_BIN: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+
+/// Raises [`MANAGED_BIN`] until it is dropped, so a `?` on the way out cannot
+/// leave later user-scope wiring baking the machine-wide path.
+struct ManagedBin;
+
+impl ManagedBin {
+    fn set(path: PathBuf) -> Self {
+        *MANAGED_BIN.lock().unwrap_or_else(|e| e.into_inner()) = Some(path);
+        Self
+    }
+}
+
+impl Drop for ManagedBin {
+    fn drop(&mut self) {
+        *MANAGED_BIN.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+}
+
+/// Where `--managed` puts argus itself.
+///
+/// Off `PATH` on purpose: this copy exists to be *run by hooks*, not found by
+/// people, and a directory only root can write is the whole of its value.
+fn managed_bin(root: &Path, platform: Platform) -> PathBuf {
+    match platform {
+        Platform::Windows => root.join("Program Files").join("argus").join("argus.exe"),
+        Platform::Linux | Platform::MacOS => root.join("usr/local/libexec/argus/argus"),
+    }
+}
+
+/// Put a copy of argus under the system root, so the hooks below can be baked
+/// against a program an ordinary account cannot replace.
+///
+/// The source is whatever [`install_path`] would otherwise bake, and it is
+/// digested before it is copied: deploying a machine-wide binary is exactly the
+/// moment when copying a *tampered* one would launder it into the trusted
+/// location, and the operator running this under `sudo` has no other way to
+/// notice.
+fn deploy_managed_binary(root: &Path, platform: Platform, dry_run: bool) -> Result<PathBuf> {
+    let dest = managed_bin(root, platform);
+    let src = PathBuf::from(install_path());
+    // A re-install: `install_path` already resolved to the deployed copy.
+    if src == dest {
+        return Ok(dest);
+    }
+    let (Some(from), Some(own)) = (file_digest(&src), own_binary_digest()) else {
+        anyhow::bail!("cannot read {} to deploy it machine-wide", src.display());
+    };
+    if from != own {
+        anyhow::bail!(
+            "{} is not this argus (sha256:{}, running sha256:{}) — refusing to \
+             install a binary this process cannot vouch for machine-wide",
+            src.display(),
+            &from[..12],
+            &own[..12],
+        );
+    }
+    if dry_run {
+        println!("would deploy argus to {}", dest.display());
+        return Ok(dest);
+    }
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::copy(&src, &dest)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // World-readable and world-executable, owner-writable only: every
+        // account's hooks run it, no account but root replaces it.
+        std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755))?;
+    }
+    println!("deployed argus to {}", dest.display());
+    Ok(dest)
+}
+
+/// `Some(why)` when a path can be rewritten by somebody who is not root.
+///
+/// The question every machine-wide control ultimately rests on: hooks that an
+/// ordinary account cannot edit are worth nothing if the program they run sits
+/// in a directory that account owns. Answered only on Unix — Windows ACLs are
+/// not readable this cheaply, and a wrong answer here is worse than none.
+#[cfg(unix)]
+fn writable_by_non_root(path: &Path) -> Option<String> {
+    use std::os::unix::fs::MetadataExt;
+    // The directories count as much as the file: write permission on a
+    // directory is permission to replace what is in it, whoever owns that.
+    let mut here = Some(path);
+    while let Some(p) = here {
+        let md = std::fs::metadata(p).ok()?;
+        if md.uid() != 0 {
+            return Some(format!("{} is owned by uid {}", p.display(), md.uid()));
+        }
+        if md.mode() & 0o022 != 0 {
+            return Some(format!(
+                "{} is group- or world-writable (mode {:o})",
+                p.display(),
+                md.mode() & 0o777
+            ));
+        }
+        here = p.parent().filter(|q| *q != p);
+    }
+    None
+}
+
+#[cfg(not(unix))]
+fn writable_by_non_root(_path: &Path) -> Option<String> {
+    None
 }
 
 /// An entry on `PATH` that names this same binary under a stable alias.
@@ -621,18 +787,83 @@ fn resolve_program(p: &str) -> Option<PathBuf> {
         .find(|c| runnable(c))
 }
 
-/// `Ok(())` when the command's program still exists and is executable.
+/// The sha256 of the running binary, computed once.
+///
+/// Once because it is the one file this process can be sure does not change
+/// under it in a way that matters: a replacement on disk produces a *different*
+/// running argus, which reports its own digest and is caught by the pin.
+pub fn own_binary_digest() -> Option<String> {
+    #[cfg(test)]
+    if let Some(d) = OWN_DIGEST_OVERRIDE.lock().unwrap().clone() {
+        return Some(d);
+    }
+    static DIGEST: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    DIGEST
+        .get_or_init(|| std::env::current_exe().ok().and_then(|p| file_digest(&p)))
+        .clone()
+}
+
+fn file_digest(path: &Path) -> Option<String> {
+    std::fs::read(path)
+        .ok()
+        .map(|b| crate::filecap::sha256_hex(&b))
+}
+
+/// `Ok(())` when the command's program still exists, is executable, and is
+/// argus rather than something wearing its path.
+///
+/// Existence was the whole of this check, and existence is the one property an
+/// attacker never has to break: `/opt/homebrew/bin/argus` is writable without
+/// root on a stock Apple Silicon machine, and `printf '#!/bin/sh\nexit 0\n'`
+/// over it leaves every hook wired, every marker intact, every entry
+/// byte-identical to what `install` wrote — and captures nothing, for ever,
+/// silently.
+///
+/// So the program is compared by content. Against the fleet's pinned digest
+/// when policy sets one, and otherwise against the digest of the binary running
+/// this check — a weaker statement ("whatever hooks run is byte-identical to
+/// me") that still costs an attacker both copies instead of one, and needs no
+/// deployment to hold. Content rather than a behavioural probe because a
+/// wrapper that forwards `--version` and drops the hook payload passes any
+/// question you can ask it; only the bytes it is made of give it away.
 fn check_command(cmd: &str) -> std::result::Result<(), String> {
     let Some(prog) = program_of(cmd) else {
         return Err(format!("unparsable hook command: {cmd}"));
     };
-    if resolve_program(&prog).is_some() {
-        Ok(())
-    } else {
-        Err(format!(
+    let Some(path) = resolve_program(&prog) else {
+        return Err(format!(
             "hook points at a missing or non-executable binary: {prog}"
-        ))
+        ));
+    };
+    let pinned = crate::config::load().integrity.binary_sha256;
+    // No pin and no readable self is not a finding: it is a check that could
+    // not run, and reporting it as tampering would bury the ones that did.
+    let Some(want) = pinned.clone().or_else(own_binary_digest) else {
+        return Ok(());
+    };
+    let Some(got) = file_digest(&path) else {
+        return Err(format!(
+            "hook program {prog} cannot be read, so what it runs cannot be verified"
+        ));
+    };
+    if got.eq_ignore_ascii_case(&want) {
+        return Ok(());
     }
+    Err(if pinned.is_some() {
+        format!(
+            "hook runs {prog} (sha256:{}), which is not the release this fleet pins \
+             (sha256:{}) — re-run `argus install` from the deployed binary",
+            &got[..12],
+            &want[..12.min(want.len())],
+        )
+    } else {
+        format!(
+            "hook runs {prog} (sha256:{}), which is not this argus (sha256:{}) — a \
+             replaced or wrapped binary keeps every hook wired and captures nothing",
+            &got[..12],
+            &want[..12],
+        )
+    })
 }
 
 fn harness_by_id(id: &str) -> Option<&'static dyn Harness> {
@@ -843,27 +1074,40 @@ fn install_managed_in(
     platform: Platform,
     dry_run: bool,
 ) -> Result<()> {
-    let mut wired = 0;
-    let mut failures = Vec::new();
+    // Planned in full before anything is written: a refusal half-way through
+    // would leave the machine in a state neither install nor uninstall
+    // describes, and would leave a deployed binary no hook points at. Still a
+    // hard `bail!` rather than a contained failure — a harness answering with
+    // user-scope paths under `sudo` is a bug in argus, not a condition of the
+    // machine.
+    let mut planned: Vec<(&str, Vec<Artifact>)> = Vec::new();
     for h in harnesses {
         let Some(d) = managed_detection(*h, root, platform) else {
             continue;
         };
         let artifacts = h.artifacts(&d, Scope::Managed(platform));
-        // Checked for the whole harness before a single one is applied: a
-        // refusal half-way through would leave the machine in a state neither
-        // install nor uninstall describes. Still a hard `bail!` rather than a
-        // contained failure — a harness answering with user-scope paths under
-        // `sudo` is a bug in argus, not a condition of the machine.
+        if artifacts.is_empty() {
+            continue;
+        }
         for a in &artifacts {
             if let Some(why) = escapes_managed_root(root, a) {
                 anyhow::bail!("{}: refusing to write it — {why}", h.id());
             }
         }
-        wired += apply_all(&artifacts, h.display_name(), dry_run, &mut failures);
+        planned.push((h.display_name(), artifacts));
     }
-    if wired == 0 && failures.is_empty() {
+    if planned.is_empty() {
+        // Nothing to wire here, so nothing to deploy: a binary in a layer no
+        // hook references is a file the operator has to explain later.
         println!("no tool supports machine-wide wiring on {platform:?} yet");
+        return Ok(());
+    }
+    // Before any wiring: every hook below bakes whatever `install_path` says,
+    // and this is what makes it say the root-owned copy.
+    let _bin = ManagedBin::set(deploy_managed_binary(root, platform, dry_run)?);
+    let mut failures = Vec::new();
+    for (display, artifacts) in &planned {
+        apply_all(artifacts, display, dry_run, &mut failures);
     }
     into_result(failures)
 }
@@ -874,6 +1118,7 @@ pub fn uninstall_managed(root: &Path, platform: Platform) -> Result<()> {
 }
 
 fn uninstall_managed_in(harnesses: &[&dyn Harness], root: &Path, platform: Platform) -> Result<()> {
+    let _bin = ManagedBin::set(managed_bin(root, platform));
     for h in harnesses {
         let Some(d) = managed_detection(*h, root, platform) else {
             continue;
@@ -891,6 +1136,14 @@ fn uninstall_managed_in(harnesses: &[&dyn Harness], root: &Path, platform: Platf
             revert(a)?;
         }
     }
+    // Last, and only after every hook that referenced it is gone: a deployed
+    // binary with live hooks still pointing at it is capture that stopped
+    // without anything saying so.
+    let deployed = managed_bin(root, platform);
+    if deployed.exists() {
+        std::fs::remove_file(&deployed)?;
+        println!("removed {}", deployed.display());
+    }
     Ok(())
 }
 
@@ -906,7 +1159,32 @@ pub fn check_managed(root: &Path, platform: Platform) -> Vec<Finding> {
 }
 
 fn check_managed_in(harnesses: &[&dyn Harness], root: &Path, platform: Platform) -> Vec<Finding> {
+    // What `install --managed` baked, so `verify` below compares against the
+    // same command it wrote rather than against the user-scope alias.
+    let _bin = ManagedBin::set(managed_bin(root, platform));
     let mut out = Vec::new();
+    // The layer's foundation, checked once rather than per tool: machine-wide
+    // hooks an account cannot edit buy nothing if the program they run sits
+    // somewhere that account can overwrite. Only asked of the real system root
+    // — a redirected one is a temp directory the caller is supposed to own, and
+    // ownership of a path under it says nothing about the machine.
+    let sr = system_root(platform);
+    if sr.real && sr.path == root {
+        let baked = managed_bin(root, platform);
+        let problem = writable_by_non_root(&baked);
+        out.push(Finding {
+            tool: "binary (managed)".into(),
+            ok: problem.is_none(),
+            detail: match &problem {
+                None => format!("{} is root-owned", baked.display()),
+                Some(why) => format!(
+                    "hooks run {}, which any account can replace: {why} — \
+                     re-run `argus install --managed`",
+                    baked.display()
+                ),
+            },
+        });
+    }
     for h in harnesses {
         let Some(d) = managed_detection(*h, root, platform) else {
             continue;
@@ -1840,7 +2118,7 @@ mod tests {
     fn a_managed_layer_installs_checks_and_uninstalls_under_the_system_root() {
         let root = tempfile::tempdir().unwrap();
         let bin = tempfile::tempdir().unwrap();
-        let exe = fake_binary(bin.path(), "argus");
+        let exe = fake_argus(bin.path(), "argus");
         unsafe { std::env::set_var(BIN_ENV, &exe) };
         let stub = ManagedStub {
             dir: LINUX_ONLY,
@@ -1856,7 +2134,18 @@ mod tests {
         assert!(checked[0].ok, "freshly installed: {:?}", checked[0]);
 
         // A platform the harness declares nothing for is not "broken", it is
-        // absent — and must not have been written either.
+        // absent — and must not have been written either. Compared against what
+        // the Linux leg left rather than against a fixed count, so the binary
+        // argus deploys for the platform it *does* wire is not mistaken for it.
+        let listing = |p: &Path| {
+            let mut v: Vec<_> = std::fs::read_dir(p)
+                .unwrap()
+                .map(|e| e.unwrap().file_name())
+                .collect();
+            v.sort();
+            v
+        };
+        let before = listing(root.path());
         for p in [Platform::MacOS, Platform::Windows] {
             assert!(
                 check_managed_in(hs, root.path(), p).is_empty(),
@@ -1865,8 +2154,8 @@ mod tests {
             install_managed_in(hs, root.path(), p, false).unwrap();
         }
         assert_eq!(
-            std::fs::read_dir(root.path()).unwrap().count(),
-            1,
+            listing(root.path()),
+            before,
             "a platform with no managed dir still wrote something"
         );
 
@@ -1883,6 +2172,110 @@ mod tests {
             "uninstall left our wiring behind: {text}"
         );
         unsafe { std::env::remove_var(BIN_ENV) };
+    }
+
+    /// The point of the machine-wide layer, and the thing it did not have:
+    /// hooks no account can edit are worth nothing while the program they run
+    /// sits in `/opt/homebrew/bin`, which any account can overwrite. So the
+    /// layer carries its own copy of argus and bakes *that*.
+    ///
+    /// The two halves that keep it honest are asserted with it: the user scope
+    /// still bakes the alias — otherwise removing the machine-wide layer would
+    /// silently break every per-user install on the machine — and uninstall
+    /// takes the copy back out.
+    #[test]
+    fn a_managed_layer_bakes_its_own_copy_of_argus_and_takes_it_away_again() {
+        let root = tempfile::tempdir().unwrap();
+        let bin = tempfile::tempdir().unwrap();
+        let alias = fake_argus(bin.path(), "argus");
+        unsafe { std::env::set_var(BIN_ENV, &alias) };
+        let stub = ManagedStub {
+            dir: LINUX_ONLY,
+            escape: None,
+        };
+        let hs: &[&dyn Harness] = &[&stub];
+        let deployed = root.path().join("usr/local/libexec/argus/argus");
+
+        install_managed_in(hs, root.path(), Platform::Linux, false).unwrap();
+        assert!(deployed.exists(), "no copy of argus under the system root");
+        let wired = std::fs::read_to_string(root.path().join("etc/stub/settings.json")).unwrap();
+        assert!(
+            wired.contains(deployed.to_str().unwrap()),
+            "managed hooks do not run the root-owned copy: {wired}"
+        );
+        assert!(
+            !wired.contains(alias.to_str().unwrap()),
+            "managed hooks still run the user-writable alias: {wired}"
+        );
+        // …and the check that reads them back agrees, rather than reporting
+        // every machine-wide host as altered.
+        let checked = check_managed_in(hs, root.path(), Platform::Linux);
+        assert!(checked.iter().all(|f| f.ok), "{checked:?}");
+
+        assert_eq!(
+            install_path(),
+            alias.to_string_lossy(),
+            "a managed install redirected user-scope wiring too"
+        );
+
+        uninstall_managed_in(hs, root.path(), Platform::Linux).unwrap();
+        assert!(
+            !deployed.exists(),
+            "uninstall left argus behind in the system root"
+        );
+        unsafe { std::env::remove_var(BIN_ENV) };
+    }
+
+    /// `sudo argus install --managed` is the one moment a tampered binary would
+    /// be copied *into* the trusted location by argus itself, with root's
+    /// blessing and nothing to notice it afterwards. So the source is digested
+    /// first, and a mismatch stops the install rather than laundering it.
+    #[test]
+    fn a_binary_that_is_not_this_argus_is_never_deployed_machine_wide() {
+        let root = tempfile::tempdir().unwrap();
+        let bin = tempfile::tempdir().unwrap();
+        fake_argus(bin.path(), "argus");
+        let impostor = fake_binary(bin.path(), "argus-impostor");
+        unsafe { std::env::set_var(BIN_ENV, &impostor) };
+        let stub = ManagedStub {
+            dir: LINUX_ONLY,
+            escape: None,
+        };
+        let hs: &[&dyn Harness] = &[&stub];
+
+        let err = install_managed_in(hs, root.path(), Platform::Linux, false)
+            .expect_err("deployed a binary that is not this argus");
+        assert!(err.to_string().contains("not this argus"), "{err}");
+        assert!(
+            !root.path().join("usr/local/libexec/argus/argus").exists(),
+            "refused, yet the copy was made anyway"
+        );
+        assert!(
+            !root.path().join("etc/stub/settings.json").exists(),
+            "wired hooks against a binary it refused to deploy"
+        );
+        unsafe { std::env::remove_var(BIN_ENV) };
+    }
+
+    /// What the `binary (managed)` finding asks of a real system root: a path
+    /// is only out of reach if *every* directory on the way to it is. A
+    /// writable parent is a rename away from a replaced binary.
+    #[cfg(unix)]
+    #[test]
+    fn a_path_anyone_can_replace_is_reported_even_when_the_file_itself_is_not() {
+        if is_admin() {
+            // Running as root, so a temp directory is root-owned and proves
+            // nothing about what an ordinary account can reach.
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let mine = fake_binary(dir.path(), "argus");
+        assert!(
+            writable_by_non_root(&mine).is_some(),
+            "a binary in the caller's own temp dir read as root-owned"
+        );
+        // A path whose whole chain is root-owned on every Unix argus supports.
+        assert_eq!(writable_by_non_root(Path::new("/usr/bin")), None);
     }
 
     /// The one that matters under `sudo`: a harness answering with a path in
@@ -1972,7 +2365,7 @@ mod tests {
     #[test]
     fn claude_codes_managed_layer_round_trips_on_every_platform() {
         let bin = tempfile::tempdir().unwrap();
-        let exe = fake_binary(bin.path(), "argus");
+        let exe = fake_argus(bin.path(), "argus");
         unsafe { std::env::set_var(BIN_ENV, &exe) };
         let hs: &[&dyn Harness] = &[&crate::harness::claude_code::ClaudeCode];
 
@@ -2022,7 +2415,7 @@ mod tests {
     #[test]
     fn a_flipped_enforcement_key_makes_a_wired_managed_file_broken() {
         let bin = tempfile::tempdir().unwrap();
-        let exe = fake_binary(bin.path(), "argus");
+        let exe = fake_argus(bin.path(), "argus");
         unsafe { std::env::set_var(BIN_ENV, &exe) };
         let hs: &[&dyn Harness] = &[&crate::harness::claude_code::ClaudeCode];
         let root = tempfile::tempdir().unwrap();
@@ -2079,7 +2472,7 @@ mod tests {
     #[test]
     fn codexs_managed_layer_round_trips_on_every_platform() {
         let bin = tempfile::tempdir().unwrap();
-        let exe = fake_binary(bin.path(), "argus");
+        let exe = fake_argus(bin.path(), "argus");
         unsafe { std::env::set_var(BIN_ENV, &exe) };
         let hs: &[&dyn Harness] = &[&crate::harness::codex::Codex];
 
@@ -2222,7 +2615,7 @@ mod tests {
     #[test]
     fn uninstall_leaves_a_pinned_value_an_administrator_has_taken_over() {
         let bin = tempfile::tempdir().unwrap();
-        let exe = fake_binary(bin.path(), "argus");
+        let exe = fake_argus(bin.path(), "argus");
         unsafe { std::env::set_var(BIN_ENV, &exe) };
         let hs: &[&dyn Harness] = &[&crate::harness::claude_code::ClaudeCode];
         let root = tempfile::tempdir().unwrap();
@@ -2640,7 +3033,7 @@ mod tests {
     fn verify_flags_a_hook_whose_binary_cannot_run() {
         const EVENTS: &[HookEvent] = &[HookEvent::new("Stop", false)];
         let dir = tempfile::tempdir().unwrap();
-        let exe = fake_binary(dir.path(), "argus");
+        let exe = fake_argus(dir.path(), "argus");
         // `verify` now compares the entry against the one install would write,
         // so the command has to come from the same place install gets it —
         // a hand-typed equivalent would read as altered and mask the failure
@@ -2682,6 +3075,137 @@ mod tests {
         assert!(err.contains("missing or non-executable"), "{err}");
     }
 
+    /// Builds the artifact `install` would write for a one-event Claude wiring
+    /// whose hook command runs `exe`, so a test can change what lives at that
+    /// path and ask `verify` what it thinks.
+    fn wiring_that_runs(dir: &Path, exe: &Path) -> Artifact {
+        const EVENTS: &[HookEvent] = &[HookEvent::new("Stop", false)];
+        unsafe {
+            std::env::set_var(BIN_ENV, exe);
+        }
+        let settings = dir.join("settings.json");
+        let cmd = hook_command("claude-code", None, CmdStyle::Shell);
+        std::fs::write(
+            &settings,
+            json!({ "hooks": { "Stop": [hook_entry(HookShape::CommandArray, &cmd, &EVENTS[0])] } })
+                .to_string(),
+        )
+        .unwrap();
+        Artifact::JsonHooks {
+            path: settings,
+            events: EVENTS,
+            shape: HookShape::CommandArray,
+            source: "claude-code",
+            pinned: Vec::new(),
+        }
+    }
+
+    /// The cheapest complete bypass there is: leave every hook exactly where
+    /// `install` put it and overwrite the program they run. Nothing about the
+    /// wiring changes, so every other check in `verify` passes.
+    #[test]
+    fn verify_flags_a_hook_whose_binary_is_no_longer_argus() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = fake_argus(dir.path(), "argus");
+        let artifact = wiring_that_runs(dir.path(), &exe);
+        assert_eq!(verify(&artifact), Ok(()), "the real binary must verify");
+
+        // What a developer who wants the hooks to stop firing actually types.
+        std::fs::write(&exe, "#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let err = verify(&artifact).unwrap_err();
+        assert!(err.contains("is not this argus"), "{err}");
+
+        // A wrapper that really does run argus is the same finding: it decides
+        // which invocations reach the binary, and that is the whole capture.
+        std::fs::write(
+            &exe,
+            format!(
+                "#!/bin/sh\ntest \"$1\" = hook && exit 0\nexec {} \"$@\"\n",
+                exe.display()
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let err = verify(&artifact).unwrap_err();
+        assert!(err.contains("is not this argus"), "{err}");
+
+        unsafe {
+            std::env::remove_var(BIN_ENV);
+        }
+    }
+
+    /// The same guarantee without the fixture shortcut: no declared digest, a
+    /// real copy of the running binary at the hook's path, and the comparison
+    /// `check_command` actually performs in production.
+    #[test]
+    fn argus_recognises_the_binary_it_is_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("argus");
+        std::fs::copy(std::env::current_exe().unwrap(), &exe).unwrap();
+        let artifact = wiring_that_runs(dir.path(), &exe);
+
+        *OWN_DIGEST_OVERRIDE.lock().unwrap() = None;
+        assert_eq!(verify(&artifact), Ok(()), "a copy of this binary is argus");
+
+        std::fs::write(&exe, "#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let err = verify(&artifact).unwrap_err();
+        assert!(err.contains("is not this argus"), "{err}");
+
+        unsafe {
+            std::env::remove_var(BIN_ENV);
+        }
+    }
+
+    /// The fleet's own answer to "which argus is this": with a digest pinned by
+    /// policy, the binary that must be running is the one the MDM shipped, not
+    /// merely whichever one happens to be checking itself.
+    #[test]
+    fn a_pinned_digest_decides_which_binary_counts_as_argus() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = fake_argus(dir.path(), "argus");
+        let artifact = wiring_that_runs(dir.path(), &exe);
+
+        let data = dir.path().join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        let pin = |sha: &str| {
+            std::fs::write(
+                data.join("config.toml"),
+                format!("[integrity]\nbinary_sha256 = \"{sha}\"\n"),
+            )
+            .unwrap();
+        };
+        unsafe {
+            std::env::set_var("ARGUS_DATA_DIR", &data);
+        }
+
+        pin(&crate::filecap::sha256_hex(&std::fs::read(&exe).unwrap()));
+        assert_eq!(verify(&artifact), Ok(()), "the pinned release must verify");
+
+        // The release was rolled back, or this machine never took the update.
+        pin(&"ab".repeat(32));
+        let err = verify(&artifact).unwrap_err();
+        assert!(err.contains("not the release this fleet pins"), "{err}");
+
+        unsafe {
+            std::env::remove_var("ARGUS_DATA_DIR");
+            std::env::remove_var(BIN_ENV);
+        }
+    }
+
     #[test]
     fn verify_flags_an_owned_file_that_is_empty_or_edited() {
         let dir = tempfile::tempdir().unwrap();
@@ -2718,7 +3242,7 @@ mod tests {
     fn verify_flags_codex_toml_edits_that_stopped_pointing_at_argus() {
         const TAIL: &[&str] = &["hook", "--source", "codex"];
         let dir = tempfile::tempdir().unwrap();
-        let exe = fake_binary(dir.path(), "argus");
+        let exe = fake_argus(dir.path(), "argus");
         let path = dir.path().join("config.toml");
         let artifact = Artifact::TomlEdit {
             path: path.clone(),

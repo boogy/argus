@@ -337,6 +337,18 @@ pub struct IntegrityCfg {
     /// on one that never was. On a fleet, this belongs in the policy the user
     /// cannot edit; a local `false` then loses to it, which is the point.
     pub managed: bool,
+    /// The sha256 the fleet expects the argus binary to have, lowercase hex.
+    ///
+    /// Without it, "is this the real argus" can only be answered relative to
+    /// the binary asking — which is the right answer for a laptop and a weak
+    /// one for a fleet, because a machine where *both* copies were replaced
+    /// agrees with itself. Set in policy to the digest of the release that was
+    /// deployed, this makes the hook's program answerable to something the user
+    /// cannot rewrite.
+    ///
+    /// Unset by default: a wrong pin reports every machine as tampered with,
+    /// so it has to be a deliberate act by whoever publishes the release.
+    pub binary_sha256: Option<String>,
 }
 impl Default for IntegrityCfg {
     fn default() -> Self {
@@ -344,6 +356,7 @@ impl Default for IntegrityCfg {
             enabled: true,
             interval_secs: 3600,
             managed: false,
+            binary_sha256: None,
         }
     }
 }

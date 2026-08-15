@@ -127,13 +127,8 @@ mod tests {
     /// A stand-in for the installed argus binary, so a test can move or delete
     /// it without touching the real one.
     fn fake_bin(dir: &std::path::Path) -> std::path::PathBuf {
-        let p = dir.join(if cfg!(windows) { "argus.exe" } else { "argus" });
-        std::fs::write(&p, "#!/bin/sh\nexit 0\n").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        let name = if cfg!(windows) { "argus.exe" } else { "argus" };
+        let p = crate::harness::fake_argus(dir, name);
         unsafe {
             std::env::set_var(crate::harness::BIN_ENV, &p);
         }

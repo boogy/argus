@@ -79,10 +79,13 @@ impl Monitor {
             broken.truncate(MAX_BROKEN);
             broken.push(format!("(+{rest} more)"));
         }
-        let policy_url = {
+        let (policy_url, pin) = {
             let cfg = self.cfg.read().unwrap_or_else(|e| e.into_inner());
-            cfg.remote.url.clone()
+            (cfg.remote.url.clone(), cfg.integrity.binary_sha256.clone())
         };
+        // Empty when this process cannot read its own file — which is itself
+        // worth seeing, and better said as a blank than as a digest of nothing.
+        let binary_sha256 = crate::harness::own_binary_digest().unwrap_or_default();
         Event::new(
             "argus",
             None,
@@ -115,6 +118,8 @@ impl Monitor {
                 binary: std::env::current_exe()
                     .map(|p| p.display().to_string())
                     .unwrap_or_default(),
+                binary_pin_ok: pin.map(|p| p.eq_ignore_ascii_case(&binary_sha256)),
+                binary_sha256,
                 env_overrides: crate::paths::overrides_in_force(),
             },
         )
@@ -275,5 +280,72 @@ mod tests {
             !env_overrides.iter().any(|o| o.contains(&path)),
             "an override *value* leaked into the report: {env_overrides:?}"
         );
+    }
+
+    /// On-machine checks compare argus against argus, so a build nobody
+    /// published is only visible where the comparison happens somewhere the
+    /// machine's owner does not control. The heartbeat is what carries it
+    /// there — with a pin, pre-judged; without one, as the raw digest, which
+    /// still makes an odd build stand out across a fleet.
+    #[test]
+    fn the_heartbeat_states_which_binary_is_running() {
+        // Held, not dropped: it is the data dir the buffer below opens in.
+        let _dir = tmp();
+        let buffer = Arc::new(Buffer::open(&BufferCfg::default()).unwrap());
+        let cfg = Arc::new(RwLock::new(Config::default()));
+        let mon = Monitor::new(buffer, cfg.clone(), SharedSummary::default());
+
+        let EventKind::Health {
+            binary_sha256,
+            binary_pin_ok,
+            ..
+        } = mon.snapshot("interval").kind
+        else {
+            panic!("not a health event")
+        };
+        assert_eq!(binary_sha256.len(), 64, "not a sha256: {binary_sha256:?}");
+        assert_eq!(
+            binary_pin_ok, None,
+            "nothing is pinned, so nothing to judge"
+        );
+
+        cfg.write().unwrap().integrity.binary_sha256 = Some(binary_sha256.to_uppercase());
+        let EventKind::Health { binary_pin_ok, .. } = mon.snapshot("interval").kind else {
+            panic!("not a health event")
+        };
+        assert_eq!(binary_pin_ok, Some(true), "hex case decided the answer");
+
+        cfg.write().unwrap().integrity.binary_sha256 = Some("ab".repeat(32));
+        let event = mon.snapshot("interval");
+        let EventKind::Health { binary_pin_ok, .. } = event.kind else {
+            panic!("not a health event")
+        };
+        assert_eq!(
+            binary_pin_ok,
+            Some(false),
+            "a host running an unpublished build"
+        );
+
+        // A field that stops at the event body is invisible to every rule
+        // anyone writes, which for this one is the same as not collecting it.
+        let event = mon.snapshot("interval");
+        let body = crate::export::to_otlp_body(
+            std::slice::from_ref(&event),
+            &crate::export::Resource::default(),
+        );
+        let attrs = body["resourceLogs"][0]["scopeLogs"][0]["logRecords"][0]["attributes"].clone();
+        let get = |k: &str| {
+            attrs
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|a| a["key"] == k)
+                .map(|a| a["value"]["stringValue"].as_str().unwrap().to_string())
+        };
+        assert_eq!(
+            get("health.binary_sha256").as_deref(),
+            Some(&*binary_sha256)
+        );
+        assert_eq!(get("health.binary_pin_ok").as_deref(), Some("false"));
     }
 }
