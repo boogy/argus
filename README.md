@@ -43,9 +43,18 @@ durable buffering, and batched export with backoff.
 
 ## Quick start
 
+On macOS (and Linux) via Homebrew:
+
+```bash
+brew install boogy/tap/argus
+argus install    # detects installed tools, wires hooks/plugins/config
+```
+
+Or from source, on any supported platform:
+
 ```bash
 cargo install --path .    # or grab a release binary
-argus install              # detects installed tools, wires hooks/plugins/config
+argus install
 ```
 
 `--dry-run` prints the plan, and the detection signals behind it, without
