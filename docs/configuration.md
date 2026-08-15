@@ -18,6 +18,44 @@ The daemon polls that URL (ETag-conditional) and caches the result to disk, so
 policy still applies offline after the first successful fetch. Remote config
 always wins over the local file — see [Config reference](#config-reference).
 
+### Signing it
+
+The cache is a file in the user's own data directory. Without a signature,
+"the fleet says capture is off" is a claim any account can make with one
+`cat > remote-config.cache.toml`, and a `check` that only diffs the cache
+against the effective config confirms it.
+
+Pin a key in the [machine-wide file](#machine-wide-config) — nowhere else, since
+a key the user can choose is a key they can sign their own policy with:
+
+```toml
+[remote]
+url = "https://config.internal/argus.toml"
+public_key = "kPqjmS…"   # base64, 32 bytes
+```
+
+The daemon then fetches `<url>.sig` alongside the body — a base64 ed25519
+detached signature over the exact bytes served — and **refuses to cache or
+apply a body that does not verify**. A cache that stops verifying later is
+skipped by the loader and reported BROKEN by `argus check`. Hosts with no
+machine-wide file pin nothing and behave exactly as before.
+
+Generate the key pair and sign a policy with stock OpenSSL:
+
+```sh
+openssl genpkey -algorithm ed25519 -out policy-key.pem            # keep offline
+openssl pkey -in policy-key.pem -pubout -outform DER |
+  tail -c 32 | base64                                             # → public_key
+openssl pkeyutl -sign -rawin -inkey policy-key.pem \
+  -in argus.toml | base64 > argus.toml.sig                        # serve beside it
+```
+
+Serve `argus.toml.sig` from the same host — the signature URL is formed before
+any query string, so `…/argus.toml?host=x` fetches `…/argus.toml.sig?host=x`.
+Re-sign whenever the body changes, including whitespace: the signature covers
+bytes, not the parsed table. A body and a signature that disagree stop policy
+from applying at all, which is the fail-closed half of the trade.
+
 ## Machine-wide config
 
 The layer above remote policy, and the only one on a developer's machine that
@@ -37,7 +75,9 @@ It outranks the remote cache deliberately. That cache
 predictable name, so "policy said so" is a claim any account can make by
 writing the file itself — a layer beneath it would be advisory. Everything a
 fleet needs pinned beyond a user's reach belongs here; the remote URL stays the
-way to change it without touching every host.
+way to change it without touching every host — and pinning `[remote]
+public_key` here makes the cache prove where it came from, so live policy is
+not the weaker option ([Signing it](#signing-it)).
 
 Two consequences worth knowing:
 
@@ -67,6 +107,7 @@ optional; unset keys keep their default.
 | --------------------------- | --------- | --------------------------------------- |
 | `remote.url`                | _(unset)_ | HTTPS URL polled for fleet-wide config. |
 | `remote.poll_interval_secs` | `300`     | Poll interval (floor `30`).             |
+| `remote.public_key`         | _(unset)_ | base64 ed25519 key remote policy must verify against. Only honoured from the machine-wide layer — see [Signing it](#signing-it). |
 
 ### `[export]`
 

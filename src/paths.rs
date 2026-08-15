@@ -231,6 +231,16 @@ pub fn cached_remote_config_path() -> PathBuf {
     data_dir().join("remote-config.cache.toml")
 }
 
+/// The detached signature over the cached policy body, base64 in a text file.
+///
+/// Beside the cache rather than inside it: the signature covers the exact bytes
+/// the server served, so anything that rewrites the body to carry its own
+/// signature would invalidate it. `.toml.sig` and not `.sig`, so the pair still
+/// sorts and reads as one thing in a directory listing.
+pub fn cached_remote_config_sig_path() -> PathBuf {
+    data_dir().join("remote-config.cache.toml.sig")
+}
+
 /// Where the machine-wide config layer lives under `root`.
 ///
 /// Takes the root and the platform rather than reading either, so `install

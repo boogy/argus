@@ -16,6 +16,7 @@ pub mod integrity;
 pub mod ipc;
 pub mod mcpcfg;
 pub mod paths;
+pub mod policysig;
 pub mod record;
 pub mod redact;
 pub mod spool;

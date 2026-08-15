@@ -114,6 +114,16 @@ pub fn check_config(expected_url: Option<&str>) -> Vec<Finding> {
     let Ok(text) = std::fs::read_to_string(&cache) else {
         return broken("remote policy not loaded (no cache) — running on local/defaults".into());
     };
+    // Before reading a word of it: the diff below proves the cache and the
+    // effective config agree, and both are files this account can write. Where
+    // a key is pinned, the signature is the only part of this check that says
+    // the policy came from the fleet rather than from whoever is being
+    // monitored by it.
+    if let Err(e) = crate::policysig::check_cache(&text) {
+        return broken(format!(
+            "remote policy cache does not verify against the pinned key, not applied: {e}"
+        ));
+    }
     let policy = match text.parse::<toml::Table>() {
         Ok(t) => t,
         Err(e) => {
@@ -743,6 +753,42 @@ mod tests {
         );
         let fs = check_config(None);
         assert!(fs.iter().all(|f| f.ok), "policy effective => ok: {fs:?}");
+    }
+
+    /// Consistency is not authenticity. Diffing the cache against the merged
+    /// config proves two user-writable files agree — which they always will,
+    /// since one of them is built from the other. Where a key is pinned, the
+    /// check has to say who wrote the cache, and "nobody with the key" is
+    /// BROKEN however consistent the machine looks.
+    #[test]
+    fn an_unsigned_policy_cache_is_broken_however_well_it_agrees_with_itself() {
+        let d = set_data_dir();
+        let (sk, pk) = crate::policysig::testkeys::keypair();
+        let body = "[capture]\ntool_inputs = true\n";
+        std::fs::write(
+            crate::paths::config_path(),
+            "[remote]\nurl = \"https://p\"\n",
+        )
+        .unwrap();
+        std::fs::write(crate::paths::cached_remote_config_path(), body).unwrap();
+        assert!(
+            check_config(None)[0].ok,
+            "unpinned, this is the old ok case"
+        );
+
+        let sys = d.path().join("system.toml");
+        std::fs::write(&sys, format!("[remote]\npublic_key = \"{pk}\"\n")).unwrap();
+        let _guard = crate::paths::SystemConfig::set(&sys);
+        let f = &check_config(None)[0];
+        assert!(!f.ok, "{f:?}");
+        assert!(f.detail.contains("does not verify"), "{f:?}");
+
+        std::fs::write(
+            crate::paths::cached_remote_config_sig_path(),
+            crate::policysig::testkeys::sign(&sk, body),
+        )
+        .unwrap();
+        assert!(check_config(None)[0].ok, "{:?}", check_config(None));
     }
 
     /// "Not policy-managed" is the right verdict for a laptop with nothing but

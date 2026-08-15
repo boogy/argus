@@ -221,10 +221,19 @@ otlp_endpoint = "https://collector.internal:4318"
 
 [remote]
 url = "https://config.internal/argus.toml"
+public_key = "kPqjmS…"   # base64 ed25519; policy must verify against it
 
 [redaction]
 enabled = true
 ```
+
+`public_key` is what makes the remote half worth as much as this file. Without
+it the policy cache is an ordinary file in the user's data directory that
+anyone can write; with it, an unsigned or edited body is neither cached nor
+applied, and `check` reports it — see [Signing
+it](configuration.md#signing-it) for generating the key and signing a policy.
+It is honoured **only** from this file, because a key the watched account can
+choose is a key they can sign their own policy with.
 
 Leave credentials out of it: this file is world-readable by design, exactly like
 Codex's managed layer, so `[export] headers` here hands the receiver token to

@@ -136,6 +136,13 @@ slip past). A [machine-wide file](configuration.md#machine-wide-config) counts
 as policy management on its own: what it pins is already beyond the user's
 reach, so a host with one and no `[remote].url` passes.
 
+Where the machine-wide file pins `[remote] public_key`, the check goes past
+agreement to authorship: the cache must carry a valid signature over its own
+bytes, and one that doesn't is BROKEN — "not applied" and not "inconsistent",
+because the loader skips it too. Without a pinned key this check compares two
+files the user can write, which proves they agree and nothing about who wrote
+them; see [Signing it](configuration.md#signing-it).
+
 The machine-wide file is checked hardest where it is weakest. One the loader
 would **skip** — malformed, or type-invalid — is BROKEN, not absent: the host
 is running on the user's config while `/etc/argus` says otherwise. And a key it
