@@ -231,6 +231,82 @@ pub fn cached_remote_config_path() -> PathBuf {
     data_dir().join("remote-config.cache.toml")
 }
 
+/// Where the machine-wide config layer lives under `root`.
+///
+/// Takes the root and the platform rather than reading either, so `install
+/// --managed` writes it in the same place `check --managed` looks for it, and
+/// so the suite exercises the Windows layout everywhere — the rule the rest of
+/// the machine-wide layer already follows.
+pub fn system_config_path_in(root: &Path, platform: crate::detect::Platform) -> PathBuf {
+    root.join(match platform {
+        crate::detect::Platform::Windows => "ProgramData/argus/config.toml",
+        crate::detect::Platform::Linux | crate::detect::Platform::MacOS => "etc/argus/config.toml",
+    })
+}
+
+/// What tests treat as the machine-wide config layer.
+///
+/// [`system_config_path`] deliberately ignores `ARGUS_SYSTEM_ROOT` (see there),
+/// so tests cannot reach it by redirecting the root the way the managed-layer
+/// tests do — and must not fall back to the host's real `/etc/argus`, which
+/// would make the suite depend on the developer's own machine. Unset means "no
+/// machine-wide layer", which is what an ordinary host has.
+#[cfg(test)]
+pub(crate) static SYSTEM_CONFIG: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+
+/// Points [`system_config_path`] at `path` until it is dropped.
+///
+/// A guard rather than a setter because the layer outranks everything: a test
+/// that returned early — or failed an assertion — while it was still pointing
+/// at its own temp file would hand that file to every test after it, and the
+/// symptom would be some unrelated test's config quietly coming back wrong.
+#[cfg(test)]
+pub(crate) struct SystemConfig;
+
+#[cfg(test)]
+impl SystemConfig {
+    pub(crate) fn set(path: impl Into<PathBuf>) -> Self {
+        *SYSTEM_CONFIG.lock().unwrap_or_else(|e| e.into_inner()) = Some(path.into());
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for SystemConfig {
+    fn drop(&mut self) {
+        *SYSTEM_CONFIG.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+}
+
+/// The machine-wide config layer: the one file deciding what argus does that
+/// an ordinary account cannot write.
+///
+/// Unlike every other machine-wide path, this one does **not** honour
+/// `ARGUS_SYSTEM_ROOT`. That variable comes out of the watched agent's
+/// environment like any other, and a layer that stops applying because a line
+/// in `~/.zshrc` pointed argus at an empty directory is not a layer — it is a
+/// suggestion. The redirect stays where it is useful and harmless: choosing
+/// where an *install* writes.
+pub fn system_config_path() -> PathBuf {
+    #[cfg(test)]
+    {
+        return SYSTEM_CONFIG
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .unwrap_or_default();
+    }
+    #[cfg(not(test))]
+    {
+        let platform = crate::detect::Platform::host();
+        let root = Path::new(match platform {
+            crate::detect::Platform::Windows => "C:\\",
+            crate::detect::Platform::Linux | crate::detect::Platform::MacOS => "/",
+        });
+        system_config_path_in(root, platform)
+    }
+}
+
 /// The secret Codex presents to this install's OTLP receiver.
 ///
 /// Inside the data directory rather than beside Codex's own config, because
@@ -351,6 +427,37 @@ pub fn create_private_dir(dir: &Path) -> std::io::Result<()> {
     }
     // Non-Unix platforms don't use POSIX permission bits; ACL-based hardening
     // is out of scope here.
+    #[cfg(not(unix))]
+    std::fs::create_dir_all(dir)
+}
+
+/// Create `dir` and any missing parent, traversable by every account.
+///
+/// The exact inverse of [`create_private_dir`], and it exists because the
+/// machine-wide layer is the one place argus writes *for* other users: the
+/// policy every account must read, the binary every account's hooks must
+/// execute. Those writes happen under `sudo`, so they inherit root's umask,
+/// and a hardened host sets it to 077 — which would make the directory 0700
+/// and put the file out of reach however carefully the file's own mode was
+/// set. `install --managed` would report success and monitor nobody.
+///
+/// Only levels this call actually creates are chmodded. A directory that was
+/// already there belongs to whoever made it, and widening `/usr/local` because
+/// argus happened to install underneath it is not argus's decision to make.
+pub fn create_shared_dir(dir: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        let missing: Vec<PathBuf> = dir
+            .ancestors()
+            .take_while(|p| !p.exists())
+            .map(Path::to_path_buf)
+            .collect();
+        std::fs::create_dir_all(dir)?;
+        for level in missing {
+            std::fs::set_permissions(&level, std::os::unix::fs::PermissionsExt::from_mode(0o755))?;
+        }
+        Ok(())
+    }
     #[cfg(not(unix))]
     std::fs::create_dir_all(dir)
 }

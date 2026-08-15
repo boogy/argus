@@ -1,8 +1,9 @@
 # Configuration
 
-argus reads configuration from three layers — built-in defaults, a local
-`config.toml`, and (optionally) remote fleet policy — and this page covers
-all three, plus the environment variables mostly used for tests.
+argus reads configuration from four layers — built-in defaults, a local
+`config.toml`, (optionally) remote fleet policy, and (optionally) a
+machine-wide file only an administrator can write — and this page covers
+all four, plus the environment variables mostly used for tests.
 
 ## Remote config
 
@@ -17,12 +18,48 @@ The daemon polls that URL (ETag-conditional) and caches the result to disk, so
 policy still applies offline after the first successful fetch. Remote config
 always wins over the local file — see [Config reference](#config-reference).
 
+## Machine-wide config
+
+The layer above remote policy, and the only one on a developer's machine that
+the developer cannot write:
+
+| Platform    | Path                              |
+| ----------- | --------------------------------- |
+| macOS/Linux | `/etc/argus/config.toml`          |
+| Windows     | `C:\ProgramData\argus\config.toml` |
+
+Installed by `argus install --managed --policy <file>`, which validates it
+first and copies it verbatim (see
+[Installation](installation.md#the-policy-the-layer-enforces)).
+
+It outranks the remote cache deliberately. That cache
+(`remote-config.cache.toml`) lives in the per-user data directory under a
+predictable name, so "policy said so" is a claim any account can make by
+writing the file itself — a layer beneath it would be advisory. Everything a
+fleet needs pinned beyond a user's reach belongs here; the remote URL stays the
+way to change it without touching every host.
+
+Two consequences worth knowing:
+
+- A key this file does **not** name is still the user's to set. Pin what you
+  need enforced — `argus check` only reports keys some policy actually sets, so
+  an unpinned key is by construction user-controlled.
+- A file the loader would skip is not a weaker policy, it is *no* policy: the
+  host silently falls back to the user's own config. `argus check` reports a
+  malformed or type-invalid machine-wide file as BROKEN rather than absent, and
+  `install --managed --policy` refuses to write one in the first place.
+
+`ARGUS_SYSTEM_ROOT` does not move this path. It redirects where an *install*
+writes, and it comes out of the watched agent's environment like any other
+variable — a layer a line in `~/.zshrc` could switch off would not be one.
+
 ## Config reference
 
 Resolved with precedence **defaults < local `config.toml` < cached/fresh remote
-config** (remote is fleet policy and always wins, so a compromised or
-uncooperative developer machine can't locally weaken it). All keys are optional;
-unset keys keep their default.
+config < machine-wide `config.toml`**. Fleet policy always wins over the local
+file, and the administrator-owned file wins over everything, so a compromised or
+uncooperative developer machine can't locally weaken either. All keys are
+optional; unset keys keep their default.
 
 ### `[remote]`
 

@@ -387,7 +387,7 @@ impl Default for HealthCfg {
     }
 }
 
-/// defaults <- local file <- cached remote (remote is fleet policy, wins).
+/// defaults <- local file <- cached remote <- machine-wide file.
 ///
 /// Each layer is validated to deserialize as a `Config` overlay on its own,
 /// and again after merging, before being kept. A syntactically-valid but
@@ -399,15 +399,27 @@ pub fn load() -> Config {
 }
 
 /// The merged config as a raw TOML table (defaults omitted — only what the
-/// files actually set), same precedence as `load`: local file, then cached
-/// remote (remote wins). Exposed so the integrity check can compare the
-/// *effective* config against the remote policy without re-implementing the
-/// merge.
+/// files actually set), same precedence as `load`. Exposed so the integrity
+/// check can compare the *effective* config against the remote policy without
+/// re-implementing the merge.
+///
+/// The order is the order of trust, and the last layer is the point of the
+/// list: the local file and the remote *cache* both live in the per-user data
+/// directory, so a user who would rather not be monitored can write either of
+/// them by hand — hand-authoring a permissive `remote-config.cache.toml` is
+/// not even a subtle trick. The machine-wide file is the only layer whose
+/// contents an ordinary account cannot choose, so it is the only one that can
+/// end an argument, and it goes on top.
+///
+/// A fleet that wants live policy control still has it: leave a key out of the
+/// machine-wide file and the remote policy decides it. What the machine-wide
+/// file pins, it pins for good.
 pub fn merged_table() -> toml::Table {
     let mut merged = toml::Table::new();
     for path in [
         crate::paths::config_path(),
         crate::paths::cached_remote_config_path(),
+        crate::paths::system_config_path(),
     ] {
         let Ok(text) = std::fs::read_to_string(&path) else {
             continue;
@@ -433,7 +445,42 @@ pub fn merged_table() -> toml::Table {
     merged
 }
 
-fn deep_merge(base: &mut toml::Table, over: toml::Table) {
+/// The machine-wide layer as the loader sees it.
+///
+/// Separate from [`merged_table`], which only needs to know what to apply,
+/// because the *reason* a machine-wide file is not applying is the interesting
+/// half: an administrator's typo silently reverts a whole fleet to whatever
+/// each user's own config says, and nothing would otherwise say so.
+pub enum SystemLayer {
+    /// No machine-wide file — an ordinary, unmanaged host.
+    Absent,
+    /// Present, and skipped by the loader for the reason given.
+    Skipped(String),
+    Present(toml::Table),
+}
+
+/// Read and validate the machine-wide layer, exactly as [`merged_table`] does.
+pub fn system_layer() -> SystemLayer {
+    let path = crate::paths::system_config_path();
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return SystemLayer::Absent;
+    };
+    let table = match text.parse::<toml::Table>() {
+        Ok(t) => t,
+        Err(e) => {
+            return SystemLayer::Skipped(format!("{} is not valid TOML: {e}", path.display()));
+        }
+    };
+    if let Err(e) = table.clone().try_into::<Config>() {
+        return SystemLayer::Skipped(format!(
+            "{} does not match the config schema: {e}",
+            path.display()
+        ));
+    }
+    SystemLayer::Present(table)
+}
+
+pub(crate) fn deep_merge(base: &mut toml::Table, over: toml::Table) {
     for (k, v) in over {
         match (base.get_mut(&k), v) {
             (Some(toml::Value::Table(bt)), toml::Value::Table(ot)) => deep_merge(bt, ot),
@@ -830,5 +877,113 @@ mod tests {
         let cfg = Config::default();
         assert!(cfg.integrity.enabled, "on by default (security control)");
         assert_eq!(cfg.integrity.interval_secs, 3600);
+    }
+
+    /// The whole point of a root-owned layer: the two files the watched user
+    /// *can* write must not be able to unpick it. The remote cache matters as
+    /// much as the user's own config here — it lives in the user's data dir
+    /// under a predictable name, so "policy said so" is a claim any account
+    /// can make by writing the file itself.
+    #[test]
+    fn neither_user_file_can_weaken_what_the_machine_wide_layer_pins() {
+        let dir = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("ARGUS_DATA_DIR", dir.path());
+        }
+        std::fs::write(
+            crate::paths::config_path(),
+            "[capture]\nprompts = false\n[redaction]\nenabled = false\n",
+        )
+        .unwrap();
+        std::fs::write(
+            crate::paths::cached_remote_config_path(),
+            "[capture]\nprompts = false\n[export]\notlp_endpoint = \"http://mine:4318\"\n",
+        )
+        .unwrap();
+        let sys = dir.path().join("system.toml");
+        std::fs::write(
+            &sys,
+            "[capture]\nprompts = true\n[redaction]\nenabled = true\n\
+             [export]\notlp_endpoint = \"http://fleet:4318\"\n",
+        )
+        .unwrap();
+
+        let before = load();
+        assert!(!before.capture.prompts, "without the layer, the user wins");
+
+        let _guard = crate::paths::SystemConfig::set(&sys);
+        let cfg = load();
+        assert!(cfg.capture.prompts, "the layer outranks the user's config");
+        assert!(cfg.redaction.enabled, "and cannot be turned off locally");
+        assert_eq!(
+            cfg.export.otlp_endpoint.as_deref(),
+            Some("http://fleet:4318"),
+            "nor can capture be repointed by hand-writing the policy cache"
+        );
+        unsafe {
+            std::env::remove_var("ARGUS_DATA_DIR");
+        }
+    }
+
+    /// A key the layer does not mention stays the user's to set. A layer that
+    /// swallowed everything would force operators to restate every default,
+    /// and an unrestated key would silently revert.
+    #[test]
+    fn the_machine_wide_layer_only_governs_the_keys_it_names() {
+        let dir = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("ARGUS_DATA_DIR", dir.path());
+        }
+        std::fs::write(
+            crate::paths::config_path(),
+            "[capture]\ntool_outputs = false\n[export]\nbatch_size = 7\n",
+        )
+        .unwrap();
+        let sys = dir.path().join("system.toml");
+        // Away from the default, so "the layer applied" and "nobody applied
+        // anything" cannot look the same.
+        std::fs::write(&sys, "[capture]\nprompts = false\n").unwrap();
+        let _guard = crate::paths::SystemConfig::set(&sys);
+
+        let cfg = load();
+        assert!(!cfg.capture.prompts, "the key the layer names");
+        assert!(!cfg.capture.tool_outputs, "a sibling key it never named");
+        assert_eq!(cfg.export.batch_size, 7);
+        unsafe {
+            std::env::remove_var("ARGUS_DATA_DIR");
+        }
+    }
+
+    /// A malformed machine-wide file is the dangerous failure: the loader skips
+    /// it exactly as it skips a bad remote layer, so the host keeps running on
+    /// the user's own config while `/etc/argus/config.toml` sits there looking
+    /// like the machine is governed. `system_layer` has to be able to say so,
+    /// which is what lets `check` report it instead of passing.
+    #[test]
+    fn a_machine_wide_layer_the_loader_would_skip_is_reported_not_silent() {
+        let dir = tempfile::tempdir().unwrap();
+        let sys = dir.path().join("system.toml");
+
+        let _guard = crate::paths::SystemConfig::set(&sys);
+        assert!(
+            matches!(system_layer(), SystemLayer::Absent),
+            "no file at all is an ordinary unmanaged host, not a fault"
+        );
+
+        std::fs::write(&sys, "[capture\nprompts = true\n").unwrap();
+        let SystemLayer::Skipped(why) = system_layer() else {
+            panic!("invalid TOML must not read as a layer in force");
+        };
+        assert!(why.contains("not valid TOML"), "{why}");
+
+        // Parses, but the loader would still throw it away.
+        std::fs::write(&sys, "[export]\nbatch_size = \"lots\"\n").unwrap();
+        let SystemLayer::Skipped(why) = system_layer() else {
+            panic!("a type-mismatched layer must not read as in force");
+        };
+        assert!(why.contains("config schema"), "{why}");
+
+        std::fs::write(&sys, "[export]\nbatch_size = 50\n").unwrap();
+        assert!(matches!(system_layer(), SystemLayer::Present(_)));
     }
 }

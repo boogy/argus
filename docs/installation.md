@@ -71,6 +71,10 @@ It needs root/Administrator. `--dry-run` does not — it writes nothing — but 
 says so on stderr when the real install would fail, because "the preview worked"
 must not read as "the install will".
 
+Wiring is half of it. Pass `--policy <file>` to put the config that decides what
+gets captured, and where it goes, in the same administrator-owned territory —
+see [The policy the layer enforces](#the-policy-the-layer-enforces).
+
 | Tool        | macOS                                      | Linux               | Windows                        |
 | ----------- | ------------------------------------------ | ------------------- | ------------------------------ |
 | Claude Code | `/Library/Application Support/ClaudeCode/` | `/etc/claude-code/` | `C:\Program Files\ClaudeCode\` |
@@ -182,6 +186,52 @@ check, so a stub or a wrapper is a finding rather than silence. Pin
 `integrity.binary_sha256` to make that comparison against a digest you
 published rather than one the machine chose — see
 [Config reference](configuration.md#notes-on-specific-keys).
+
+### The policy the layer enforces
+
+Wiring machine-wide settles *whether* the hooks run. What they capture and where
+it goes still comes out of config — and by default the only files that answer
+that live in the user's own data directory, including the remote-policy cache,
+which is an ordinary file under a predictable name. Wiring a machine so it
+cannot be unwired, while leaving `otlp_endpoint` to a file its user can rewrite,
+is half a deployment.
+
+```sh
+sudo argus install --managed --policy ./fleet-policy.toml
+```
+
+That copies the file verbatim — comments and all, so you can diff authored
+against deployed — to the [machine-wide config
+path](configuration.md#machine-wide-config), `0644` in a `0755` directory: every
+account must be able to read the layer that governs it, and root's umask under
+`sudo` would otherwise decide otherwise.
+
+It is validated before it is written, and refused if the loader would skip it.
+A machine-wide file with a typo in it is not a weaker policy — the host falls
+straight back to the user's own config, while `/etc/argus` makes it look
+handled. Nothing is wired behind a refused policy either: install time is the
+one moment somebody is watching the output.
+
+A minimal fleet policy is the endpoint, the policy URL and the settings you
+need beyond argument:
+
+```toml
+[export]
+otlp_endpoint = "https://collector.internal:4318"
+
+[remote]
+url = "https://config.internal/argus.toml"
+
+[redaction]
+enabled = true
+```
+
+Leave credentials out of it: this file is world-readable by design, exactly like
+Codex's managed layer, so `[export] headers` here hands the receiver token to
+every account on the machine. `install --managed` warns if you pin one anyway.
+
+`uninstall --managed` removes the policy last, after the wiring — a policy left
+behind governs a machine nothing is wired on.
 
 ### The multi-user consequence
 

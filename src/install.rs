@@ -39,7 +39,7 @@ pub fn run_project(root: &std::path::Path, dry_run: bool) -> Result<()> {
 /// user would wire `/root` and monitor nobody. The harness layer enforces that
 /// centrally: every artifact must land under the system root or the install is
 /// refused.
-pub fn run_managed(dry_run: bool) -> Result<()> {
+pub fn run_managed(dry_run: bool, policy: Option<&std::path::Path>) -> Result<()> {
     let platform = crate::detect::Platform::host();
     let root = crate::harness::system_root(platform);
     // A dry run writes nothing, so requiring privilege to *preview* the plan
@@ -57,7 +57,68 @@ pub fn run_managed(dry_run: bool) -> Result<()> {
             crate::harness::require_admin()?;
         }
     }
+    // Policy first. It is the layer that decides what the wiring below will do,
+    // and a refusal here must not leave a machine wired to a policy that was
+    // never installed.
+    if let Some(src) = policy {
+        install_policy(&root.path, platform, src, dry_run)?;
+    }
     crate::harness::install_managed(&root.path, platform, dry_run)
+}
+
+/// Put an operator's config file where no ordinary account can edit it.
+///
+/// Validated before it is written, and that is the point of doing it here
+/// rather than telling administrators to `cp` it: a machine-wide file the
+/// loader skips is not a weaker policy, it is *no* policy — every host quietly
+/// falls back to whatever its own user's config says, and the file sitting in
+/// `/etc/argus` makes it look handled.
+///
+/// Copied verbatim, comments and all. argus does not re-serialise it: an
+/// operator has to be able to diff what they wrote against what is deployed.
+fn install_policy(
+    root: &std::path::Path,
+    platform: crate::detect::Platform,
+    src: &std::path::Path,
+    dry_run: bool,
+) -> Result<()> {
+    use anyhow::Context;
+    let text = std::fs::read_to_string(src)
+        .with_context(|| format!("cannot read the policy file {}", src.display()))?;
+    let table = text
+        .parse::<toml::Table>()
+        .with_context(|| format!("{} is not valid TOML", src.display()))?;
+    let cfg: crate::config::Config = table
+        .try_into()
+        .with_context(|| format!("{} does not match argus's config schema", src.display()))?;
+    // World-readable by construction — every account on the machine has to be
+    // able to read the layer that governs it. A credential pinned here is a
+    // credential handed to everyone, exactly as with Codex's managed layer.
+    if !cfg.export.headers.is_empty() {
+        eprintln!(
+            "warning: [export].headers in a machine-wide policy is readable by every account \
+             on this machine — leave credentials to the per-user config"
+        );
+    }
+    let dest = crate::paths::system_config_path_in(root, platform);
+    if dry_run {
+        println!("would install machine-wide policy at {}", dest.display());
+        return Ok(());
+    }
+    if let Some(parent) = dest.parent() {
+        crate::paths::create_shared_dir(parent)?;
+    }
+    std::fs::write(&dest, &text)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // Explicit rather than umask-dependent: a root umask of 077 would
+        // write this 0600, and a policy file no user can read is a policy that
+        // does not apply to anybody.
+        std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o644))?;
+    }
+    println!("installed machine-wide policy at {}", dest.display());
+    Ok(())
 }
 
 /// Reverse `run_managed`.
@@ -68,6 +129,13 @@ pub fn uninstall_managed() -> Result<()> {
         crate::harness::require_admin()?;
     }
     crate::harness::uninstall_managed(&root.path, platform)?;
+    // Last, mirroring the deployed binary: the policy is what governs whatever
+    // wiring is still standing, so a half-finished unwire keeps its rules.
+    let policy = crate::paths::system_config_path_in(&root.path, platform);
+    if policy.exists() {
+        std::fs::remove_file(&policy)?;
+        println!("removed {}", policy.display());
+    }
     println!("argus unwired from the machine-wide layer");
     Ok(())
 }
@@ -1111,7 +1179,7 @@ mod tests {
         // The one restriction that is *not* a finding: argus wired into the
         // managed layer is unaffected by a rule that keeps only managed hooks.
         // Reporting it would fire on every host `install --managed` has run on.
-        crate::install::run_managed(false).unwrap();
+        crate::install::run_managed(false, None).unwrap();
         let mut doc: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&managed).unwrap()).unwrap();
         assert_eq!(doc["allowManagedHooksOnly"], json!(true));
@@ -1198,7 +1266,7 @@ mod tests {
         // The restriction argus survives: once its hooks are the machine-wide
         // ones, keeping only machine-wide hooks changes nothing about capture,
         // and reporting it would fire on every host `install --managed` ran on.
-        crate::install::run_managed(false).unwrap();
+        crate::install::run_managed(false, None).unwrap();
         assert!(
             std::fs::read_to_string(&sys_req)
                 .unwrap()
@@ -1428,5 +1496,101 @@ mod tests {
             !after.contains("otel"),
             "uninstall removed custom-endpoint otel block"
         );
+    }
+
+    /// `--policy` is the half of `--managed` that decides what the wiring
+    /// captures and where it goes. Copied verbatim so an operator can diff
+    /// deployed against authored, and readable by every account, since the
+    /// layer governs all of them and a 0600 file governs nobody.
+    #[test]
+    fn managed_install_deploys_the_policy_file_and_takes_it_away_again() {
+        let home = fake_home();
+        fake_bin(home.path());
+        let root = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var(crate::harness::SYSTEM_ROOT_ENV, root.path()) };
+        let platform = crate::detect::Platform::host();
+        let src = home.path().join("fleet.toml");
+        let body = "# fleet baseline\n[export]\notlp_endpoint = \"http://fleet:4318\"\n";
+        std::fs::write(&src, body).unwrap();
+
+        // The mode has to survive the umask this actually runs under: `sudo`
+        // carries root's, and a hardened box sets 077. Restored immediately,
+        // since it is process-global.
+        #[cfg(unix)]
+        let prev = unsafe { libc::umask(0o077) };
+        run_managed(false, Some(&src)).unwrap();
+        #[cfg(unix)]
+        unsafe {
+            libc::umask(prev)
+        };
+
+        let dest = crate::paths::system_config_path_in(root.path(), platform);
+        assert_eq!(
+            std::fs::read_to_string(&dest).unwrap(),
+            body,
+            "copied verbatim, comments and all"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode =
+                |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+            assert_eq!(
+                mode(&dest),
+                0o644,
+                "every account has to be able to read it"
+            );
+            // Reachable, not merely readable: a 0700 directory hides a 0644
+            // file just as completely, and that is what root's umask makes.
+            assert_eq!(
+                mode(dest.parent().unwrap()) & 0o055,
+                0o055,
+                "the policy sits in a directory no other account can enter"
+            );
+        }
+
+        uninstall_managed().unwrap();
+        assert!(
+            !dest.exists(),
+            "a policy left behind still governs a machine nothing is wired on"
+        );
+        unsafe { std::env::remove_var(crate::harness::SYSTEM_ROOT_ENV) };
+    }
+
+    /// A machine-wide file the loader would skip is not a weaker policy, it is
+    /// no policy: the host silently falls back to the user's own config while
+    /// `/etc/argus` makes it look handled. Refusing at install time is the only
+    /// moment anyone is watching, so nothing may be wired behind it either.
+    #[test]
+    fn a_policy_file_the_loader_would_skip_is_refused_before_anything_is_wired() {
+        let home = fake_home();
+        fake_bin(home.path());
+        let root = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var(crate::harness::SYSTEM_ROOT_ENV, root.path()) };
+        let platform = crate::detect::Platform::host();
+        let dest = crate::paths::system_config_path_in(root.path(), platform);
+        let src = home.path().join("fleet.toml");
+
+        for (body, needle) in [
+            ("[export\notlp_endpoint = \"http://fleet:4318\"\n", "TOML"),
+            // Parses, and the loader would still throw the whole layer away.
+            ("[export]\nbatch_size = \"lots\"\n", "schema"),
+        ] {
+            std::fs::write(&src, body).unwrap();
+            let e = run_managed(false, Some(&src)).unwrap_err();
+            let msg = format!("{e:#}");
+            assert!(msg.contains(needle), "{msg}");
+            assert!(!dest.exists(), "{body:?} was written anyway");
+            assert!(
+                std::fs::read_dir(root.path()).unwrap().next().is_none(),
+                "{body:?} left the machine wired to a policy that never applied"
+            );
+        }
+
+        // A file that is not there at all is a typo on the command line, not a
+        // reason to wire the machine and hope.
+        let e = run_managed(false, Some(&home.path().join("nope.toml"))).unwrap_err();
+        assert!(format!("{e:#}").contains("cannot read"), "{e:#}");
+        unsafe { std::env::remove_var(crate::harness::SYSTEM_ROOT_ENV) };
     }
 }

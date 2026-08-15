@@ -43,15 +43,21 @@ pub fn check(home: &Path) -> Vec<Finding> {
 ///
 /// The point is not to spot-check individual keys (a determined user just
 /// disables the one that matters) but to confirm policy is in force. Because
-/// the loader is `defaults <- local <- remote` with remote winning, a value
-/// the policy sets *cannot* be weakened locally — so if the policy is loaded
-/// and every policy key is reflected in the effective config, tampering is
-/// inert. Findings are raised when:
-///   - no `[remote].url` is configured (host isn't policy-managed);
+/// the loader puts remote policy and the machine-wide file above the user's own
+/// config, a value either of them sets *cannot* be weakened locally — so if
+/// what they set is reflected in the effective config, tampering is inert.
+/// Findings are raised when:
+///   - a machine-wide `config.toml` exists but the loader skips it — an
+///     administrator's typo, which otherwise reverts the whole fleet to
+///     whatever each user's own file says, silently;
+///   - no `[remote].url` is configured *and* there is no machine-wide file
+///     either (host isn't policy-managed at all);
 ///   - the remote cache is missing (policy never fetched — running on
 ///     local/defaults) or invalid (skipped by the loader);
 ///   - any policy key is not reflected in the effective config (policy
-///     present but not effective).
+///     present but not effective). A key the *machine-wide* file overrides is
+///     not a deviation: it outranks remote policy by design, and reporting it
+///     would make the more locked-down host the one that alerts.
 ///
 /// `expected_url` is the canonical policy URL, passed by the monitor (MDM) —
 /// NOT read from the local config, which the user controls. When set, the
@@ -66,6 +72,17 @@ pub fn check_config(expected_url: Option<&str>) -> Vec<Finding> {
             detail: d,
         }]
     };
+    let system = crate::config::system_layer();
+    // Ahead of everything else: a machine-wide file the loader is skipping is
+    // not a weaker policy, it is *no* policy, and every check below would go on
+    // to describe a host as if the administrator had never written it.
+    let system = match system {
+        crate::config::SystemLayer::Skipped(why) => {
+            return broken(format!("machine-wide config is not in force — {why}"));
+        }
+        other => other,
+    };
+    let managed_locally = matches!(system, crate::config::SystemLayer::Present(_));
     let cfg = crate::config::load();
     let url = cfg.remote.url.as_deref();
     if let Some(exp) = expected_url {
@@ -75,9 +92,23 @@ pub fn check_config(expected_url: Option<&str>) -> Vec<Finding> {
             ));
         }
     } else if url.is_none() {
-        return broken(
-            "no [remote].url — host is not policy-managed; local config is authoritative".into(),
-        );
+        // A machine-wide file with no remote policy behind it is a complete
+        // deployment, not a half-configured one: the keys it pins are already
+        // beyond the user's reach, which is the property the remote policy was
+        // wanted for.
+        return if managed_locally {
+            vec![Finding {
+                tool: "config".into(),
+                ok: true,
+                detail: "machine-wide config in force; no remote policy configured".into(),
+            }]
+        } else {
+            broken(
+                "no [remote].url and no machine-wide config — host is not policy-managed; \
+                 local config is authoritative"
+                    .into(),
+            )
+        };
     }
     let cache = crate::paths::cached_remote_config_path();
     let Ok(text) = std::fs::read_to_string(&cache) else {
@@ -96,15 +127,25 @@ pub fn check_config(expected_url: Option<&str>) -> Vec<Finding> {
             "remote policy cache is type-invalid — skipped by the loader, not effective".into(),
         );
     }
-    // Every leaf the policy sets must be reflected in the effective config.
+    // Every leaf the policy sets must be reflected in the effective config —
+    // except where the machine-wide file deliberately overrides it, which is
+    // the one thing on the machine that is allowed to.
+    let mut expected = policy;
+    if let crate::config::SystemLayer::Present(t) = system {
+        crate::config::deep_merge(&mut expected, t);
+    }
     let effective = crate::config::merged_table();
     let mut deviations = Vec::new();
-    diff_leaves("", &policy, &effective, &mut deviations);
+    diff_leaves("", &expected, &effective, &mut deviations);
     if deviations.is_empty() {
         vec![Finding {
             tool: "config".into(),
             ok: true,
-            detail: "remote policy loaded and effective".into(),
+            detail: if managed_locally {
+                "remote policy and machine-wide config loaded and effective".into()
+            } else {
+                "remote policy loaded and effective".to_string()
+            },
         }]
     } else {
         deviations
@@ -702,6 +743,82 @@ mod tests {
         );
         let fs = check_config(None);
         assert!(fs.iter().all(|f| f.ok), "policy effective => ok: {fs:?}");
+    }
+
+    /// "Not policy-managed" is the right verdict for a laptop with nothing but
+    /// its own config, and the wrong one for a host whose administrator chose
+    /// to pin the settings locally instead of serving them. Both are fully
+    /// deployed; only one of them is a host anybody can reconfigure.
+    #[test]
+    fn a_machine_wide_config_is_policy_management_even_with_no_remote_url() {
+        let d = set_data_dir();
+        std::fs::write(crate::paths::config_path(), "[capture]\nprompts = true\n").unwrap();
+        assert!(!check_config(None)[0].ok, "no layer, no policy");
+
+        let sys = d.path().join("system.toml");
+        std::fs::write(&sys, "[capture]\nprompts = true\n").unwrap();
+        let _guard = crate::paths::SystemConfig::set(&sys);
+        let f = &check_config(None)[0];
+        assert!(f.ok, "{f:?}");
+        assert!(f.detail.contains("machine-wide config in force"), "{f:?}");
+    }
+
+    /// The file being there is not the control — the loader applying it is.
+    /// A machine-wide file with a typo in it leaves the host running on the
+    /// user's own config while looking, to anyone who goes and reads
+    /// `/etc/argus`, entirely governed.
+    #[test]
+    fn a_machine_wide_config_the_loader_skips_is_broken_not_merely_absent() {
+        let d = set_data_dir();
+        std::fs::write(
+            crate::paths::config_path(),
+            "[remote]\nurl = \"https://p\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            crate::paths::cached_remote_config_path(),
+            "[redaction]\nenabled = true\n",
+        )
+        .unwrap();
+        assert!(check_config(None).iter().all(|f| f.ok), "baseline");
+
+        let sys = d.path().join("system.toml");
+        std::fs::write(&sys, "[capture\nprompts = true\n").unwrap();
+        let _guard = crate::paths::SystemConfig::set(&sys);
+        let f = &check_config(None)[0];
+        assert!(!f.ok, "{f:?}");
+        assert!(f.detail.contains("not in force"), "{f:?}");
+    }
+
+    /// A host locked down *harder* than the served policy must not be the one
+    /// that alerts. The machine-wide layer sits above the remote cache
+    /// precisely so an administrator can pin a key beyond the fleet default,
+    /// and reporting that as "policy not effective" would train operators to
+    /// ignore the finding that catches real tampering.
+    #[test]
+    fn the_machine_wide_layer_overriding_remote_policy_is_not_a_deviation() {
+        let d = set_data_dir();
+        std::fs::write(
+            crate::paths::config_path(),
+            "[remote]\nurl = \"https://p\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            crate::paths::cached_remote_config_path(),
+            "[capture]\nprompts = false\ntool_inputs = true\n",
+        )
+        .unwrap();
+        let sys = d.path().join("system.toml");
+        std::fs::write(&sys, "[capture]\nprompts = true\n").unwrap();
+        let _guard = crate::paths::SystemConfig::set(&sys);
+
+        assert!(
+            crate::config::load().capture.prompts,
+            "the layer has to actually win for the finding to be about anything"
+        );
+        let fs = check_config(None);
+        assert!(fs.iter().all(|f| f.ok), "{fs:?}");
+        assert!(fs[0].detail.contains("machine-wide"), "{fs:?}");
     }
 
     #[test]

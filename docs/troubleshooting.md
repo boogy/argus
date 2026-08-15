@@ -129,9 +129,18 @@ effective config must match it. Fails if the host isn't policy-managed, the
 policy never loaded (no/invalid cache → running on local/defaults), or a
 policy key isn't reflected.
 
-Because the loader is `defaults < local < remote`, a value the policy sets
-can't be weakened locally — so this verifies policy is _in force_ rather
-than spot-checking individual keys (which a targeted edit would slip past).
+Because the loader is `defaults < local < remote < machine-wide`, a value
+either policy sets can't be weakened locally — so this verifies policy is _in
+force_ rather than spot-checking individual keys (which a targeted edit would
+slip past). A [machine-wide file](configuration.md#machine-wide-config) counts
+as policy management on its own: what it pins is already beyond the user's
+reach, so a host with one and no `[remote].url` passes.
+
+The machine-wide file is checked hardest where it is weakest. One the loader
+would **skip** — malformed, or type-invalid — is BROKEN, not absent: the host
+is running on the user's config while `/etc/argus` says otherwise. And a key it
+sets above the remote policy is not reported as a deviation, so a host locked
+down harder than the fleet default isn't the one that alerts.
 
 Pass **`--remote-url <URL>`** (the canonical policy URL, from your MDM) so
 the check fails if `remote.url` was **removed or repointed** to another

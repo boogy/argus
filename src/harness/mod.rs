@@ -585,7 +585,7 @@ fn deploy_managed_binary(root: &Path, platform: Platform, dry_run: bool) -> Resu
         return Ok(dest);
     }
     if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent)?;
+        crate::paths::create_shared_dir(parent)?;
     }
     std::fs::copy(&src, &dest)?;
     #[cfg(unix)]
@@ -2196,8 +2196,32 @@ mod tests {
         let hs: &[&dyn Harness] = &[&stub];
         let deployed = root.path().join("usr/local/libexec/argus/argus");
 
+        // Under root's umask, which `sudo` carries and a hardened host sets to
+        // 077. Restored at once: it is process-global.
+        #[cfg(unix)]
+        let prev = unsafe { libc::umask(0o077) };
         install_managed_in(hs, root.path(), Platform::Linux, false).unwrap();
+        #[cfg(unix)]
+        unsafe {
+            libc::umask(prev)
+        };
         assert!(deployed.exists(), "no copy of argus under the system root");
+        // Every account's hooks have to be able to run it, so every directory
+        // on the way down has to be enterable — a 0700 parent hides a 0755
+        // binary just as well as a chmod would have.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            for p in deployed.ancestors().take_while(|p| *p != root.path()) {
+                let mode = std::fs::metadata(p).unwrap().permissions().mode();
+                assert_eq!(
+                    mode & 0o055,
+                    0o055,
+                    "{} is out of reach: {mode:o}",
+                    p.display()
+                );
+            }
+        }
         let wired = std::fs::read_to_string(root.path().join("etc/stub/settings.json")).unwrap();
         assert!(
             wired.contains(deployed.to_str().unwrap()),
