@@ -423,6 +423,69 @@ pub enum EventKind {
         count: u64,
         detail: String,
     },
+    /// The daemon saying it is still here, and under what conditions.
+    ///
+    /// Every other event in this enum describes something the host tool did.
+    /// This one describes argus, and it is the only event emitted when nothing
+    /// happens at all — which is the point. A monitoring tool's failures are
+    /// *silent*: a killed daemon, a deleted data directory, a firewall rule
+    /// against the collector and a laptop nobody opened all produce exactly the
+    /// same thing at the SIEM, which is nothing. A heartbeat turns three of
+    /// those four into an alertable absence, and carries with it the state a
+    /// responder would otherwise have to go to the endpoint to read.
+    ///
+    /// Deliberately unconditional. The integrity loop reports only what is
+    /// broken, because a per-tool "still fine" every hour is noise; but that
+    /// leaves "nothing is broken" and "no check has run since the daemon died"
+    /// indistinguishable, and `checks_age_secs` is what separates them.
+    Health {
+        /// `startup`, `interval`, or `shutdown`. A graceful stop is a record
+        /// rather than a silence; a `SIGKILL` still falls through to absence.
+        reason: String,
+        /// This install's identity. A new one under a known `host.name` is a
+        /// wiped data directory — see [`crate::buffer::Buffer::install_id`].
+        install_id: String,
+        version: String,
+        uptime_secs: u64,
+        /// How long ago the integrity summary below was taken. `None` means no
+        /// check has completed yet in this process.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        checks_age_secs: Option<u64>,
+        /// Tools checked and found intact.
+        checks_ok: u32,
+        /// `tool: detail` for everything currently broken, bounded — the list
+        /// is a summary, and the integrity events carry each finding in full.
+        broken: Vec<String>,
+        /// Identifies the config the daemon is *running on*, not the file on
+        /// disk: a policy edited but not reloaded shows the old value here.
+        config_fingerprint: String,
+        /// The policy URL in force, so a repoint is visible at the collector
+        /// rather than only to a `check` nobody ran.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        policy_url: Option<String>,
+        /// Queue depth. Heartbeats arriving with a growing buffer are an export
+        /// that is failing while capture still works — a different fault, and a
+        /// different fix, from either half being down.
+        buffer_events: u64,
+        buffer_bytes: u64,
+        spool_files: u64,
+        spool_bytes: u64,
+        /// Losses since this daemon started. Cumulative rather than a delta:
+        /// the `Loss` records carry the deltas, and a total that resets says
+        /// the process restarted.
+        dropped_total: u64,
+        unreadable_total: u64,
+        /// Where this daemon is actually reading and writing, and what binary
+        /// it is. Both are redirectable by environment variable, so both are
+        /// stated rather than assumed to be the installed ones.
+        data_dir: String,
+        binary: String,
+        /// Names — never values — of the `ARGUS_*` overrides in force. An
+        /// override is a supported debugging affordance and a supported way to
+        /// step out from under policy; saying which are set makes the second
+        /// one visible without breaking the first.
+        env_overrides: Vec<String>,
+    },
 }
 
 impl EventKind {
@@ -632,6 +695,33 @@ pub fn visit_strings(kind: &mut EventKind, f: &mut impl FnMut(&mut String)) {
             count: _,
             detail,
         } => f(detail),
+        // Argus describing itself. Every field is a count, an enumerated word,
+        // or an identifier this crate produced — and the two that look like
+        // free text are not: `broken` is `Finding` prose written here, and
+        // `env_overrides` holds variable *names*, never their values, exactly
+        // so that a path a user chose cannot ride out in it. Scrubbing the
+        // paths that remain (`data_dir`, `binary`) would corrupt the thing the
+        // record exists to state, which is where this daemon was pointed.
+        EventKind::Health {
+            reason: _,
+            install_id: _,
+            version: _,
+            uptime_secs: _,
+            checks_age_secs: _,
+            checks_ok: _,
+            broken: _,
+            config_fingerprint: _,
+            policy_url: _,
+            buffer_events: _,
+            buffer_bytes: _,
+            spool_files: _,
+            spool_bytes: _,
+            dropped_total: _,
+            unreadable_total: _,
+            data_dir: _,
+            binary: _,
+            env_overrides: _,
+        } => {}
     }
 }
 

@@ -78,6 +78,14 @@ unset keys keep their default.
 | `codex.otlp_listen`       | `127.0.0.1:4xxxx` | Local address the daemon listens on for Codex's `[otel]` OTLP/JSON export. See [notes](#notes-on-specific-keys).                                                                                             |
 | `integrity.enabled`       | `true`            | Periodically re-verify the daemon's own hook/plugin wiring is intact; on by default (security control). A tampered/removed hook emits an `event.type=integrity`, `integrity.status=broken` record at `WARN`. |
 | `integrity.interval_secs` | `3600`            | Wiring self-check interval (floor `30`). Broken findings re-emit each cycle until re-install, so the alert stays live.                                                                                       |
+| `integrity.managed`       | `false`           | Also verify the machine-wide (`--managed`) layer each cycle. Set it where `install --managed` ran: with it on, a missing managed artifact is a finding rather than an unmanaged machine.                      |
+
+### `[health]`
+
+| Key                    | Default | Meaning                                                                                                                                          |
+| ---------------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `health.enabled`       | `true`  | Emit a periodic `event.type=health` heartbeat at `INFO` (`WARN` while anything is broken), whether or not there is other traffic.                 |
+| `health.interval_secs` | `300`   | Heartbeat interval (floor `30`). Re-read each cycle, so a fleet can shorten it by policy without restarting anything. See [notes](#notes-on-specific-keys). |
 
 ### Notes on specific keys
 
@@ -119,6 +127,18 @@ draining it. Over the cap, the oldest undelivered files are deleted and the
 count rides out on the next envelope as an `event.type=loss`,
 `loss.reason=spool_full` record. Read fresh on every hook, so a change
 applies immediately.
+
+**`health.interval_secs`** — Everything else argus emits is a consequence of
+the watched tool doing something, which makes a killed daemon, a deleted data
+directory, a blocked collector and an unopened laptop all arrive as the same
+thing: nothing. The heartbeat is what makes the first three alertable — _host
+enrolled, no `argus.health` in N minutes_ — so it is emitted unconditionally,
+including on a completely idle machine. Each one carries the install id and
+version, uptime, the age and ok/broken counts of the last self-check, the
+config fingerprint and policy URL, buffer and spool depth, cumulative drops,
+the effective data directory and binary path, and the names (never the values)
+of any `ARGUS_*` override in force. A `startup` and a `shutdown` record bracket
+every run, so a stop somebody asked for does not read like one nobody did.
 
 **`codex.otlp_listen`** — The port defaults to one derived from the data
 directory (40000–49151), because loopback is machine-wide, not per-user: on

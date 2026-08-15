@@ -1,6 +1,6 @@
 use crate::event::Event;
 use anyhow::Result;
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use std::sync::Mutex;
 
 pub struct Buffer {
@@ -39,7 +39,22 @@ pub struct Buffer {
     /// row is corruption, and reporting the second as the first sends an
     /// operator to raise a limit that was never the problem.
     unreadable: std::sync::atomic::AtomicU64,
+    /// The same two losses, counted for the heartbeat instead of for a record.
+    ///
+    /// Separate counters rather than a second reader of the two above, because
+    /// those are *drained*: whoever takes them owes a loss record, and a
+    /// heartbeat reading them would quietly swallow the gap it was supposed to
+    /// describe. These only ever go up, for the lifetime of the process, so a
+    /// heartbeat states a total rather than a delta nobody can reassemble.
+    dropped_total: std::sync::atomic::AtomicU64,
+    unreadable_total: std::sync::atomic::AtomicU64,
 }
+
+/// Keys in the `meta` table. Spelled once so a typo cannot mint a second
+/// identity under a slightly different name.
+const K_INSTALL_ID: &str = "install_id";
+const K_BATCH_SEQ: &str = "batch_seq";
+const K_BATCH_ROW: &str = "batch_row";
 
 /// Counts trim queries. The trim is the expensive part of a write, and a
 /// batch that trims once looks identical from the outside to one that trims
@@ -75,6 +90,10 @@ impl Buffer {
             "CREATE TABLE IF NOT EXISTS events (
                 seq INTEGER PRIMARY KEY AUTOINCREMENT,
                 body TEXT NOT NULL
+            );
+             CREATE TABLE IF NOT EXISTS meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
             );",
         )?;
         let bytes = total_bytes(&conn)?;
@@ -85,6 +104,8 @@ impl Buffer {
             bytes: std::sync::atomic::AtomicU64::new(bytes),
             dropped: std::sync::atomic::AtomicU64::new(0),
             unreadable: std::sync::atomic::AtomicU64::new(0),
+            dropped_total: std::sync::atomic::AtomicU64::new(0),
+            unreadable_total: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
@@ -117,6 +138,8 @@ impl Buffer {
     pub fn push_batch(&self, events: &[Event]) -> Result<()> {
         let trimmed = self.append(events)?;
         self.dropped
+            .fetch_add(trimmed as u64, std::sync::atomic::Ordering::Relaxed);
+        self.dropped_total
             .fetch_add(trimmed as u64, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
@@ -336,8 +359,95 @@ impl Buffer {
         if unread > 0 {
             self.unreadable
                 .fetch_add(unread, std::sync::atomic::Ordering::Relaxed);
+            self.unreadable_total
+                .fetch_add(unread, std::sync::atomic::Ordering::Relaxed);
         }
         Ok(())
+    }
+
+    /// Losses since this daemon started, for the heartbeat to state.
+    ///
+    /// Read-only, unlike [`Buffer::take_dropped`] and
+    /// [`Buffer::flush_loss_record`]: a heartbeat must be able to say how much
+    /// has been lost without becoming the thing that owes the loss record.
+    pub fn loss_totals(&self) -> (u64, u64) {
+        use std::sync::atomic::Ordering::Relaxed;
+        (
+            self.dropped_total.load(Relaxed),
+            self.unreadable_total.load(Relaxed),
+        )
+    }
+
+    /// Stored body bytes, as the byte cap sees them.
+    pub fn bytes(&self) -> u64 {
+        self.bytes.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// This install's identity, minted on first use and kept in the `meta`
+    /// table of the event database.
+    ///
+    /// In the database rather than a sidecar file on purpose: the identity has
+    /// to reset *exactly* when the evidence does. A user who deletes the data
+    /// directory to shed their history then reports a new `install_id` under an
+    /// unchanged `host.name`, which is a fact a collector can alert on; an
+    /// identity that outlived the buffer would make the wipe invisible, and one
+    /// that reset more eagerly would cry wolf on every upgrade.
+    pub fn install_id(&self) -> Result<String> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        // Mint-then-read rather than read-then-mint: `OR IGNORE` makes the
+        // insert lose harmlessly against another process that got there first,
+        // so the following read returns the winner's id either way. Two daemons
+        // on one data dir are already excluded by the socket, but a `check`
+        // running alongside one is not.
+        conn.execute(
+            "INSERT OR IGNORE INTO meta (key, value) VALUES (?1, ?2)",
+            rusqlite::params![K_INSTALL_ID, uuid::Uuid::new_v4().to_string()],
+        )?;
+        Ok(conn.query_row(
+            "SELECT value FROM meta WHERE key = ?1",
+            [K_INSTALL_ID],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// The sequence number for the batch ending at row `last_row`, allocating a
+    /// new one only when this is not the batch already outstanding.
+    ///
+    /// Numbering *batches* rather than attempts is what makes the sequence
+    /// readable at the far end. A retry of an unacked batch repeats its number,
+    /// so at-least-once delivery does not look like a gap; and because a number
+    /// is allocated before the send and `seq` never rewinds, a batch that left
+    /// this daemon and never arrived leaves a hole nothing else would show —
+    /// the collector's own view cannot distinguish a dropped batch from a quiet
+    /// hour. A reset to 1 under an unchanged host is the wiped-database signal,
+    /// since this counter lives in the database it counts.
+    pub fn batch_seq_for(&self, last_row: i64) -> Result<u64> {
+        let mut conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let tx = conn.transaction()?;
+        let get = |key: &str| -> Result<Option<i64>> {
+            Ok(tx
+                .query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| {
+                    r.get::<_, String>(0)
+                })
+                .optional()?
+                .and_then(|v| v.parse().ok()))
+        };
+        let seq = match get(K_BATCH_ROW)? {
+            Some(row) if row == last_row => get(K_BATCH_SEQ)?.unwrap_or(1) as u64,
+            _ => {
+                let next = get(K_BATCH_SEQ)?.unwrap_or(0).saturating_add(1);
+                let mut set = tx.prepare_cached(
+                    "INSERT INTO meta (key, value) VALUES (?1, ?2)
+                     ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                )?;
+                set.execute(rusqlite::params![K_BATCH_SEQ, next.to_string()])?;
+                set.execute(rusqlite::params![K_BATCH_ROW, last_row.to_string()])?;
+                drop(set);
+                next as u64
+            }
+        };
+        tx.commit()?;
+        Ok(seq)
     }
 
     pub fn len(&self) -> Result<u64> {
@@ -976,6 +1086,109 @@ mod tests {
         assert!(
             stored <= 600,
             "a restart started the byte count from zero and kept {stored} bytes"
+        );
+    }
+
+    /// The identity has to be worth reporting: constant for one install so a
+    /// collector can key on it, and reissued the moment the evidence it names
+    /// is destroyed. Deleting the data directory is the cheapest way to shed a
+    /// history, and this is what makes it visible.
+    #[test]
+    fn a_wiped_database_mints_a_new_install_id() {
+        let dir = tmp();
+        let first = {
+            let b = Buffer::open(&rows(1000)).unwrap();
+            let id = b.install_id().unwrap();
+            assert_eq!(
+                b.install_id().unwrap(),
+                id,
+                "the identity changed between two reads of one install"
+            );
+            id
+        };
+        {
+            let b = Buffer::open(&rows(1000)).unwrap();
+            assert_eq!(
+                b.install_id().unwrap(),
+                first,
+                "a restart looks like a fresh install"
+            );
+        }
+        // `rm -rf ~/.local/share/argus`, which is the whole of the attack.
+        std::fs::remove_dir_all(dir.path()).unwrap();
+        let b = Buffer::open(&rows(1000)).unwrap();
+        assert_ne!(
+            b.install_id().unwrap(),
+            first,
+            "a wiped database kept its identity, so the wipe is invisible"
+        );
+    }
+
+    /// Numbers batches, not attempts. A retry has to repeat its number or
+    /// at-least-once delivery would look like tampering, and a number must be
+    /// spent before the send or a destroyed batch would leave no hole.
+    #[test]
+    fn a_retry_repeats_its_batch_number_and_a_new_batch_takes_the_next() {
+        let _dir = tmp();
+        let b = Buffer::open(&rows(1000)).unwrap();
+        for i in 0..6 {
+            b.push(&ev(i)).unwrap();
+        }
+        let first = b.peek_batch(3, 0).unwrap();
+        let last = first.last().unwrap().0;
+        let seq = b.batch_seq_for(last).unwrap();
+        assert_eq!(seq, 1, "the first batch of a fresh install is not 1");
+        assert_eq!(
+            b.batch_seq_for(last).unwrap(),
+            seq,
+            "a retry of an unacked batch was given a new number"
+        );
+        b.ack(last, first.len()).unwrap();
+        let next = b.peek_batch(3, 0).unwrap();
+        assert_eq!(
+            b.batch_seq_for(next.last().unwrap().0).unwrap(),
+            seq + 1,
+            "a genuinely new batch reused the previous number"
+        );
+    }
+
+    /// A batch this daemon numbered and then lost has to leave a hole the
+    /// collector can see — that is the only server-side evidence of a batch
+    /// destroyed between the send and the ack.
+    #[test]
+    fn a_batch_that_never_ships_leaves_a_gap_and_a_wipe_resets_the_run() {
+        let dir = tmp();
+        let (a, c) = {
+            let b = Buffer::open(&rows(1000)).unwrap();
+            for i in 0..9 {
+                b.push(&ev(i)).unwrap();
+            }
+            let one = b.peek_batch(3, 0).unwrap();
+            let a = b.batch_seq_for(one.last().unwrap().0).unwrap();
+            b.ack(one.last().unwrap().0, one.len()).unwrap();
+            // Batch two is numbered and then simply never acknowledged nor
+            // delivered — the shape of a batch dropped in flight.
+            let two = b.peek_batch(3, 0).unwrap();
+            let _lost = b.batch_seq_for(two.last().unwrap().0).unwrap();
+            b.ack(two.last().unwrap().0, two.len()).unwrap();
+            let three = b.peek_batch(3, 0).unwrap();
+            let c = b.batch_seq_for(three.last().unwrap().0).unwrap();
+            (a, c)
+        };
+        assert_eq!(
+            c - a,
+            2,
+            "the numbers the collector sees are contiguous, so a lost batch cannot be spotted"
+        );
+        // `rm -rf ~/.local/share/argus`, which is the whole of the attack.
+        std::fs::remove_dir_all(dir.path()).unwrap();
+        let b = Buffer::open(&rows(1000)).unwrap();
+        b.push(&ev(0)).unwrap();
+        let batch = b.peek_batch(1, 0).unwrap();
+        assert_eq!(
+            b.batch_seq_for(batch.last().unwrap().0).unwrap(),
+            1,
+            "the sequence outlived the database it counts"
         );
     }
 }

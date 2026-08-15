@@ -86,10 +86,28 @@ pub async fn run() -> Result<()> {
     let buffer = Arc::new(Buffer::open(&with_cfg(&shared_cfg, |c| c.buffer.clone()))?);
 
     let export_handle = tokio::spawn(export_loop(buffer.clone(), shared_cfg.clone()));
+    // One self-check, two consumers: the integrity loop reacts to what is
+    // broken, the heartbeat states the posture — including *when the check last
+    // ran*, without which "nothing is broken" and "nothing checked" are the
+    // same event.
+    let summary = crate::integrity::SharedSummary::default();
     tokio::spawn(crate::integrity::integrity_loop(
         shared_cfg.clone(),
         buffer.clone(),
+        summary.clone(),
     ));
+
+    let monitor = Arc::new(crate::health::Monitor::new(
+        buffer.clone(),
+        shared_cfg.clone(),
+        summary,
+    ));
+    // Before the first interval elapses, because enrolment is itself the
+    // signal: a daemon that comes up on a machine the fleet has never seen, and
+    // one that comes back after being killed, both say so here rather than
+    // waiting out an interval first.
+    monitor.record("startup");
+    tokio::spawn(monitor.clone().run());
 
     // Stages B and C. Stage A is this function's own loop.
     let (stages, writer) = Stages::spawn(buffer.clone(), stage_b_workers(), WRITE_QUEUE);
@@ -131,7 +149,7 @@ pub async fn run() -> Result<()> {
                 // can't race and double-export the same batch (harmless
                 // under at-least-once, but noisy).
                 export_handle.abort();
-                final_flush(&buffer, &shared_cfg).await;
+                final_flush(&buffer, &shared_cfg, Some(&monitor)).await;
                 break;
             }
             maybe_envelope = rx.recv() => {
@@ -429,7 +447,19 @@ async fn export_once(buffer: &Buffer, exporter: &Exporter, bounds: (usize, u64))
     }
     let last_seq = batch.last().unwrap().0;
     let events: Vec<_> = batch.iter().map(|(_, e)| e.clone()).collect();
-    match exporter.export(&events).await {
+    // Who is sending, and which batch this is. Both are read per attempt rather
+    // than cached for the process: the identity has to follow a database that
+    // was deleted underneath the running daemon, and the sequence number is
+    // allocated against *this* batch so a retry repeats it.
+    //
+    // A `meta` read that fails is not worth refusing to export over — the
+    // events are the point — so a failure degrades to an unlabelled batch,
+    // which the body omits rather than fills in with a lie.
+    let resource = crate::export::Resource {
+        install_id: buffer.install_id().unwrap_or_default(),
+        batch_seq: buffer.batch_seq_for(last_seq).unwrap_or(0),
+    };
+    match exporter.export(&events, &resource).await {
         Ok(()) => {
             let _ = buffer.ack(last_seq, events.len());
             Attempt::Sent
@@ -506,7 +536,22 @@ fn record_losses(buffer: &Buffer) {
 /// Best-effort final export on graceful shutdown; never blocks longer than
 /// one export attempt and swallows failures (the batch stays buffered for
 /// the next daemon run either way).
-async fn final_flush(buffer: &Buffer, cfg: &Arc<RwLock<config::Config>>) {
+///
+/// The heartbeat goes in *first*, so a graceful stop arrives at the collector
+/// as a statement — this daemon shut down, at this time, in this state — rather
+/// than as the beginning of a silence. Only a graceful one: `SIGKILL` and a
+/// yanked power cord still fall through to the absence alert, which is what
+/// that alert is for. Distinguishing the two is worth the one extra record:
+/// "the service was stopped" and "the service stopped being heard from" call
+/// for different responses.
+async fn final_flush(
+    buffer: &Buffer,
+    cfg: &Arc<RwLock<config::Config>>,
+    monitor: Option<&crate::health::Monitor>,
+) {
+    if let Some(m) = monitor {
+        m.record("shutdown");
+    }
     record_losses(buffer);
     let export_cfg = with_cfg(cfg, |c| c.export.clone());
     let bounds = batch_bounds(&export_cfg);
@@ -569,7 +614,7 @@ fn with_cfg<T>(cfg: &Arc<RwLock<config::Config>>, f: impl FnOnce(&config::Config
 /// Must cover every field [`Pipeline`] caches, or a live config reload leaves
 /// the daemon running on the old value forever. `capture` was absent while it
 /// was re-read per event; caching it makes its inclusion load-bearing.
-fn config_fingerprint(cfg: &Arc<RwLock<config::Config>>) -> String {
+pub(crate) fn config_fingerprint(cfg: &Arc<RwLock<config::Config>>) -> String {
     with_cfg(cfg, |c| {
         format!(
             "{}:{:?}:{:?}:{:?}",
@@ -1150,5 +1195,59 @@ mod tests {
             Attempt::Sent
         );
         assert_eq!(buffer.len().unwrap(), 4, "the configured row cap too");
+    }
+
+    /// A stop somebody asked for and a daemon somebody killed must not read the
+    /// same at the collector, and the difference is a record that has to be
+    /// *inside* the batch the daemon flushes on its way out. Written after the
+    /// flush it would sit in a database waiting on a restart that may never
+    /// come, which is exactly the silence it exists to break.
+    #[tokio::test]
+    async fn a_graceful_stop_ships_its_own_record_in_the_final_batch() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let addr = server.server_addr().to_string();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for mut req in server.incoming_requests() {
+                let mut body = Vec::new();
+                let _ = std::io::Read::read_to_end(&mut req.as_reader(), &mut body);
+                let _ = tx.send(body);
+                let _ = req.respond(tiny_http::Response::empty(200));
+            }
+        });
+        let cfg = shared();
+        cfg.write().unwrap().export.otlp_endpoint = Some(format!("http://{addr}"));
+        let buffer = Arc::new(buffer_in(dir.path()));
+        let monitor = crate::health::Monitor::new(
+            buffer.clone(),
+            cfg.clone(),
+            crate::integrity::SharedSummary::default(),
+        );
+
+        final_flush(&buffer, &cfg, Some(&monitor)).await;
+
+        let body = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the shutdown flush sent nothing at all");
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let reasons: Vec<&str> = body["resourceLogs"][0]["scopeLogs"][0]["logRecords"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|r| r["attributes"].as_array().unwrap())
+            .filter(|a| a["key"] == "health.reason")
+            .filter_map(|a| a["value"]["stringValue"].as_str())
+            .collect();
+        assert_eq!(
+            reasons,
+            ["shutdown"],
+            "the batch the daemon died with does not say it was stopping"
+        );
+        assert_eq!(
+            buffer.len().unwrap(),
+            0,
+            "the record was buffered but left behind by the flush that followed it"
+        );
     }
 }

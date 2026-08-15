@@ -12,6 +12,7 @@ pub struct Config {
     pub spool: SpoolCfg,
     pub codex: CodexCfg,
     pub integrity: IntegrityCfg,
+    pub health: HealthCfg,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -327,12 +328,48 @@ impl Default for CodexCfg {
 pub struct IntegrityCfg {
     pub enabled: bool,
     pub interval_secs: u64,
+    /// Whether this machine is supposed to carry the `--managed` layer.
+    ///
+    /// Off by default and set by fleet policy, because it is the operator who
+    /// deployed the layer who knows it should be there — and because
+    /// `check_managed` treats a *missing* managed artifact as tampering, which
+    /// is the right answer on a machine that was wired that way and pure noise
+    /// on one that never was. On a fleet, this belongs in the policy the user
+    /// cannot edit; a local `false` then loses to it, which is the point.
+    pub managed: bool,
 }
 impl Default for IntegrityCfg {
     fn default() -> Self {
         Self {
             enabled: true,
             interval_secs: 3600,
+            managed: false,
+        }
+    }
+}
+
+/// Liveness heartbeat. On by default, and for a stronger reason than the
+/// integrity check: every way of defeating capture — killing the daemon,
+/// deleting its data directory, blocking the collector — ends in silence, and
+/// silence is indistinguishable from an idle machine unless something is
+/// expected to arrive on a schedule.
+///
+/// Five minutes by default: short enough that an absence alert fires within a
+/// coffee break, long enough that a fleet of ten thousand costs the collector
+/// about thirty events a second. `interval_secs` is floored at 30 for the same
+/// reason the integrity interval is — a typo must not turn the heartbeat into
+/// the load.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct HealthCfg {
+    pub enabled: bool,
+    pub interval_secs: u64,
+}
+impl Default for HealthCfg {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            interval_secs: 300,
         }
     }
 }

@@ -209,29 +209,94 @@ fn finding_event(f: &Finding) -> Event {
     )
 }
 
+/// The result of the last full self-check, for readers that need to state the
+/// posture rather than react to a change in it.
+///
+/// Exists so the heartbeat and the integrity loop can share one pass over the
+/// wiring instead of each running its own on its own schedule — the checks read
+/// files and hash them, and in Phase 3 they will exec the binary, none of which
+/// wants doing twice.
+///
+/// `checked_at` is the load-bearing field. Findings alone cannot distinguish
+/// "nothing is broken" from "no check has run since this daemon came up", and
+/// those are the two states a tamper alert most needs to tell apart.
+#[derive(Debug, Clone, Default)]
+pub struct Summary {
+    pub checked_at: Option<std::time::Instant>,
+    /// Tools checked and intact.
+    pub ok: u32,
+    /// `tool: detail`, one per broken finding.
+    pub broken: Vec<String>,
+}
+
+pub type SharedSummary = Arc<RwLock<Summary>>;
+
+/// Every check this host is subject to, in one pass.
+///
+/// The two conditional checks are conditional for opposite reasons.
+/// `check_config` is skipped when no policy URL is configured because it would
+/// otherwise report "this host is not policy-managed" once an hour on every
+/// developer laptop running argus locally — a true statement, and not one
+/// anybody needs repeated. `check_managed` is skipped unless
+/// `[integrity] managed` says the layer was deployed, because a missing managed
+/// artifact is BROKEN by design, so running it unasked reports tampering on
+/// every machine that never had the layer at all.
+fn check_all(cfg: &Config) -> Vec<Finding> {
+    let mut findings = check(&crate::install::home());
+    if cfg.remote.url.is_some() {
+        // `None`: the daemon has no source for the canonical URL that the user
+        // does not also control, so it can only assert that *a* policy is
+        // loaded and effective. Phase 2's system layer is what turns this into
+        // an authenticated comparison.
+        findings.extend(check_config(None));
+    }
+    if cfg.integrity.managed {
+        let platform = crate::detect::Platform::host();
+        let root = crate::harness::system_root(platform);
+        findings.extend(crate::harness::check_managed(&root.path, platform));
+    }
+    findings
+}
+
 /// Daemon task: periodically self-check wiring and buffer a finding for every
 /// *broken* tool (which then exports to the SIEM/collector like any event).
-/// Healthy tools emit nothing — an "ok" every interval would be pure noise;
-/// whether the daemon itself is alive is answered by `argus check` /
-/// process monitoring, not here. A broken finding re-emits each cycle until
-/// re-install, keeping the alert live.
-pub async fn integrity_loop(shared: Arc<RwLock<Config>>, buffer: Arc<Buffer>) {
+/// Healthy tools emit nothing — an "ok" every interval would be pure noise. A
+/// broken finding re-emits each cycle until re-install, keeping the alert live.
+///
+/// Whether the daemon itself is alive is *not* answered here, and cannot be:
+/// this loop's silence is the same silence a stopped daemon produces. That is
+/// what [`crate::health`] is for, and it is why the summary is published rather
+/// than merely acted on — the heartbeat carries the posture out on a schedule,
+/// so an absence of findings is only trusted when something also says a check
+/// ran.
+pub async fn integrity_loop(
+    shared: Arc<RwLock<Config>>,
+    buffer: Arc<Buffer>,
+    summary: SharedSummary,
+) {
     loop {
-        let (enabled, interval) = {
-            let cfg = shared.read().unwrap();
-            (cfg.integrity.enabled, cfg.integrity.interval_secs)
-        };
-        if enabled {
-            for f in check(&crate::install::home()) {
-                if !f.ok {
-                    tracing::warn!("integrity: {} {}", f.tool, f.detail);
-                    if let Err(e) = buffer.push(&finding_event(&f)) {
-                        tracing::error!("integrity buffer push failed: {e}");
-                    }
+        let cfg = { shared.read().unwrap_or_else(|e| e.into_inner()).clone() };
+        if cfg.integrity.enabled {
+            let findings = check_all(&cfg);
+            let mut next = Summary {
+                checked_at: Some(std::time::Instant::now()),
+                ok: 0,
+                broken: Vec::new(),
+            };
+            for f in &findings {
+                if f.ok {
+                    next.ok += 1;
+                    continue;
+                }
+                tracing::warn!("integrity: {} {}", f.tool, f.detail);
+                next.broken.push(format!("{}: {}", f.tool, f.detail));
+                if let Err(e) = buffer.push(&finding_event(f)) {
+                    tracing::error!("integrity buffer push failed: {e}");
                 }
             }
+            *summary.write().unwrap_or_else(|e| e.into_inner()) = next;
         }
-        tokio::time::sleep(Duration::from_secs(interval.max(30))).await;
+        tokio::time::sleep(Duration::from_secs(cfg.integrity.interval_secs.max(30))).await;
     }
 }
 
@@ -580,7 +645,10 @@ mod tests {
             ok: false,
             detail: "missing hooks: PreToolUse".into(),
         };
-        let body = crate::export::to_otlp_body(std::slice::from_ref(&finding_event(&f)));
+        let body = crate::export::to_otlp_body(
+            std::slice::from_ref(&finding_event(&f)),
+            &crate::export::Resource::default(),
+        );
         let rec = &body["resourceLogs"][0]["scopeLogs"][0]["logRecords"][0];
         assert_eq!(rec["severityText"], "WARN");
         let attrs = rec["attributes"].as_array().unwrap();

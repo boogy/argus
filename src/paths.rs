@@ -21,6 +21,37 @@ pub fn data_dir() -> PathBuf {
         .join("argus")
 }
 
+/// Every environment variable that moves argus off its installed defaults.
+///
+/// Listed in one place because they are read from the *agent's* environment —
+/// argus's shim runs as a child of the tool it watches, so anything in a shell
+/// profile reaches it. Each of these is a legitimate debugging affordance and
+/// also, used deliberately, a way to point capture at a directory with no
+/// daemon behind it. The list exists so that the heartbeat can say which are in
+/// force, and so a later gate has one place to consult.
+pub const OVERRIDE_ENV: [&str; 6] = [
+    "ARGUS_DATA_DIR",
+    "ARGUS_SOCKET",
+    "ARGUS_HOME",
+    "ARGUS_BIN",
+    "ARGUS_NO_AUTOSPAWN",
+    crate::record::RECORD_DIR_ENV,
+];
+
+/// The names from [`OVERRIDE_ENV`] that are actually set, in that order.
+///
+/// Names only. Their values are paths a user chose, and one of them
+/// (`ARGUS_RECORD_DIR`) names a directory holding *pre-redaction* envelopes —
+/// reporting where it points would put the location of the unscrubbed copy into
+/// the scrubbed stream.
+pub fn overrides_in_force() -> Vec<String> {
+    OVERRIDE_ENV
+        .iter()
+        .filter(|k| std::env::var_os(k).is_some())
+        .map(|k| (*k).to_string())
+        .collect()
+}
+
 /// The pre-0.2 location, when it is somewhere other than the current one.
 ///
 /// `None` off Windows, where roaming and local resolve to the same path and

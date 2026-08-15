@@ -9,6 +9,7 @@ pub mod event;
 pub mod export;
 pub mod filecap;
 pub mod harness;
+pub mod health;
 pub mod hook;
 pub mod install;
 pub mod integrity;
