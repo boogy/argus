@@ -58,12 +58,12 @@ must still be able to fire:
   token is wrong, never what it is — `check` output is collected and
   indexed by whatever is polling it.
 
-**Upgrading to 0.3.0 can flip hosts to broken that previously reported
-intact** — that is the fix, not a regression. Wiring baked against a binary
-that has since moved (a `brew upgrade` that bumps the Cellar prefix, an
-`npm` reinstall, `cargo install` to a new root) has not been capturing
-anything; `check` simply says so now. `argus install` re-points it, and
-installs now bake the stable `PATH` alias rather than the resolved real
+**Wiring that names a binary which has since moved is reported broken** —
+that is the check doing its job, not a false positive. A `brew upgrade` that
+bumps the Cellar prefix, an `npm` reinstall, a `cargo install` into a new
+root: each leaves a hook command pointing at a path that no longer resolves,
+which has been capturing nothing since it moved. `argus install` re-points
+it, and installs bake the stable `PATH` alias rather than the resolved real
 path, so the next upgrade doesn't repeat it.
 
 ### Settings that silently stop hooks firing

@@ -51,7 +51,7 @@ unset keys keep their default.
 | `capture.tool_outputs`       | `true`      | Capture tool result/output JSON on post-tool events. `false` → output field left null.                                                                                                            |
 | `capture.assistant_messages` | `true`      | Capture assistant message text (Claude Code/Codex `Stop`, opencode `chat.message`). `false` → suppressed.                                                                                         |
 | `capture.max_field_bytes`    | `65536`     | Per-field size cap (serialized bytes) for prompt/assistant text, tool input/output, and each JSON string leaf (`0` = unlimited). See [notes](#notes-on-specific-keys).                            |
-| `capture.truncate_mode`      | `head_tail` | What survives the cap: `head`, `head_tail`, or `drop`. See [notes](#notes-on-specific-keys).                                                                                                      |
+| `capture.truncate_mode`      | `head`      | What survives the cap: `head`, `head_tail`, or `drop`. See [notes](#notes-on-specific-keys).                                                                                                      |
 | `capture.file_contents.*`    | off         | Capture the contents of files a tool touched. Off by default — see [File-content capture](capture.md#file-content-capture).                                                                       |
 | `capture.cloud_identity`     | `true`      | Record the agent's cloud identity (role, account, credentials in scope) as `cloud.*` attributes — see [Cloud identity](capture.md#cloud-identity). `false` → attribute omitted.                   |
 | `capture.mcp_endpoints`      | `false`     | Resolve MCP server names to their endpoint and export as `mcp.endpoint`. Off by default (those config files sit next to credentials) — see [Where the server is](capture.md#where-the-server-is). |
@@ -101,10 +101,13 @@ wholesale with `{"_truncated":true,…}`.
 
 **`capture.truncate_mode`** — `head` keeps the first bytes plus
 `…[truncated]`; `head_tail` keeps both ends with `…[truncated]…` between;
-`drop` discards the content entirely (`[truncated]`). `head_tail` is the
-default because the answer is usually at the end — a diff's outcome, a stack
-trace's cause — and `head` alone truncates exactly that away. Cuts land on
-character boundaries; a multi-byte character is never split.
+`drop` discards the content entirely (`[truncated]`). `head` is the default
+because it is what argus has always stored, and a default that changes what
+an existing deployment keeps is a silent rewrite of its records. `head_tail`
+is usually the better setting to choose: the answer is often at the end — a
+diff's outcome, a stack trace's cause — and `head` alone truncates exactly
+that away. Cuts land on character boundaries; a multi-byte character is never
+split.
 
 **`buffer.max_bytes`** — A row cap is not a disk bound: 100k pasted file
 contents is a very different size from 100k prompts. Whichever cap binds

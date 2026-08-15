@@ -118,8 +118,11 @@ part of its event a reviewer would actually look for:
 **Codex** is wired three ways at once: its hooks system
 (`~/.codex/hooks.json`, Claude-compatible payloads — note new hooks need
 one-time trust via `/hooks` inside Codex), the `notify` hook for turn
-completion on older versions, and OTLP logs (`[otel]` in `config.toml`) for
-token/model telemetry.
+completion on older versions, and OTLP logs (`[otel]` in `config.toml`),
+which carry the prompt, each tool decision and result, the session start and
+the model in use. The token counts and cost of a turn are not among them,
+which is why the usage row above is a dash: nothing Codex exports today
+accounts for a turn, and argus does not infer one.
 
 ## Claude Code hooks deliberately not wired
 

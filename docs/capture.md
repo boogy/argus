@@ -102,18 +102,23 @@ header, a body, or an `argv` element as in a top-level `url`. Any
 A value under `command`, `cmd` or `script` is read a second way, as a shell
 command, since a command names hosts without ever writing a scheme. If the
 program is a known network client (`curl`, `git`, `ssh`, `psql`, `kubectl`,
-…), its dotted arguments are hosts, `user@host:path` is an scp target, and a
-registry or proxy flag's value (`--index-url`, `--registry`, `--proxy`, …) is
-the host the fetch was redirected to — the security-relevant half of a
-`pip install`.
+…), its dotted arguments are hosts and `user@host:path` is an scp target.
+
+A registry or proxy flag (`--index-url`, `--extra-index-url`, `--registry`,
+`--trusted-host`, `--proxy`, `--repository-url`) is read whatever the program
+is. That is the point of it: `pip` and `npm` are not network clients, and
+`pip install --index-url pypi.internal/simple pkg` is exactly the redirected
+fetch worth seeing. The flag is what makes the value a host, so no guess
+about the program is needed.
 
 Two limits are deliberate:
 
-- **A schemeless host is only believed inside a network command.** Prose,
-  diffs and error messages are full of dotted tokens — `crates.io`, `main.rs`,
-  `v1.2.3` — and a `|` or `&&` starts a new command whose own first word has to
-  earn it again. A hostname invented from prose is a connection the agent
-  never made, sitting in the one field a reviewer trusts to be literal.
+- **A schemeless host is believed only inside a network command, or after a
+  flag that names one.** Prose, diffs and error messages are full of dotted
+  tokens — `crates.io`, `main.rs`, `v1.2.3` — and a `|` or `&&` starts a new
+  command whose own first word has to earn it again. A hostname invented from
+  prose is a connection the agent never made, sitting in the one field a
+  reviewer trusts to be literal.
 - **An endpoint keeps the scheme and the stated port, nothing else.** A port
   is recorded only when the call wrote one down, so `:443` always means "the
   agent chose 443," not "the scheme's default." Path and query are dropped

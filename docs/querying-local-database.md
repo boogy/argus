@@ -66,10 +66,22 @@ builds use `json_extract(body, '$.path')` — they are equivalent.
 | `$.ts`         | RFC3339 UTC timestamp (string; lexicographically sortable) |
 | `$.host`       | hostname                                                   |
 | `$.username`   | OS user                                                    |
-| `$.source`     | `claude-code` \| `opencode` \| `codex` \| `copilot`        |
+| `$.source`     | `claude-code` \| `opencode` \| `codex` \| `copilot` \| `pi` |
 | `$.session_id` | tool-native session id (nullable)                          |
 | `$.cwd`        | working directory (nullable)                               |
 | `$.type`       | event kind, see below                                      |
+
+### Cloud identity (omitted when empty)
+
+Present when `capture.cloud_identity` is on (the default) and the agent held
+one. Every channel carries it except Codex's `[otel]` export, which posts over
+HTTP from Codex's own process and so has no agent environment to read — the
+same session's `notify` events do carry one.
+
+| JSON path                     | Meaning                                                                                         |
+| ----------------------------- | ----------------------------------------------------------------------------------------------- |
+| `$.cloud_identity.attributes` | map of provider identifiers, e.g. `aws.role_arn`, `aws.region`, exported as `cloud.<key>`       |
+| `$.cloud_identity.credentials`| **names** of credential variables that were in scope — never their values, exported joined as `cloud.credentials_present` |
 
 ### Optional `meta` context (present when the tool exposed it)
 
@@ -91,8 +103,9 @@ builds use `json_extract(body, '$.path')` — they are equivalent.
 | `$.type`            | Fields                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `prompt`            | `text`                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `prompt_transformed` | `original`, `transformed` — what the user typed and what was actually sent after every hook, plugin and policy in the chain had a turn at it (Copilot only)                                                                                                                                                                                                                                                                           |
 | `assistant_message` | `text`                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| `tool_use`          | `tool`, `phase` (`pre`/`post`/`error`), `input` (JSON), `output` (JSON, post only), `error` (string, failures only), `duration_ms` (post legs only), `interrupted` (present only when a human stopped the call), `files` (array), `fqdns` (array), `endpoints` (array of `scheme://host[:port]`), `output_fqdns` / `output_endpoints` (the same two read out of the _result_, post legs only, minus whatever the input already named) |
+| `tool_use`          | `tool`, `phase` (`pre`/`post`/`error`), `input` (JSON), `output` (JSON, post only), `error` (string, failures only), `duration_ms` (post legs only), `interrupted` (present only when a human stopped the call), `files` (array), `fqdns` (array), `endpoints` (array of `scheme://host[:port]`), `output_fqdns` / `output_endpoints` (the same two read out of the _result_, post legs only, minus whatever the input already named), `file_contents` (array of file snapshots, only under `capture.file_contents`) |
 | `skill`             | `name`, `args`                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `agent`             | `agent_type`, `description`                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `permission`        | `tool`, `action` (`requested`/`denied`/`replied`/`updated`), `input`                                                                                                                                                                                                                                                                                                                                                                  |
@@ -101,7 +114,10 @@ builds use `json_extract(body, '$.path')` — they are equivalent.
 | `file_change`       | `path`, `action` (`edited`, `config_changed:<src>`, `instructions_loaded:<tier>`, `directory_added:<how>`, …)                                                                                                                                                                                                                                                                                                                         |
 | `error`             | `message`, `context`                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `session`           | `action` (`SessionStart`, `Stop`, `UserPromptExpansion`, `PostToolBatch`, `session.created`, `turn-complete`, …), `detail` (JSON)                                                                                                                                                                                                                                                                                                     |
+| `usage`             | `input_tokens`, `output_tokens`, `reasoning_tokens`, `cache_read_tokens`, `cache_write_tokens`, `cost` (the host tool's own figure), `finish` (why the turn stopped). One per finished assistant turn, from opencode and pi — the only two surfaces that report a turn's accounting. The model rides in `$.meta.model` as `provider/model`                                                                                              |
 | `raw`               | `payload` (unmapped upstream event, kept verbatim)                                                                                                                                                                                                                                                                                                                                                                                    |
+| `integrity`         | `status` (`ok`/`broken`), `tool`, `detail` — the daemon's own wiring self-check                                                                                                                                                                                                                                                                                                                                                        |
+| `loss`              | `reason` (`buffer_full`/`spool_full`/`stdin_truncated`), `count`, `detail` — events destroyed rather than delivered, see [Retention semantics](#retention-semantics--read-this-first)                                                                                                                                                                                                                                                  |
 
 Fields that are null/empty may be omitted entirely (`output`, `error`, `meta`,
 `detail`), so prefer `->>` (returns NULL on missing paths) over assuming presence.
@@ -392,7 +408,9 @@ CREATE INDEX idx_session ON events (body->>'$.session_id');
 
 - `<data-dir>/spool/*.jsonl` — envelopes the hook shim wrote while the daemon
   was unreachable; drained (parsed → buffered → deleted) every 5 s once the
-  daemon runs. Each line is `{source, received_at, event?, payload}` with the
-  tool's **raw** payload, pre-redaction — treat as sensitive.
+  daemon runs. Each line is one envelope — `source`, `received_at`, `payload`,
+  and whichever of `event`, `truncated`, `dropped` and `cloud_identity` applied
+  (each omitted when empty) — carrying the tool's **raw** payload,
+  pre-redaction. Treat as sensitive.
 - Note: redaction runs before buffering, so `events.db` contents are already
   scrubbed; the spool is the only place raw payloads can briefly exist.
