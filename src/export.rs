@@ -429,6 +429,13 @@ fn record(e: &Event) -> Value {
             attrs.push(attr(key, v));
         }
     }
+    // Same rule as the heartbeat's copy: emitted only when something is set,
+    // because the presence of the attribute is the whole signal. This one says
+    // the *agent's* environment carried it, which the heartbeat cannot — the
+    // daemon may have been started hours earlier from a different shell.
+    if !e.meta.env_overrides.is_empty() {
+        attrs.push(attr("env.overrides", &e.meta.env_overrides.join(",")));
+    }
     attrs.insert(0, attr("event.type", event_type));
     // Broken wiring is the one finding a SIEM should alert on, so lift it out
     // of the INFO stream everything else rides in.
@@ -1086,6 +1093,40 @@ mod tests {
         assert_eq!(
             get("mcp.endpoint").as_deref(),
             Some("stdio:npx -y @mcp/github")
+        );
+    }
+
+    /// An override that argus *did* honour has to be visible at the far end.
+    /// Capture that was redirected and then dutifully exported from the new
+    /// location tells the same story as capture that was never redirected —
+    /// unless the events say which one happened.
+    #[test]
+    fn an_env_override_in_the_agents_environment_reaches_the_collector() {
+        let mut e = Event::new(
+            "claude-code",
+            Some("s".into()),
+            None,
+            EventKind::Prompt { text: "hi".into() },
+        );
+        let get = |e: &Event, k: &str| {
+            to_otlp_body(std::slice::from_ref(e), &Resource::default())["resourceLogs"][0]
+                ["scopeLogs"][0]["logRecords"][0]["attributes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|a| a["key"] == k)
+                .map(|a| a["value"]["stringValue"].as_str().unwrap().to_string())
+        };
+        assert_eq!(
+            get(&e, "env.overrides"),
+            None,
+            "an empty attribute on every event from every ordinary host is a \
+             column nobody reads, and presence is the signal"
+        );
+        e.meta.env_overrides = vec!["ARGUS_DATA_DIR".into(), "ARGUS_SOCKET".into()];
+        assert_eq!(
+            get(&e, "env.overrides").as_deref(),
+            Some("ARGUS_DATA_DIR,ARGUS_SOCKET")
         );
     }
 

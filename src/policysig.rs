@@ -189,9 +189,7 @@ mod tests {
     #[test]
     fn the_pinned_key_comes_from_the_machine_wide_layer_and_nowhere_else() {
         let dir = tempfile::tempdir().unwrap();
-        unsafe {
-            std::env::set_var("ARGUS_DATA_DIR", dir.path());
-        }
+        let _data = crate::paths::DataDir::set(dir.path());
         let (_, theirs) = keypair();
         let mine = base64::engine::general_purpose::STANDARD.encode([3u8; 32]);
         // Both files the user can write claim a key.
@@ -207,9 +205,6 @@ mod tests {
         std::fs::write(&sys, format!("[remote]\npublic_key = \"{theirs}\"\n")).unwrap();
         let _guard = crate::paths::SystemConfig::set(&sys);
         assert_eq!(pinned_key().as_deref(), Some(theirs.as_str()));
-        unsafe {
-            std::env::remove_var("ARGUS_DATA_DIR");
-        }
     }
 
     /// A missing signature file is the cheapest attack on this whole feature,
@@ -218,9 +213,7 @@ mod tests {
     #[test]
     fn a_cache_without_a_signature_passes_unpinned_and_fails_pinned() {
         let dir = tempfile::tempdir().unwrap();
-        unsafe {
-            std::env::set_var("ARGUS_DATA_DIR", dir.path());
-        }
+        let _data = crate::paths::DataDir::set(dir.path());
         let (sk, pk) = keypair();
         let body = "[capture]\nprompts = false\n";
         assert_eq!(check_cache(body), Ok(()), "no key pinned, nothing to check");
@@ -239,9 +232,6 @@ mod tests {
 
         std::fs::write(&sig, sign(&sk, body)).unwrap();
         assert_eq!(check_cache(body), Ok(()));
-        unsafe {
-            std::env::remove_var("ARGUS_DATA_DIR");
-        }
     }
 
     #[test]

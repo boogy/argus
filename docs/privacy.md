@@ -19,8 +19,11 @@ hand-off spool — where that guarantee does not yet apply.
   `ARGUS_RECORD_DIR` makes the hook shim dump every envelope **raw**, before
   redaction, so adapters can be written against what a tool actually sends.
   It is off unless that variable is set, writes owner-only (0600) files, and
-  `make record-fixtures` redacts on the way into `tests/fixtures/`. See
-  [adding-a-tool.md](adding-a-tool.md).
+  `make record-fixtures` redacts on the way into `tests/fixtures/`. On a host
+  with a [machine-wide config](configuration.md#machine-wide-config) the
+  variable is ignored unless that file grants it — an un-redacted copy of
+  everything, in a directory of the user's choosing, is an exfiltration channel
+  as much as a debugging aid. See [adding-a-tool.md](adding-a-tool.md).
 
 ## The spool holds un-redacted payloads on disk
 

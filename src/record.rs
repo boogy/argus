@@ -37,7 +37,7 @@ const MAX_LABEL: usize = 64;
 /// Dump `envelope` if recording is on. Best-effort by design: see the module
 /// docs. Off, this costs one environment lookup.
 pub fn record(envelope: &Envelope) {
-    let Some(dir) = std::env::var_os(RECORD_DIR_ENV) else {
+    let Some(dir) = crate::paths::env_override(RECORD_DIR_ENV) else {
         return;
     };
     let _ = write_recording(Path::new(&dir), envelope);
@@ -188,6 +188,7 @@ mod tests {
 
     fn env(source: &str, event: Option<&str>, payload: Value) -> Envelope {
         Envelope {
+            env_overrides: Vec::new(),
             cloud_identity: Default::default(),
             source: source.into(),
             received_at: chrono::Utc::now(),

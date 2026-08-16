@@ -235,6 +235,21 @@ it](configuration.md#signing-it) for generating the key and signing a policy.
 It is honoured **only** from this file, because a key the watched account can
 choose is a key they can sign their own policy with.
 
+Deploying this file also stops argus honouring the `ARGUS_*` environment
+variables, which are otherwise read straight out of the watched agent's
+environment — one line in a shell profile moves the buffer, the socket and the
+config to a directory with no daemon behind it. If a host needs them (a
+developer debugging argus itself, a CI image), grant them back explicitly:
+
+```toml
+[policy]
+allow_env_overrides = true
+```
+
+Either way the names of any that are set travel with every event as
+`env.overrides`, so a redirect that is *permitted* is still visible. See [the
+machine-wide config](configuration.md#it-also-turns-the-environment-variables-off).
+
 Leave credentials out of it: this file is world-readable by design, exactly like
 Codex's managed layer, so `[export] headers` here hands the receiver token to
 every account on the machine. `install --managed` warns if you pin one anyway.

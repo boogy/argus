@@ -22,6 +22,10 @@ fn meta_of(p: &Value) -> Meta {
         model: s(p, "model"),
         transcript_path: s(p, "transcript_path"),
         tool_use_id: s(p, "tool_use_id"),
+        // Stamped from the envelope in `harness::parse`, for every source at
+        // once — an adapter that forgot would make a redirected host look
+        // like an ordinary one.
+        env_overrides: Vec::new(),
         // `effort` is an object, `{"level": "high"}` — the level is the part
         // worth carrying, and lifting it here keeps `Meta` a flat string map.
         effort: p
@@ -364,6 +368,7 @@ mod tests {
 
     fn env(payload: serde_json::Value) -> Envelope {
         Envelope {
+            env_overrides: Vec::new(),
             cloud_identity: Default::default(),
             source: "claude-code".into(),
             received_at: chrono::Utc::now(),

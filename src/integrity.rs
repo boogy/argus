@@ -647,13 +647,11 @@ mod tests {
         }
     }
 
-    fn set_data_dir() -> tempfile::TempDir {
+    fn set_data_dir() -> (tempfile::TempDir, crate::paths::DataDir) {
         let dir = tempfile::tempdir().unwrap();
-        unsafe {
-            std::env::set_var("ARGUS_DATA_DIR", dir.path());
-        }
+        let data = crate::paths::DataDir::set(dir.path());
         std::fs::create_dir_all(dir.path()).unwrap();
-        dir
+        (dir, data)
     }
 
     #[test]
@@ -776,7 +774,7 @@ mod tests {
             "unpinned, this is the old ok case"
         );
 
-        let sys = d.path().join("system.toml");
+        let sys = d.0.path().join("system.toml");
         std::fs::write(&sys, format!("[remote]\npublic_key = \"{pk}\"\n")).unwrap();
         let _guard = crate::paths::SystemConfig::set(&sys);
         let f = &check_config(None)[0];
@@ -801,7 +799,7 @@ mod tests {
         std::fs::write(crate::paths::config_path(), "[capture]\nprompts = true\n").unwrap();
         assert!(!check_config(None)[0].ok, "no layer, no policy");
 
-        let sys = d.path().join("system.toml");
+        let sys = d.0.path().join("system.toml");
         std::fs::write(&sys, "[capture]\nprompts = true\n").unwrap();
         let _guard = crate::paths::SystemConfig::set(&sys);
         let f = &check_config(None)[0];
@@ -828,7 +826,7 @@ mod tests {
         .unwrap();
         assert!(check_config(None).iter().all(|f| f.ok), "baseline");
 
-        let sys = d.path().join("system.toml");
+        let sys = d.0.path().join("system.toml");
         std::fs::write(&sys, "[capture\nprompts = true\n").unwrap();
         let _guard = crate::paths::SystemConfig::set(&sys);
         let f = &check_config(None)[0];
@@ -854,7 +852,7 @@ mod tests {
             "[capture]\nprompts = false\ntool_inputs = true\n",
         )
         .unwrap();
-        let sys = d.path().join("system.toml");
+        let sys = d.0.path().join("system.toml");
         std::fs::write(&sys, "[capture]\nprompts = true\n").unwrap();
         let _guard = crate::paths::SystemConfig::set(&sys);
 

@@ -318,7 +318,7 @@ pub struct SystemRoot {
 /// reading `cfg!`, so the Windows layout is exercised by the suite on Linux
 /// and macOS too — the same rule [`crate::detect`] follows.
 pub fn system_root(platform: Platform) -> SystemRoot {
-    match std::env::var_os(SYSTEM_ROOT_ENV) {
+    match crate::paths::env_override(SYSTEM_ROOT_ENV) {
         Some(v) if !v.is_empty() => SystemRoot {
             path: PathBuf::from(v),
             real: false,
@@ -493,10 +493,10 @@ pub fn install_path() -> String {
     {
         return p.to_string_lossy().into_owned();
     }
-    if let Ok(v) = std::env::var(BIN_ENV)
+    if let Some(v) = crate::paths::env_override(BIN_ENV)
         && !v.is_empty()
     {
-        return v;
+        return v.to_string_lossy().into_owned();
     }
     let Ok(exe) = std::env::current_exe() else {
         return "argus".into();
@@ -1918,6 +1918,7 @@ pub fn parse(envelope: Envelope, capture: &CaptureCfg) -> Vec<Event> {
     let received_at = envelope.received_at;
     let (truncated, dropped) = (envelope.truncated, envelope.dropped);
     let source = envelope.source.clone();
+    let env_overrides = envelope.env_overrides.clone();
     // Policy is applied here rather than in the shim: the shim reads no config
     // and reinstalling on every host is not how a fleet turns a capture off.
     let cloud_identity = if capture.cloud_identity {
@@ -1986,6 +1987,11 @@ pub fn parse(envelope: Envelope, capture: &CaptureCfg) -> Vec<Event> {
         // agent that lost these was holding prod credentials" is the half of a
         // gap report that decides how much it matters.
         e.cloud_identity = cloud_identity.clone();
+        // Unconditional, unlike the capture knobs above: this is not something
+        // the agent said, it is a note about the machine the agent ran on, and
+        // a capture policy that could switch it off would be a capture policy
+        // the redirect could switch off.
+        e.meta.env_overrides = env_overrides.clone();
     }
     events
 }
@@ -2668,6 +2674,36 @@ mod tests {
         unsafe { std::env::remove_var(BIN_ENV) };
     }
 
+    /// The shim reads the agent's environment; the daemon reads its own, which
+    /// belongs to whoever started it. So the note has to ride the envelope —
+    /// and reach *every* event it produced, including the loss records, since
+    /// those are the ones a redirected host is most likely to be generating.
+    #[test]
+    fn an_override_in_the_agents_environment_reaches_every_event_it_produced() {
+        let env = Envelope {
+            env_overrides: vec!["ARGUS_DATA_DIR".into()],
+            cloud_identity: Default::default(),
+            source: "claude-code".into(),
+            received_at: chrono::Utc::now(),
+            truncated: true,
+            dropped: 3,
+            event: None,
+            payload: serde_json::json!({
+                "hook_event_name": "UserPromptSubmit",
+                "session_id": "s1",
+                "prompt": "hi",
+            }),
+        };
+        let events = parse(env, &CaptureCfg::default());
+        assert!(
+            events.len() > 1,
+            "expected loss records alongside the prompt"
+        );
+        for e in &events {
+            assert_eq!(e.meta.env_overrides, ["ARGUS_DATA_DIR"], "{:?}", e.kind);
+        }
+    }
+
     /// A truncated payload still parses — it is the *tail* that is missing, so
     /// the leading fields an adapter reads are usually intact and the event
     /// looks perfectly ordinary. That is exactly why the caveat has to be
@@ -2675,6 +2711,7 @@ mod tests {
     #[test]
     fn a_truncated_payload_announces_itself_ahead_of_the_event_it_spoils() {
         let mut env = Envelope {
+            env_overrides: Vec::new(),
             cloud_identity: Default::default(),
             source: "claude-code".into(),
             received_at: chrono::Utc::now(),
@@ -2724,6 +2761,7 @@ mod tests {
     #[test]
     fn an_mcp_call_carries_the_server_it_went_to() {
         let env = |source: &str, payload: serde_json::Value| Envelope {
+            env_overrides: Vec::new(),
             cloud_identity: Default::default(),
             source: source.into(),
             received_at: chrono::Utc::now(),
@@ -2780,6 +2818,7 @@ mod tests {
     #[test]
     fn a_spool_trim_becomes_a_gap_the_collector_can_see() {
         let mut env = Envelope {
+            env_overrides: Vec::new(),
             cloud_identity: Default::default(),
             source: "claude-code".into(),
             received_at: chrono::Utc::now(),
@@ -2818,6 +2857,7 @@ mod tests {
     #[test]
     fn a_fleet_that_declines_cloud_identity_gets_none_of_it() {
         let env = Envelope {
+            env_overrides: Vec::new(),
             cloud_identity: crate::cloudid::from_vars([
                 ("AWS_ROLE_ARN", "arn:aws:iam::123456789012:role/prod-admin"),
                 ("AWS_SECRET_ACCESS_KEY", "wJalrXUtnFEMI"),
@@ -2871,6 +2911,7 @@ mod tests {
     #[test]
     fn a_cut_payload_that_also_trimmed_the_spool_reports_both() {
         let env = Envelope {
+            env_overrides: Vec::new(),
             cloud_identity: Default::default(),
             source: "claude-code".into(),
             received_at: chrono::Utc::now(),

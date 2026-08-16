@@ -11,9 +11,9 @@ use anyhow::Result;
 /// Home directory root. Overridable via `ARGUS_HOME` so tests never
 /// touch a real home directory.
 pub fn home() -> std::path::PathBuf {
-    std::env::var("ARGUS_HOME")
+    crate::paths::env_override("ARGUS_HOME")
         .map(Into::into)
-        .unwrap_or_else(|_| dirs::home_dir().unwrap_or_else(|| ".".into()))
+        .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| ".".into()))
 }
 
 /// Wire argus into every detected tool. Idempotent: running twice

@@ -42,6 +42,18 @@ pub struct Envelope {
         skip_serializing_if = "crate::cloudid::CloudIdentity::is_empty"
     )]
     pub cloud_identity: crate::cloudid::CloudIdentity,
+    /// The `ARGUS_*` variables that were set in the watched agent's
+    /// environment when this envelope was built.
+    ///
+    /// Read here for the reason `cloud_identity` is: these come out of the
+    /// agent's environment, and the daemon's own says only what whoever
+    /// started it had. An override that redirects capture is the quietest
+    /// bypass argus has — the events simply stop, and a host that stopped
+    /// looks like a laptop in a drawer — so the attempt travels with the
+    /// events it did not manage to divert. Names only, never values; see
+    /// [`crate::paths::overrides_in_force`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env_overrides: Vec<String>,
     pub payload: serde_json::Value,
 }
 
@@ -103,6 +115,11 @@ pub struct Meta {
     /// the agent never sent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp_endpoint: Option<String>,
+    /// `ARGUS_*` variables in force in the agent's environment, from the
+    /// envelope. Empty on the overwhelming majority of events, which is what
+    /// makes a non-empty one worth an alert.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env_overrides: Vec<String>,
 }
 
 impl Meta {
@@ -831,6 +848,7 @@ mod tests {
     #[test]
     fn envelope_roundtrips() {
         let env = Envelope {
+            env_overrides: Vec::new(),
             cloud_identity: Default::default(),
             source: "opencode".into(),
             received_at: chrono::Utc::now(),

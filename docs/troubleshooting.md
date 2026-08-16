@@ -4,7 +4,8 @@ What to check when events aren't showing up, what `argus status` and `argus
 check` report and why, and the known limitations of this release.
 
 **On this page:** [`argus status`](#argus-status) · [`argus
-check`](#argus-check) · [Offline / collector
+check`](#argus-check) · [`ARGUS_*` variables have stopped doing
+anything](#argus_-variables-have-stopped-doing-anything) · [Offline / collector
 unreachable](#offline--collector-unreachable) · [Spool
 directory](#spool-directory) · [Hook not firing](#hook-not-firing) ·
 [Codex config not touched](#codex-config-not-touched) · [Known
@@ -165,6 +166,26 @@ Two more scopes can be added to either `--hooks` or `--config`:
 - `--project <dir>` — a repository's wiring. Missing is silent.
 - `--managed` — the administrator-owned layer. Missing is BROKEN — see
   [Machine-wide wiring](installation.md#machine-wide-wiring---managed).
+
+## `ARGUS_*` variables have stopped doing anything
+
+Expected, on a host with a [machine-wide
+config](configuration.md#machine-wide-config): deploying that file makes the
+variables listed as **gated** in [Environment
+variables](configuration.md#environment-variables) inert unless it sets
+`[policy] allow_env_overrides = true`. They are read out of the watched agent's
+environment, so leaving them live would let one line in a shell profile move
+capture somewhere the file no longer governs.
+
+The daemon logs each variable it ignores at `WARN`; the shim does not, because
+it shares the host tool's stderr and has no business writing there. Nothing
+fails — argus falls back to the installed default — and the names still reach
+the collector as
+`env.overrides` on every event and `health.env_overrides` on the heartbeat, so
+the attempt is visible whether or not it worked. Values are never sent.
+
+A machine-wide file that is not valid TOML denies them as well. If that is a
+surprise, `argus check --config` reports the file as BROKEN and says why.
 
 ## Offline / collector unreachable
 

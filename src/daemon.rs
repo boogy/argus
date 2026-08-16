@@ -738,6 +738,7 @@ mod tests {
 
     fn envelope(n: u32) -> Envelope {
         Envelope {
+            env_overrides: Vec::new(),
             cloud_identity: Default::default(),
             source: "claude-code".into(),
             received_at: chrono::Utc::now(),

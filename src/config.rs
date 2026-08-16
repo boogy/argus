@@ -13,6 +13,30 @@ pub struct Config {
     pub codex: CodexCfg,
     pub integrity: IntegrityCfg,
     pub health: HealthCfg,
+    pub policy: PolicyCfg,
+}
+
+/// Keys that say what an *account* on this machine may do to argus, as opposed
+/// to what argus captures.
+///
+/// Only ever read from the machine-wide layer — a permission the constrained
+/// party grants itself is not a permission. They are declared here so that a
+/// machine-wide file setting them still deserializes as a `Config`; an unknown
+/// key would make the loader skip the whole layer, which would turn "lock this
+/// host down" into "apply no policy at all".
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct PolicyCfg {
+    /// Whether `ARGUS_*` variables out of the watched agent's environment are
+    /// honoured.
+    ///
+    /// Unset means *denied* on any host that has a machine-wide file at all:
+    /// an administrator who deployed one has said this host is theirs to
+    /// configure, and an override that survives that is a one-line bypass of
+    /// everything else in the file. Hosts without the layer are unaffected —
+    /// there is nobody there to enforce it for. Set it to `true` to keep the
+    /// variables working on a managed host.
+    pub allow_env_overrides: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -671,9 +695,7 @@ mod tests {
     #[test]
     fn defaults_when_no_files() {
         let dir = tempfile::tempdir().unwrap();
-        unsafe {
-            std::env::set_var("ARGUS_DATA_DIR", dir.path());
-        }
+        let _data = crate::paths::DataDir::set(dir.path());
         let cfg = load();
         assert!(cfg.redaction.enabled);
         assert!(cfg.capture.prompts);
@@ -693,9 +715,7 @@ mod tests {
     #[test]
     fn remote_cache_overrides_local_file() {
         let dir = tempfile::tempdir().unwrap();
-        unsafe {
-            std::env::set_var("ARGUS_DATA_DIR", dir.path());
-        }
+        let _data = crate::paths::DataDir::set(dir.path());
         std::fs::create_dir_all(dir.path()).unwrap();
         std::fs::write(
             crate::paths::config_path(),
@@ -719,9 +739,7 @@ mod tests {
     #[test]
     fn type_mismatched_remote_layer_is_skipped_not_poisoning() {
         let dir = tempfile::tempdir().unwrap();
-        unsafe {
-            std::env::set_var("ARGUS_DATA_DIR", dir.path());
-        }
+        let _data = crate::paths::DataDir::set(dir.path());
         std::fs::create_dir_all(dir.path()).unwrap();
         std::fs::write(
             crate::paths::config_path(),
@@ -912,9 +930,7 @@ mod tests {
     #[tokio::test]
     async fn a_policy_body_the_key_does_not_cover_is_never_cached() {
         let dir = tempfile::tempdir().unwrap();
-        unsafe {
-            std::env::set_var("ARGUS_DATA_DIR", dir.path());
-        }
+        let _data = crate::paths::DataDir::set(dir.path());
         let (sk, pk) = crate::policysig::testkeys::keypair();
         let sys = dir.path().join("system.toml");
         std::fs::write(&sys, format!("[remote]\npublic_key = \"{pk}\"\n")).unwrap();
@@ -945,9 +961,6 @@ mod tests {
             !crate::paths::cached_remote_config_path().exists(),
             "a body that does not verify still reached the cache"
         );
-        unsafe {
-            std::env::remove_var("ARGUS_DATA_DIR");
-        }
     }
 
     /// And the other half: a correctly signed policy still gets fetched,
@@ -956,9 +969,7 @@ mod tests {
     #[tokio::test]
     async fn a_correctly_signed_policy_is_fetched_cached_and_applied() {
         let dir = tempfile::tempdir().unwrap();
-        unsafe {
-            std::env::set_var("ARGUS_DATA_DIR", dir.path());
-        }
+        let _data = crate::paths::DataDir::set(dir.path());
         let (sk, pk) = crate::policysig::testkeys::keypair();
         let sys = dir.path().join("system.toml");
         std::fs::write(&sys, format!("[remote]\npublic_key = \"{pk}\"\n")).unwrap();
@@ -988,17 +999,12 @@ mod tests {
         apply_remote(&shared, &mut None, &policy);
         assert!(!shared.read().unwrap().capture.prompts);
         assert!(!load().capture.prompts, "the cache must survive a reload");
-        unsafe {
-            std::env::remove_var("ARGUS_DATA_DIR");
-        }
     }
 
     #[test]
     fn a_failed_cache_write_does_not_burn_the_etag() {
         let dir = tempfile::tempdir().unwrap();
-        unsafe {
-            std::env::set_var("ARGUS_DATA_DIR", dir.path());
-        }
+        let _data = crate::paths::DataDir::set(dir.path());
         let cache = crate::paths::cached_remote_config_path();
         // Occupy the cache path with a non-empty directory: the rename cannot
         // land on it on any platform, which is the disk-full/locked-down case
@@ -1035,9 +1041,6 @@ mod tests {
             !cache.with_extension("tmp").exists(),
             "tmp file left behind"
         );
-        unsafe {
-            std::env::remove_var("ARGUS_DATA_DIR");
-        }
     }
 
     #[test]
@@ -1055,9 +1058,7 @@ mod tests {
     #[test]
     fn neither_user_file_can_weaken_what_the_machine_wide_layer_pins() {
         let dir = tempfile::tempdir().unwrap();
-        unsafe {
-            std::env::set_var("ARGUS_DATA_DIR", dir.path());
-        }
+        let _data = crate::paths::DataDir::set(dir.path());
         std::fs::write(
             crate::paths::config_path(),
             "[capture]\nprompts = false\n[redaction]\nenabled = false\n",
@@ -1088,9 +1089,6 @@ mod tests {
             Some("http://fleet:4318"),
             "nor can capture be repointed by hand-writing the policy cache"
         );
-        unsafe {
-            std::env::remove_var("ARGUS_DATA_DIR");
-        }
     }
 
     /// The bypass this whole module exists for: `cat > remote-config.cache.toml`
@@ -1101,9 +1099,7 @@ mod tests {
     #[test]
     fn a_policy_cache_nobody_signed_is_not_policy() {
         let dir = tempfile::tempdir().unwrap();
-        unsafe {
-            std::env::set_var("ARGUS_DATA_DIR", dir.path());
-        }
+        let _data = crate::paths::DataDir::set(dir.path());
         let (sk, pk) = crate::policysig::testkeys::keypair();
         let body = "[capture]\nprompts = false\n";
         std::fs::write(crate::paths::cached_remote_config_path(), body).unwrap();
@@ -1135,9 +1131,6 @@ mod tests {
             load().capture.tool_inputs,
             "one line added to a signed policy left it applying"
         );
-        unsafe {
-            std::env::remove_var("ARGUS_DATA_DIR");
-        }
     }
 
     /// A key the layer does not mention stays the user's to set. A layer that
@@ -1146,9 +1139,7 @@ mod tests {
     #[test]
     fn the_machine_wide_layer_only_governs_the_keys_it_names() {
         let dir = tempfile::tempdir().unwrap();
-        unsafe {
-            std::env::set_var("ARGUS_DATA_DIR", dir.path());
-        }
+        let _data = crate::paths::DataDir::set(dir.path());
         std::fs::write(
             crate::paths::config_path(),
             "[capture]\ntool_outputs = false\n[export]\nbatch_size = 7\n",
@@ -1164,9 +1155,6 @@ mod tests {
         assert!(!cfg.capture.prompts, "the key the layer names");
         assert!(!cfg.capture.tool_outputs, "a sibling key it never named");
         assert_eq!(cfg.export.batch_size, 7);
-        unsafe {
-            std::env::remove_var("ARGUS_DATA_DIR");
-        }
     }
 
     /// A malformed machine-wide file is the dangerous failure: the loader skips

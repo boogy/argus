@@ -390,7 +390,7 @@ fn prepare_unix_endpoint() -> Result<()> {
     // path the way `ARGUS_DATA_DIR` does, and tightening a directory the user
     // deliberately pointed us at — `/tmp`, a shared runtime dir — is not ours
     // to do.
-    if std::env::var_os("ARGUS_SOCKET").is_none()
+    if paths::env_override("ARGUS_SOCKET").is_none()
         && let Some(dir) = path.parent()
     {
         // Also the point at which the data directory first comes into
@@ -705,6 +705,7 @@ mod tests {
 
     fn envelope_of(text: &str) -> Envelope {
         Envelope {
+            env_overrides: Vec::new(),
             cloud_identity: Default::default(),
             source: "claude-code".into(),
             received_at: chrono::Utc::now(),
@@ -852,6 +853,7 @@ mod tests {
         tokio::spawn(listener.accept_loop(tx));
 
         let env = Envelope {
+            env_overrides: Vec::new(),
             cloud_identity: Default::default(),
             source: "claude-code".into(),
             received_at: chrono::Utc::now(),
@@ -891,6 +893,7 @@ mod tests {
         tokio::spawn(listener.accept_loop(tx));
 
         let env = Envelope {
+            env_overrides: Vec::new(),
             cloud_identity: Default::default(),
             source: "claude-code".into(),
             received_at: chrono::Utc::now(),
@@ -944,6 +947,7 @@ mod tests {
         PEAK_FRAME_BYTES.store(0, Relaxed);
 
         let env = Envelope {
+            env_overrides: Vec::new(),
             cloud_identity: Default::default(),
             source: "claude-code".into(),
             received_at: chrono::Utc::now(),
@@ -1008,6 +1012,7 @@ mod tests {
         tokio::spawn(listener.accept_loop(tx));
 
         let env = Envelope {
+            env_overrides: Vec::new(),
             cloud_identity: Default::default(),
             source: "opencode".into(),
             received_at: chrono::Utc::now(),

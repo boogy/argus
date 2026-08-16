@@ -421,6 +421,9 @@ async fn handle_conn_inner(mut stream: tokio::net::TcpStream, tx: Ingress, token
                 // that cannot. Filling it in from `std::env` here would label
                 // an agent's telemetry with a stranger's credentials.
                 cloud_identity: Default::default(),
+                // Same reason, same channel: nothing here saw the agent's
+                // environment.
+                env_overrides: Vec::new(),
                 source: "codex".into(),
                 received_at: chrono::Utc::now(),
                 truncated: false,
@@ -547,6 +550,7 @@ mod tests {
 
     fn env(payload: serde_json::Value) -> Envelope {
         Envelope {
+            env_overrides: Vec::new(),
             cloud_identity: Default::default(),
             source: "codex".into(),
             received_at: chrono::Utc::now(),

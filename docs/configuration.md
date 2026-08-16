@@ -3,7 +3,8 @@
 argus reads configuration from four layers — built-in defaults, a local
 `config.toml`, (optionally) remote fleet policy, and (optionally) a
 machine-wide file only an administrator can write — and this page covers
-all four, plus the environment variables mostly used for tests.
+all four, plus the environment variables that move it off those layers and
+what the machine-wide file does about them.
 
 ## Remote config
 
@@ -93,6 +94,34 @@ Two consequences worth knowing:
 writes, and it comes out of the watched agent's environment like any other
 variable — a layer a line in `~/.zshrc` could switch off would not be one.
 
+### It also turns the environment variables off
+
+Deploying this file makes the host managed, and on a managed host the `ARGUS_*`
+variables in [Environment variables](#environment-variables) stop being
+honoured unless the file says otherwise:
+
+```toml
+[policy]
+allow_env_overrides = true   # default: false wherever this file exists
+```
+
+Those variables are read out of the *watched agent's* environment — the shim is
+a child of the tool it monitors, so anything in a shell profile reaches it. One
+line moves the buffer, the spool, the socket and the config to a directory with
+no daemon behind it, which is a bypass of everything else this file pins. Hosts
+with no machine-wide file are unaffected: there is nobody there to enforce it
+for, and they keep the variables exactly as before.
+
+A denied variable is *ignored*, not fatal — argus falls back to the installed
+default, which is the configuration you chose — and it is reported either way:
+the shim stamps the names it found into every event as `env.overrides`, and the
+heartbeat carries `health.env_overrides`. Names only, never values. An attempt
+is a better thing for a SIEM to hold than a silence.
+
+A machine-wide file that is not valid TOML denies them too. A typo should not be
+worth more to somebody evading monitoring than deleting the file, which they
+cannot do; `argus check` reports it as BROKEN, so the typo does not stay hidden.
+
 ## Config reference
 
 Resolved with precedence **defaults < local `config.toml` < cached/fresh remote
@@ -165,6 +194,16 @@ optional; unset keys keep their default.
 | ---------------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `health.enabled`       | `true`  | Emit a periodic `event.type=health` heartbeat at `INFO` (`WARN` while anything is broken), whether or not there is other traffic.                 |
 | `health.interval_secs` | `300`   | Heartbeat interval (floor `30`). Re-read each cycle, so a fleet can shorten it by policy without restarting anything. See [notes](#notes-on-specific-keys). |
+
+### `[policy]`
+
+What an *account* on this machine may do to argus, as opposed to what argus
+captures. Only ever read from the machine-wide layer — a permission the
+constrained party grants itself is not a permission.
+
+| Key                         | Default | Meaning                                                                                                                                    |
+| --------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| `policy.allow_env_overrides` | `false` where a machine-wide file exists, `true` where none does | Honour the `ARGUS_*` variables out of the watched agent's environment. See [It also turns the environment variables off](#it-also-turns-the-environment-variables-off). |
 
 ### Notes on specific keys
 
@@ -261,16 +300,24 @@ extra_patterns = ["ACME-[0-9]{6}"]
 Mostly for tests and for running argus somewhere other than a real home
 directory; none are needed for an ordinary install.
 
+The ones marked **gated** are read out of the watched agent's environment, so a
+line in a shell profile reaches the shim. On a host with a [machine-wide
+config](#machine-wide-config) they are ignored unless that file sets
+`[policy] allow_env_overrides = true`; on every other host they behave exactly
+as they always did. Set or not, honoured or not, their names travel with the
+events as `env.overrides`.
+
 | Variable             | Effect                                                                                                                                                                            |
 | -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ARGUS_DATA_DIR`     | Override the data directory (buffer, spool, socket, config, Codex token).                                                                                                         |
-| `ARGUS_HOME`         | Override the home directory `install`/`uninstall`/`check` resolve tool config against.                                                                                            |
-| `ARGUS_SOCKET`       | Exact socket path (or Windows pipe name) instead of one derived from the data directory.                                                                                          |
-| `ARGUS_BIN`          | Path baked into the hook commands `install` writes, instead of the running binary's.                                                                                              |
+| `ARGUS_DATA_DIR`     | **gated.** Override the data directory (buffer, spool, socket, config, Codex token).                                                                                              |
+| `ARGUS_HOME`         | **gated.** Override the home directory `install`/`uninstall`/`check` resolve tool config against.                                                                                 |
+| `ARGUS_SOCKET`       | **gated.** Exact socket path (or Windows pipe name) instead of one derived from the data directory.                                                                               |
+| `ARGUS_BIN`          | **gated.** Path baked into the hook commands `install` writes, instead of the running binary's.                                                                                    |
 | `ARGUS_BIN_DIRS`     | Replace the directories detection searches for tool binaries.                                                                                                                     |
-| `ARGUS_SYSTEM_ROOT`  | Treat this directory as the system root for `--managed`. Marked "not the real machine", so the privilege check is skipped and the round-trip tests can sweep all three platforms. |
-| `ARGUS_NO_AUTOSPAWN` | Stop the hook shim starting a daemon; it spools instead.                                                                                                                          |
-| `ARGUS_RECORD_DIR`   | Dump every envelope **raw, before redaction**, for writing adapters. Off unless set; see [Privacy and redaction](privacy.md#privacy-and-redaction).                               |
+| `ARGUS_SYSTEM_ROOT`  | **gated.** Treat this directory as the system root for `--managed`. Marked "not the real machine", so the privilege check is skipped and the round-trip tests can sweep all three platforms. It never moves the machine-wide config path itself. |
+| `ARGUS_NO_AUTOSPAWN` | **gated.** Stop the hook shim starting a daemon; it spools instead.                                                                                                               |
+| `ARGUS_RECORD_DIR`   | **gated.** Dump every envelope **raw, before redaction**, for writing adapters. Off unless set; see [Privacy and redaction](privacy.md#privacy-and-redaction).                     |
+| `ARGUS_LOG`          | The daemon's own stderr log level (`error`…`trace`, default `info`). Not gated: local logging only, it changes nothing about what is captured or exported.                          |
 
 ---
 
