@@ -1196,4 +1196,49 @@ mod tests {
         std::fs::write(&sys, "[export]\nbatch_size = 50\n").unwrap();
         assert!(matches!(system_layer(), SystemLayer::Present(_)));
     }
+
+    /// The hardened baseline in `docs/threat-model.md` is the file operators
+    /// copy, and `install --managed --policy` refuses one the loader would
+    /// skip. A template that stopped deserializing would therefore be caught by
+    /// whoever deployed it, at the point where it is least convenient — and a
+    /// template whose keys drifted out of the schema would be *silently* no
+    /// policy, which is the failure this whole layer exists to prevent.
+    #[test]
+    fn the_documented_baseline_policy_is_a_policy_argus_would_accept() {
+        const DOC: &str = include_str!("../docs/threat-model.md");
+        let template = DOC
+            .split("```toml\n")
+            .nth(1)
+            .and_then(|rest| rest.split("\n```").next())
+            .expect("docs/threat-model.md must carry one ```toml baseline block");
+
+        let table = template
+            .parse::<toml::Table>()
+            .expect("the documented baseline must be valid TOML");
+        let cfg: Config = table
+            .clone()
+            .try_into()
+            .expect("the documented baseline must match argus's config schema");
+
+        // Not just "it parses": the point of the template is that an unpinned
+        // key is user-controlled, so the keys that decide who may weaken this
+        // install have to actually be in there.
+        assert_eq!(cfg.policy.allow_env_overrides, Some(false));
+        assert_eq!(cfg.policy.allow_user_uninstall, Some(false));
+        assert!(
+            cfg.integrity.managed,
+            "the layer must assert its own presence"
+        );
+        assert!(cfg.integrity.binary_sha256.is_some());
+        assert!(
+            cfg.remote.public_key.is_some(),
+            "an unsigned policy is a file the user can write"
+        );
+        assert!(cfg.remote.url.is_some());
+        assert!(cfg.export.otlp_endpoint.is_some());
+        assert!(
+            cfg.export.headers.is_empty(),
+            "the machine-wide layer is world-readable; it must not model credentials in it"
+        );
+    }
 }

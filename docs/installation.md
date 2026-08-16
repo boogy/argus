@@ -238,7 +238,12 @@ handled. Nothing is wired behind a refused policy either: install time is the
 one moment somebody is watching the output.
 
 A minimal fleet policy is the endpoint, the policy URL and the settings you
-need beyond argument:
+need beyond argument. For the other end of the scale — a template pinning every
+key a watched account could otherwise choose for itself, with the reasoning for
+each — see the [hardened
+baseline](threat-model.md#hardened-baseline-policy). An unpinned key is by
+construction user-controlled, because `argus check --config` only compares the
+keys the policy actually sets.
 
 ```toml
 [export]

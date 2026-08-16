@@ -16,6 +16,8 @@ tree it links into.
 - **Installing it?** [Installation](installation.md).
 - **Running a fleet?** [Configuration](configuration.md), then
   [Troubleshooting](troubleshooting.md).
+- **Deploying it against people who would rather not be watched?**
+  [Threat model](threat-model.md).
 - **Extending it?** [Adding a new tool](adding-a-tool.md).
 
 ## All pages
@@ -31,6 +33,7 @@ tree it links into.
 | [Troubleshooting](troubleshooting.md)                     | `argus status` / `argus check`, hooks that silently stop firing, known limits. |
 | [Adding a new tool](adding-a-tool.md)                     | The adapter, hook-or-plugin and install pieces a new integration needs.        |
 | [Querying the local database](querying-local-database.md) | Where `events.db` lives, its schema, and a query cookbook.                     |
+| [Threat model](threat-model.md)                           | Every bypass a watched user can attempt, what argus emits, and the alert.      |
 | [Telemetry gap review](telemetry-gaps.md)                 | What each surface could still capture but doesn't yet.                         |
 
 ---

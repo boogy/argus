@@ -39,7 +39,7 @@ durable buffering, and batched export with backoff.
 | ☁️  | **Cloud identity, never credentials**     | Captures the AWS/Azure/GCP/K8s/Vault identity an agent was holding — role, account, project — and only the _names_ of credential variables in scope. |
 | 🏢  | **Three independent install scopes**      | Per-user, per-repository, and administrator-managed (`--managed`) installs.                                                                          |
 | 📶  | **Remote fleet config**                   | ETag-conditional polling of a central policy URL, cached to disk so it still applies offline; always wins over the local file.                       |
-| 🛡️  | **Self-integrity checks**                 | `argus check` verifies hooks/plugins haven't been tampered with, silently disabled, or pointed at a binary that isn't argus, for fleet monitoring.   |
+| 🛡️  | **Self-integrity checks**                 | `argus check` verifies hooks/plugins haven't been tampered with, silently disabled, or pointed at a binary that isn't argus, for fleet monitoring. See the [threat model](docs/threat-model.md). |
 
 ## Quick start
 
