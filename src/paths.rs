@@ -138,28 +138,59 @@ fn overrides_allowed() -> bool {
 }
 
 fn overrides_allowed_uncached() -> bool {
-    // Deliberately not [`crate::config::system_layer`], which validates the
-    // table against `Config` — and building a `Config` builds its defaults, one
-    // of which (the Codex OTLP listener) is derived from `data_dir()`, which is
-    // a caller of this function. The gate needs one boolean out of one file, so
-    // it reads that boolean and never constructs a `Config`.
-    //
-    // The cost of skipping validation is that the key is honoured even in a
-    // file the loader rejects on some *other* key. That is the harmless
-    // direction: the value only ever grants, never removes, and only an
-    // administrator can write the file at all.
+    match system_policy_flag("allow_env_overrides") {
+        // No machine-wide file at all: nobody to enforce this for.
+        Err(NoSystemLayer) => true,
+        Ok(set) => set.unwrap_or(false),
+    }
+}
+
+/// Whether a user-scope `argus uninstall` is theirs to run.
+///
+/// Unset means *allowed*, even on a managed host, and the asymmetry with
+/// [`overrides_allowed`] is deliberate. An override redirects capture while
+/// leaving every file in place, so it is a bypass that looks like an install;
+/// a user-scope uninstall removes wiring the same account could have deleted by
+/// hand, and denying it by default would only move the same act somewhere argus
+/// never sees. An administrator who wants it refused says so, and gets a
+/// refusal plus the record of the attempt.
+///
+/// A file that no longer parses is read as one that never set the key, which is
+/// the opposite guess to the override gate — there the safe reading is the
+/// restrictive one, here a typo would lock every account on the host out of an
+/// act it can perform with `rm` regardless, and `argus check` already reports
+/// the file itself as BROKEN.
+pub fn user_uninstall_allowed() -> bool {
+    match system_policy_flag("allow_user_uninstall") {
+        Err(NoSystemLayer) => true,
+        Ok(set) => set.unwrap_or(true),
+    }
+}
+
+/// No machine-wide file exists, which each caller reads differently from a file
+/// that exists and leaves the key unset.
+struct NoSystemLayer;
+
+/// One boolean out of `[policy]` in the machine-wide file.
+///
+/// Deliberately not [`crate::config::system_layer`], which validates the table
+/// against `Config` — and building a `Config` builds its defaults, one of which
+/// (the Codex OTLP listener) is derived from `data_dir()`, which is a caller of
+/// this function. The gate needs one boolean out of one file, so it reads that
+/// boolean and never constructs a `Config`.
+///
+/// The cost of skipping validation is that the key is honoured even in a file
+/// the loader rejects on some *other* key. That is the direction to fail in
+/// either way: only an administrator can write the file at all, and a typo in
+/// an unrelated key should not hand back a permission the file plainly states.
+fn system_policy_flag(name: &str) -> Result<Option<bool>, NoSystemLayer> {
     let Ok(text) = std::fs::read_to_string(system_config_path()) else {
-        return true;
+        return Err(NoSystemLayer);
     };
-    text.parse::<toml::Table>()
+    Ok(text
+        .parse::<toml::Table>()
         .ok()
-        .and_then(|t| {
-            t.get("policy")?
-                .as_table()?
-                .get("allow_env_overrides")?
-                .as_bool()
-        })
-        .unwrap_or(false)
+        .and_then(|t| t.get("policy")?.as_table()?.get(name)?.as_bool()))
 }
 
 /// The names from [`OVERRIDE_ENV`] that are actually set, in that order.
@@ -705,6 +736,34 @@ mod tests {
         unsafe { std::env::set_var("ARGUS_DATA_DIR", dir.path()) };
         assert_eq!(data_dir(), dir.path());
         unsafe { std::env::remove_var("ARGUS_DATA_DIR") };
+    }
+
+    /// The uninstall gate defaults the other way round from the override gate,
+    /// and only the machine-wide file can close it.
+    #[test]
+    fn a_user_may_unwire_itself_until_the_machine_wide_layer_says_otherwise() {
+        assert!(user_uninstall_allowed(), "an unmanaged host");
+
+        let dir = tempfile::tempdir().unwrap();
+        let _data = DataDir::set(dir.path());
+        let sys = dir.path().join("system.toml");
+
+        std::fs::write(&sys, "[export]\ngzip = true\n").unwrap();
+        let layer = SystemConfig::set(&sys);
+        assert!(user_uninstall_allowed(), "managed, but the key is unset");
+        drop(layer);
+
+        std::fs::write(&sys, "[policy]\nallow_user_uninstall = false\n").unwrap();
+        let layer = SystemConfig::set(&sys);
+        assert!(!user_uninstall_allowed());
+        drop(layer);
+
+        // Unlike the override gate: a typo would lock every account out of an
+        // act it can perform with `rm` regardless, and `check` reports the file
+        // itself as BROKEN either way.
+        std::fs::write(&sys, "[policy\nallow_user_uninstall = false\n").unwrap();
+        let _layer = SystemConfig::set(&sys);
+        assert!(user_uninstall_allowed());
     }
 
     /// A typo in `/etc/argus/config.toml` must not be worth more to somebody

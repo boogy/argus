@@ -118,6 +118,35 @@ the shim stamps the names it found into every event as `env.overrides`, and the
 heartbeat carries `health.env_overrides`. Names only, never values. An attempt
 is a better thing for a SIEM to hold than a silence.
 
+### It can refuse a user-scope uninstall
+
+```toml
+[policy]
+allow_user_uninstall = false   # default: true, on every host
+```
+
+`argus uninstall` and `argus uninstall --project` then fail without
+root/Administrator. The default is the other way round from
+`allow_env_overrides`, and deliberately: an override redirects capture while
+leaving every file in place, so it is a bypass that looks like an install,
+while a user-scope uninstall removes wiring that same account could have
+deleted by hand. Refusing it by default would only move the same act somewhere
+argus never sees.
+
+Set or not, **the attempt is exported before anything is unwired** — an
+`integrity` record at WARN, `integrity.status` = `uninstalled` when it goes
+ahead and `uninstall_refused` when this key stops it, carrying the host, the
+user and this install's `service.instance.id`. It is sent synchronously, in the
+uninstalling process, because the daemon that would otherwise have carried it
+is about to stop; if the collector cannot be reached it goes to the local
+buffer instead, and the command still succeeds. A collector you can knock over
+must not be a way to make the record never happen.
+
+Unlike the environment gate, a machine-wide file that no longer parses is read
+as one that never set this key. A typo would otherwise lock every account on
+the host out of an act it can perform with `rm` regardless — and `argus check`
+reports that file as BROKEN either way.
+
 A machine-wide file that is not valid TOML denies them too. A typo should not be
 worth more to somebody evading monitoring than deleting the file, which they
 cannot do; `argus check` reports it as BROKEN, so the typo does not stay hidden.
@@ -204,6 +233,7 @@ constrained party grants itself is not a permission.
 | Key                         | Default | Meaning                                                                                                                                    |
 | --------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
 | `policy.allow_env_overrides` | `false` where a machine-wide file exists, `true` where none does | Honour the `ARGUS_*` variables out of the watched agent's environment. See [It also turns the environment variables off](#it-also-turns-the-environment-variables-off). |
+| `policy.allow_user_uninstall` | `true` | Let an ordinary account run `argus uninstall` (user or `--project` scope). `false` refuses it without root. See [It can refuse a user-scope uninstall](#it-can-refuse-a-user-scope-uninstall). |
 
 ### Notes on specific keys
 

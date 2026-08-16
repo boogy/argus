@@ -121,6 +121,141 @@ fn install_policy(
     Ok(())
 }
 
+/// How long an uninstall waits for its own record to reach the collector.
+///
+/// Short enough that unwiring a laptop on a plane is not a hang, long enough
+/// that a congested link still gets the record out. The buffer catches whatever
+/// falls off the end.
+const REPORT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(8);
+
+/// Ship the record of an uninstall *before* the wiring that would have carried
+/// it is gone.
+///
+/// The one event argus cannot afford to hand to the buffer and hope: the next
+/// thing the caller does is unwire every tool and stop the daemon, so a record
+/// left in the buffer waits for a daemon nobody is going to start. So it is
+/// exported synchronously, in this process, and only falls back to the buffer
+/// when there is nowhere to send it — where it is at least still local evidence
+/// for whoever comes to look.
+///
+/// Nothing here returns an error. A collector that is down must not be a way to
+/// make `uninstall` fail, because "make the report fail and it never happened"
+/// would be the bypass this whole record exists to close: the attempt is
+/// reported on stderr and the command carries on.
+fn report_uninstall(status: &str, scope: &str, detail: String) {
+    let cfg = crate::config::load();
+    let event = crate::event::Event::new(
+        "argus",
+        None,
+        None,
+        crate::event::EventKind::Integrity {
+            status: status.into(),
+            tool: format!("uninstall ({scope})"),
+            detail,
+        },
+    );
+    // Opened first whichever way this goes: it is where the install id lives,
+    // and a record that cannot be tied to the stream it ends is a record of
+    // some host, somewhere, being unwired.
+    let buffer = crate::buffer::Buffer::open(&cfg.buffer).ok();
+    let resource = crate::export::Resource {
+        install_id: buffer
+            .as_ref()
+            .and_then(|b| b.install_id().ok())
+            .unwrap_or_default(),
+        batch_seq: 0,
+    };
+    let sent = match &cfg.export.otlp_endpoint {
+        None => Err("no otlp_endpoint is configured".to_string()),
+        Some(endpoint) => send_now(&cfg.export, &event, &resource)
+            .map(|()| endpoint.clone())
+            .map_err(|e| format!("{endpoint} did not take it: {e}")),
+    };
+    match sent {
+        Ok(endpoint) => println!("reported this uninstall to {endpoint}"),
+        Err(why) => {
+            let kept = buffer.map(|b| b.push(&event).is_ok()).unwrap_or(false);
+            eprintln!(
+                "warning: could not report this uninstall ({why}); {}",
+                if kept {
+                    "the record is in the local buffer"
+                } else {
+                    "and it could not be buffered either — this uninstall is unrecorded"
+                }
+            );
+        }
+    }
+}
+
+/// One batch, one attempt, on a runtime built for it.
+///
+/// `main` is synchronous, so there is no reactor to borrow and no risk of
+/// blocking one that other work depends on.
+fn send_now(
+    cfg: &crate::config::ExportCfg,
+    event: &crate::event::Event,
+    resource: &crate::export::Resource,
+) -> Result<()> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(async {
+        let exporter = crate::export::Exporter::new(cfg);
+        match tokio::time::timeout(
+            REPORT_DEADLINE,
+            exporter.export(std::slice::from_ref(event), resource),
+        )
+        .await
+        {
+            Err(_) => anyhow::bail!("timed out after {}s", REPORT_DEADLINE.as_secs()),
+            Ok(r) => r.map_err(|e| anyhow::anyhow!("{e}")),
+        }
+    })
+}
+
+/// Why this account may not unwire itself, if it may not.
+///
+/// Split from the two callers so the decision is testable without a test
+/// process having to *be* root, or having to not be.
+fn uninstall_refusal(policy_allows: bool, admin: bool) -> Option<&'static str> {
+    // Root is the party the refusal protects, not a party it applies to: the
+    // administrator who set the key is the one who has to be able to unset it,
+    // and on a host where they cannot, the remedy is `rm` and no record at all.
+    if policy_allows || admin {
+        return None;
+    }
+    Some(
+        "this machine's administrator has refused user-scope uninstalls \
+         ([policy] allow_user_uninstall = false in the machine-wide config). \
+         Re-run as root/Administrator. The attempt has been reported.",
+    )
+}
+
+/// Report the attempt, then decide whether it goes ahead.
+///
+/// That order is deliberate: a *refused* attempt is the more interesting of the
+/// two records, and reporting it after the refusal would mean reporting it
+/// never, since the command has already exited.
+fn permit_and_report(scope: &str, detail: String) -> Result<()> {
+    match uninstall_refusal(
+        crate::paths::user_uninstall_allowed(),
+        crate::harness::is_admin(),
+    ) {
+        None => {
+            report_uninstall("uninstalled", scope, detail);
+            Ok(())
+        }
+        Some(why) => {
+            report_uninstall(
+                "uninstall_refused",
+                scope,
+                format!("{detail}; refused by the machine-wide layer"),
+            );
+            anyhow::bail!(why)
+        }
+    }
+}
+
 /// Reverse `run_managed`.
 pub fn uninstall_managed() -> Result<()> {
     let platform = crate::detect::Platform::host();
@@ -128,6 +263,17 @@ pub fn uninstall_managed() -> Result<()> {
     if root.real {
         crate::harness::require_admin()?;
     }
+    // No permission gate: this scope already needs the privilege the gate
+    // exists to require. The record is the same one, because an administrator
+    // unwiring a fleet host is exactly as worth knowing about.
+    report_uninstall(
+        "uninstalled",
+        "machine-wide",
+        format!(
+            "removing the machine-wide layer under {}",
+            root.path.display()
+        ),
+    );
     crate::harness::uninstall_managed(&root.path, platform)?;
     // Last, mirroring the deployed binary: the policy is what governs whatever
     // wiring is still standing, so a half-finished unwire keeps its rules.
@@ -142,6 +288,7 @@ pub fn uninstall_managed() -> Result<()> {
 
 /// Reverse `run_project`.
 pub fn uninstall_project(root: &std::path::Path) -> Result<()> {
+    permit_and_report("project", format!("unwiring {}", root.display()))?;
     crate::harness::uninstall_project(root)?;
     println!("argus unwired from {}", root.display());
     Ok(())
@@ -151,7 +298,12 @@ pub fn uninstall_project(root: &std::path::Path) -> Result<()> {
 /// user config (including a pre-existing Codex `[otel]`/`notify` that
 /// `install` refused to touch) untouched.
 pub fn uninstall() -> Result<()> {
-    crate::harness::uninstall(&home())?;
+    let home = home();
+    permit_and_report(
+        "user",
+        format!("unwiring every tool under {}", home.display()),
+    )?;
+    crate::harness::uninstall(&home)?;
     println!("argus unwired from all tools");
     Ok(())
 }
@@ -506,6 +658,135 @@ mod tests {
         let text = std::fs::read_to_string(home.path().join(".codex/hooks.json")).unwrap();
         assert!(text.contains("my-own-tool"), "user hooks preserved");
         assert!(!text.contains("argus"));
+    }
+
+    /// The record has to leave the host while the host can still be identified
+    /// as the one it came from — which means before the wiring goes, not after.
+    /// A collector that receives it and then finds the settings file already
+    /// stripped cannot tell an uninstall from a machine that was never wired.
+    #[test]
+    fn an_uninstall_reports_itself_before_it_unwires_anything() {
+        let home = fake_home();
+        let settings = home.path().join(".claude/settings.json");
+        run(false).unwrap();
+        assert!(
+            std::fs::read_to_string(&settings)
+                .unwrap()
+                .contains("argus")
+        );
+
+        // The collector answers on the thread that received the request, so
+        // "was the wiring still there when the record arrived" is a question it
+        // can answer for itself rather than one the test infers from ordering.
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let addr = server.server_addr().to_string();
+        let (tx, rx) = std::sync::mpsc::channel::<(String, bool)>();
+        let watched = settings.clone();
+        std::thread::spawn(move || {
+            for mut req in server.incoming_requests() {
+                let still_wired = std::fs::read_to_string(&watched)
+                    .map(|s| s.contains("argus"))
+                    .unwrap_or(false);
+                let mut body = String::new();
+                let _ = std::io::Read::read_to_string(req.as_reader(), &mut body);
+                let _ = tx.send((body, still_wired));
+                let _ = req.respond(tiny_http::Response::empty(200));
+            }
+        });
+        std::fs::create_dir_all(home.path().join("data")).unwrap();
+        std::fs::write(
+            home.path().join("data/config.toml"),
+            format!("[export]\notlp_endpoint = \"http://{addr}\"\n"),
+        )
+        .unwrap();
+
+        uninstall().unwrap();
+
+        let (body, still_wired) = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("uninstall must not return before its own record has shipped");
+        assert!(
+            still_wired,
+            "the record reached the collector after the wiring was already gone"
+        );
+        assert!(body.contains("uninstalled"), "{body}");
+        assert!(body.contains("uninstall (user)"), "{body}");
+        // And it did unwire, after.
+        assert!(
+            !std::fs::read_to_string(&settings)
+                .unwrap()
+                .contains("argus")
+        );
+    }
+
+    /// Nowhere to send it is not nowhere to put it. The daemon that would have
+    /// drained the buffer is about to stop, so this is not delivery — it is the
+    /// local evidence somebody investigating the silence can still find.
+    #[test]
+    fn a_record_that_cannot_be_sent_is_kept_in_the_local_buffer() {
+        let _home = fake_home();
+        run(false).unwrap();
+        uninstall().unwrap();
+
+        let buffer = crate::buffer::Buffer::open(&crate::config::load().buffer).unwrap();
+        let events = buffer.peek_batch(16, 0).unwrap();
+        assert!(
+            events.iter().any(|(_, e)| matches!(
+                &e.kind,
+                crate::event::EventKind::Integrity { status, tool, .. }
+                    if status == "uninstalled" && tool == "uninstall (user)"
+            )),
+            "{events:?}"
+        );
+    }
+
+    /// Root is who the refusal is *for*, not who it applies to: the
+    /// administrator who set the key has to be able to unset it.
+    #[test]
+    fn only_a_layer_that_refuses_it_refuses_it_and_never_to_root() {
+        assert!(uninstall_refusal(true, false).is_none());
+        assert!(uninstall_refusal(true, true).is_none());
+        assert!(uninstall_refusal(false, true).is_none());
+        assert!(uninstall_refusal(false, false).is_some());
+    }
+
+    /// End to end: the key in the machine-wide file reaches the command, and a
+    /// refused uninstall leaves every hook exactly where it was.
+    #[test]
+    fn a_machine_wide_refusal_stops_the_uninstall_and_keeps_the_wiring() {
+        if crate::harness::is_admin() {
+            // This suite is running as the party the refusal exempts; there is
+            // nothing here to observe. Every other assertion above still holds.
+            return;
+        }
+        let home = fake_home();
+        run(false).unwrap();
+        let before = std::fs::read_to_string(home.path().join(".claude/settings.json")).unwrap();
+
+        // The layer denies env overrides by existing at all, so the data
+        // directory has to be pinned rather than left on ARGUS_DATA_DIR.
+        let _data = crate::paths::DataDir::set(home.path().join("data"));
+        let sys = home.path().join("system.toml");
+        std::fs::write(&sys, "[policy]\nallow_user_uninstall = false\n").unwrap();
+        let _layer = crate::paths::SystemConfig::set(&sys);
+
+        let err = uninstall().unwrap_err().to_string();
+        assert!(err.contains("allow_user_uninstall"), "{err}");
+        assert_eq!(
+            std::fs::read_to_string(home.path().join(".claude/settings.json")).unwrap(),
+            before
+        );
+        // The refusal is itself the thing worth knowing about, so it is
+        // recorded on the way out rather than swallowed with the command.
+        let buffer = crate::buffer::Buffer::open(&crate::config::load().buffer).unwrap();
+        let events = buffer.peek_batch(16, 0).unwrap();
+        assert!(
+            events.iter().any(|(_, e)| matches!(
+                &e.kind,
+                crate::event::EventKind::Integrity { status, .. } if status == "uninstall_refused"
+            )),
+            "{events:?}"
+        );
     }
 
     #[test]

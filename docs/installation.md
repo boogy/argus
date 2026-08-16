@@ -279,6 +279,20 @@ Leave credentials out of it: this file is world-readable by design, exactly like
 Codex's managed layer, so `[export] headers` here hands the receiver token to
 every account on the machine. `install --managed` warns if you pin one anyway.
 
+The same file decides whether an ordinary account may unwire itself at all:
+
+```toml
+[policy]
+allow_user_uninstall = false
+```
+
+`argus uninstall` then needs root. It is off by default, because a user-scope
+uninstall only removes files that account could have deleted by hand — but
+either way the attempt is exported *before* anything is unwired, as an
+`integrity` record at WARN whose status says whether it went ahead or was
+refused. See [It can refuse a user-scope
+uninstall](configuration.md#it-can-refuse-a-user-scope-uninstall).
+
 `uninstall --managed` removes the policy last, after the wiring — a policy left
 behind governs a machine nothing is wired on.
 

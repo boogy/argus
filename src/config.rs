@@ -37,6 +37,13 @@ pub struct PolicyCfg {
     /// there is nobody there to enforce it for. Set it to `true` to keep the
     /// variables working on a managed host.
     pub allow_env_overrides: Option<bool>,
+    /// Whether an ordinary account may run `argus uninstall` on its own wiring.
+    ///
+    /// Unset means *allowed*, which is the other way round from
+    /// `allow_env_overrides`; see [`crate::paths::user_uninstall_allowed`] for
+    /// why the two defaults differ. `false` refuses it without root — and
+    /// either way the attempt is exported before anything is unwired.
+    pub allow_user_uninstall: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
