@@ -239,11 +239,18 @@ pub fn check_and_report(
         findings.push(check_binary(
             crate::config::load().integrity.binary_sha256.as_deref(),
         ));
-        let hooks = check(&crate::install::home());
+        let home = crate::install::home();
+        let hooks = check(&home);
         if hooks.is_empty() {
             println!("hooks: ok (no supported tools detected)");
         }
+        // The supervisor and the socket behind it. Only meaningful next to the
+        // wiring — a host nothing is wired on has nothing to keep alive — so
+        // the wiring's own emptiness decides whether a missing unit is a
+        // finding or a fact about a machine that runs no agents.
+        let wired = !hooks.is_empty();
         findings.extend(hooks);
+        findings.extend(crate::service::check(&home, wired));
         // Additive, never a substitute: a repository's hooks run *alongside*
         // the user's, so a broken repository is a finding on top of whatever
         // the user-level check said, not instead of it.
@@ -329,7 +336,10 @@ pub type SharedSummary = Arc<RwLock<Summary>>;
 /// artifact is BROKEN by design, so running it unasked reports tampering on
 /// every machine that never had the layer at all.
 fn check_all(cfg: &Config) -> Vec<Finding> {
-    let mut findings = check(&crate::install::home());
+    let home = crate::install::home();
+    let mut findings = check(&home);
+    let wired = !findings.is_empty();
+    findings.extend(crate::service::check(&home, wired));
     findings.push(check_binary(cfg.integrity.binary_sha256.as_deref()));
     if cfg.remote.url.is_some() {
         // `None`: the daemon has no source for the canonical URL that the user

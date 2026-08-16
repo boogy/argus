@@ -123,6 +123,33 @@ repository, which no machine-level check can see; and a `disableAllHooks` in
 someone else's hooks file is file-scoped, disables their hooks rather than
 ours, and is deliberately not reported.
 
+### The daemon and its supervisor
+
+`install` writes a per-user supervisor beside the wiring, and `check` holds it
+to the same standard as any other file argus owns — removed, emptied or edited
+is BROKEN, byte-for-byte:
+
+| Platform | Unit                                                              |
+| -------- | ----------------------------------------------------------------- |
+| macOS    | `~/Library/LaunchAgents/io.argus.daemon.plist`                     |
+| Linux    | `~/.config/systemd/user/argus.service`                             |
+| Windows  | `%APPDATA%\…\Start Menu\Programs\Startup\argus.cmd`                |
+
+Both findings are reported only on a host where something is actually wired: a
+machine that runs no agents has nothing to keep alive, and reporting a missing
+unit there would fail every host in the fleet that has never installed an agent.
+
+The socket is probed too, and what an unreachable one means depends on the
+supervisor. Where a unit exists, the daemon was stopped and its supervisor did
+not bring it back — BROKEN, and events are spooling to disk. Where none exists,
+not running is ordinary: the hook shim starts it on demand.
+
+`--managed` writes the all-users unit (`/Library/LaunchAgents` on macOS,
+`/etc/systemd/user` on Linux, `%ProgramData%\…\StartUp` on Windows) and
+`check --managed` verifies it. It is not loaded at install time — `sudo`
+runs in root's session, which supervises nobody — so it takes effect at each
+account's next login.
+
 ### Config
 
 A remote policy (`[remote].url`) must be loaded and effective, and the
@@ -239,8 +266,10 @@ yourself) if you want Codex wired.
 
 ## Known limitations
 
-- No OS service management (`launchd`/`systemd`/Windows service) — the
-  daemon is autospawned by the first hook invocation instead.
+- Windows has no restart-on-exit supervisor: the Startup-folder script runs
+  the daemon at logon, and a daemon killed mid-session is restarted by the
+  next hook invocation rather than by the OS. launchd and systemd do keep it
+  alive.
 - Remote config is trusted over HTTPS; no detached-signature verification
   yet.
 - Bash tool parsing reads redirection targets and the arguments of six file

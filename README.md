@@ -117,8 +117,9 @@ operating, extending). Individual pages:
 
 ## Known limitations
 
-- No OS service management (`launchd`/`systemd`/Windows service) — the daemon
-  is autospawned by the first hook invocation instead.
+- Windows has no restart-on-exit supervisor — the Startup-folder script runs the
+  daemon at logon and a hook restarts it mid-session. launchd and systemd do
+  keep it alive.
 - Remote config is trusted over HTTPS; no detached-signature verification yet.
 - Bash tool parsing reads redirection targets and six file verbs, not the file
   argument of every program.

@@ -19,4 +19,5 @@ pub mod paths;
 pub mod policysig;
 pub mod record;
 pub mod redact;
+pub mod service;
 pub mod spool;

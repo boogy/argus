@@ -923,6 +923,20 @@ pub fn install(home: &Path, dry_run: bool) -> Result<()> {
             &mut failures,
         );
     }
+    // The daemon's own supervisor, written whether or not a tool was detected:
+    // it belongs to argus rather than to any harness, and a host that installs
+    // its first agent tomorrow needs the daemon that was already running today.
+    let env = crate::detect::Env::host(home);
+    let svc = crate::service::artifact(&env, &install_path());
+    apply_all(
+        std::slice::from_ref(&svc),
+        "argus daemon",
+        dry_run,
+        &mut failures,
+    );
+    if !dry_run {
+        crate::service::activate(&env);
+    }
     into_result(failures)
 }
 
@@ -1096,6 +1110,18 @@ fn install_managed_in(
         }
         planned.push((h.display_name(), artifacts));
     }
+    // Held to the same containment rule as every harness artifact and checked
+    // in the same planning pass, even though its path is built from `root` by
+    // construction — the rule is what catches the next location somebody adds.
+    let unit = crate::service::managed_unit(platform, root);
+    if !unit.starts_with(root) {
+        anyhow::bail!(
+            "daemon supervisor: refusing to write {} — it is outside the \
+             machine-wide layer under {}",
+            unit.display(),
+            root.display()
+        );
+    }
     if planned.is_empty() {
         // Nothing to wire here, so nothing to deploy: a binary in a layer no
         // hook references is a file the operator has to explain later.
@@ -1109,6 +1135,17 @@ fn install_managed_in(
     for (display, artifacts) in &planned {
         apply_all(artifacts, display, dry_run, &mut failures);
     }
+    // No activation here. A `/Library/LaunchAgents` job is bootstrapped into
+    // each user's own GUI session at *their* login, and `sudo` is in nobody's
+    // session — kicking one off from here would supervise root's, which
+    // monitors nobody.
+    let svc = crate::service::managed_artifact(platform, root, &install_path());
+    apply_all(
+        std::slice::from_ref(&svc),
+        "argus daemon",
+        dry_run,
+        &mut failures,
+    );
     into_result(failures)
 }
 
@@ -1136,6 +1173,11 @@ fn uninstall_managed_in(harnesses: &[&dyn Harness], root: &Path, platform: Platf
             revert(a)?;
         }
     }
+    revert(&crate::service::managed_artifact(
+        platform,
+        root,
+        &install_path(),
+    ))?;
     // Last, and only after every hook that referenced it is gone: a deployed
     // binary with live hooks still pointing at it is capture that stopped
     // without anything saying so.
@@ -1162,6 +1204,37 @@ fn check_managed_in(harnesses: &[&dyn Harness], root: &Path, platform: Platform)
     // What `install --managed` baked, so `verify` below compares against the
     // same command it wrote rather than against the user-scope alias.
     let _bin = ManagedBin::set(managed_bin(root, platform));
+    let mut tools = Vec::new();
+    for h in harnesses {
+        let Some(d) = managed_detection(*h, root, platform) else {
+            continue;
+        };
+        let artifacts = h.artifacts(&d, Scope::Managed(platform));
+        if artifacts.is_empty() {
+            continue;
+        }
+        let mut problems: Vec<String> = artifacts
+            .iter()
+            .filter_map(|a| escapes_managed_root(root, a))
+            .collect();
+        problems.extend(artifacts.iter().filter_map(|a| verify(a).err()));
+        tools.push(Finding {
+            tool: format!("{} (managed)", h.id()),
+            ok: problems.is_empty(),
+            detail: if problems.is_empty() {
+                "wired".into()
+            } else {
+                problems.join("; ")
+            },
+        });
+    }
+    // A platform no harness declares a layer for is silent, exactly as
+    // `install --managed` writes nothing there. Reporting a missing supervisor
+    // on it would make `check --managed` fail on a machine that was never
+    // asked to carry the layer.
+    if tools.is_empty() {
+        return tools;
+    }
     let mut out = Vec::new();
     // The layer's foundation, checked once rather than per tool: machine-wide
     // hooks an account cannot edit buy nothing if the program they run sits
@@ -1185,29 +1258,23 @@ fn check_managed_in(harnesses: &[&dyn Harness], root: &Path, platform: Platform)
             },
         });
     }
-    for h in harnesses {
-        let Some(d) = managed_detection(*h, root, platform) else {
-            continue;
-        };
-        let artifacts = h.artifacts(&d, Scope::Managed(platform));
-        if artifacts.is_empty() {
-            continue;
-        }
-        let mut problems: Vec<String> = artifacts
-            .iter()
-            .filter_map(|a| escapes_managed_root(root, a))
-            .collect();
-        problems.extend(artifacts.iter().filter_map(|a| verify(a).err()));
-        out.push(Finding {
-            tool: format!("{} (managed)", h.id()),
-            ok: problems.is_empty(),
-            detail: if problems.is_empty() {
-                "wired".into()
-            } else {
-                problems.join("; ")
-            },
-        });
-    }
+    out.extend(tools);
+    // Last, so the tool findings keep the positions operator tooling reads
+    // them at. The supervisor is held to the same standard as the wiring: a
+    // machine-wide layer whose daemon nothing restarts spools to disk and
+    // exports nothing.
+    let unit = crate::service::managed_unit(platform, root);
+    let problem = verify(&crate::service::managed_artifact(
+        platform,
+        root,
+        &install_path(),
+    ))
+    .err();
+    out.push(Finding {
+        tool: "daemon service (managed)".into(),
+        ok: problem.is_none(),
+        detail: problem.unwrap_or_else(|| format!("supervised, {}", unit.display())),
+    });
     out
 }
 
@@ -1290,7 +1357,7 @@ fn artifact_path(a: &Artifact) -> &Path {
     }
 }
 
-fn apply(artifact: &Artifact, display: &str, dry_run: bool) -> Result<()> {
+pub(crate) fn apply(artifact: &Artifact, display: &str, dry_run: bool) -> Result<()> {
     match artifact {
         Artifact::JsonHooks {
             path,
@@ -1444,6 +1511,11 @@ fn hook_entry(shape: HookShape, cmd: &str, ev: &HookEvent) -> Value {
 
 /// Exact inverse of [`install`]: remove what argus added and nothing else.
 pub fn uninstall(home: &Path) -> Result<()> {
+    // Unloaded before the file goes: a service manager still supervising a
+    // unit whose path has been deleted respawns nothing and says nothing.
+    let env = crate::detect::Env::host(home);
+    crate::service::deactivate(&env);
+    revert(&crate::service::artifact(&env, &install_path()))?;
     for d in detect(home) {
         let Some(h) = harness_by_id(d.id) else {
             continue;
@@ -1455,7 +1527,7 @@ pub fn uninstall(home: &Path) -> Result<()> {
     Ok(())
 }
 
-fn revert(artifact: &Artifact) -> Result<()> {
+pub(crate) fn revert(artifact: &Artifact) -> Result<()> {
     match artifact {
         Artifact::JsonHooks {
             path,
@@ -1588,7 +1660,7 @@ fn wired_detail(h: &dyn Harness, d: &Detection) -> String {
 /// install prefix all pass an existence test while capturing nothing — so
 /// each artifact is checked down to something that has to be true for events
 /// to actually arrive.
-fn verify(artifact: &Artifact) -> std::result::Result<(), String> {
+pub(crate) fn verify(artifact: &Artifact) -> std::result::Result<(), String> {
     match artifact {
         Artifact::JsonHooks {
             path,
@@ -2136,8 +2208,13 @@ mod tests {
         install_managed_in(hs, root.path(), Platform::Linux, false).unwrap();
         assert!(settings.exists(), "managed settings not written");
         let checked = check_managed_in(hs, root.path(), Platform::Linux);
-        assert_eq!(checked.len(), 1);
-        assert!(checked[0].ok, "freshly installed: {:?}", checked[0]);
+        // The tool, plus the daemon supervisor the layer also carries.
+        assert_eq!(checked.len(), 2);
+        assert!(
+            checked.iter().all(|f| f.ok),
+            "freshly installed: {checked:?}"
+        );
+        assert_eq!(checked[1].tool, "daemon service (managed)");
 
         // A platform the harness declares nothing for is not "broken", it is
         // absent — and must not have been written either. Compared against what
@@ -2167,8 +2244,19 @@ mod tests {
 
         std::fs::remove_file(&settings).unwrap();
         let after = check_managed_in(hs, root.path(), Platform::Linux);
-        assert_eq!(after.len(), 1);
+        assert_eq!(after.len(), 2);
         assert!(!after[0].ok, "a removed managed file must be BROKEN");
+
+        // And the supervisor is held to the same rule: deleting the unit that
+        // restarts the daemon is the same bypass as deleting the wiring.
+        let unit = crate::service::managed_unit(Platform::Linux, root.path());
+        assert!(unit.exists(), "no managed supervisor at {}", unit.display());
+        std::fs::remove_file(&unit).unwrap();
+        let after = check_managed_in(hs, root.path(), Platform::Linux);
+        assert!(
+            !after.last().unwrap().ok,
+            "a removed managed supervisor must be BROKEN: {after:?}"
+        );
 
         install_managed_in(hs, root.path(), Platform::Linux, false).unwrap();
         uninstall_managed_in(hs, root.path(), Platform::Linux).unwrap();
@@ -2336,7 +2424,7 @@ mod tests {
         assert!(escape.exists());
 
         let reported = check_managed_in(hs, root.path(), Platform::Linux);
-        assert_eq!(reported.len(), 1);
+        assert_eq!(reported.len(), 2);
         assert!(!reported[0].ok);
         assert!(
             reported[0]
@@ -2416,9 +2504,10 @@ mod tests {
             assert!(doc["hooks"]["SessionStart"].is_array(), "{p:?}");
 
             let checked = check_managed_in(hs, root.path(), p);
-            assert_eq!(checked.len(), 1);
-            assert!(checked[0].ok, "{p:?}: {:?}", checked[0]);
+            assert_eq!(checked.len(), 2, "{p:?}: {checked:?}");
+            assert!(checked.iter().all(|f| f.ok), "{p:?}: {checked:?}");
             assert_eq!(checked[0].tool, "claude-code (managed)");
+            assert_eq!(checked[1].tool, "daemon service (managed)");
 
             // The user layer must stay where it always was: a managed install
             // writes `managed-settings.json` and nothing beside it.
@@ -2476,7 +2565,7 @@ mod tests {
             std::fs::write(&file, doc.to_string()).unwrap();
 
             let f = check_managed_in(hs, root.path(), Platform::Linux);
-            assert_eq!(f.len(), 1);
+            assert_eq!(f.len(), 2);
             assert!(!f[0].ok, "{key}={bad:?} was accepted as healthy");
             assert!(
                 f[0].detail.contains(key) && f[0].detail.contains("must be"),
@@ -2553,8 +2642,8 @@ mod tests {
             assert!(hooks.exists(), "{p:?}: no hooks at {}", hooks.display());
 
             let checked = check_managed_in(hs, root.path(), p);
-            assert_eq!(checked.len(), 1);
-            assert!(checked[0].ok, "{p:?}: {:?}", checked[0]);
+            assert_eq!(checked.len(), 2, "{p:?}: {checked:?}");
+            assert!(checked.iter().all(|f| f.ok), "{p:?}: {checked:?}");
 
             // Each file on its own is enough to break the layer, and each has
             // to say so — the hooks are useless unpointed-at, and the pointer

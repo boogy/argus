@@ -58,6 +58,31 @@ Run `argus status` any time to see the resolved config, buffered event
 count, and whether the daemon is reachable. Run `argus uninstall` to
 cleanly remove all wiring.
 
+### The daemon's supervisor
+
+`argus install` also writes a supervisor for the daemon itself — whether or not
+a tool was detected, since a host that installs its first agent tomorrow needs
+the daemon that was already running today:
+
+| Platform | Unit                                                | Behaviour                     |
+| -------- | --------------------------------------------------- | ----------------------------- |
+| macOS    | `~/Library/LaunchAgents/io.argus.daemon.plist`       | `RunAtLoad` + `KeepAlive`     |
+| Linux    | `~/.config/systemd/user/argus.service`               | `Restart=always`              |
+| Windows  | `%APPDATA%\…\Start Menu\Programs\Startup\argus.cmd` | runs at logon                 |
+
+macOS and Linux units are loaded immediately, so the daemon is running before
+the first agent starts and comes back if it is killed. Windows starts it at the
+next logon; a daemon killed mid-session there is restarted by the next hook
+invocation, as it was before.
+
+On Linux, a systemd **user** manager only runs while the user has a session.
+Run `loginctl enable-linger $USER` if the daemon should survive logout — on a
+build box or any host reached over SSH, that is usually what you want.
+
+`argus check` holds the unit to the same byte-for-byte standard as the hook
+wiring and probes the socket behind it — see [`argus
+check`](troubleshooting.md#the-daemon-and-its-supervisor).
+
 ## Machine-wide wiring (`--managed`)
 
 `argus install --managed` writes into the administrator-owned layer each tool
@@ -273,10 +298,12 @@ hook is per-user. Two things follow, and neither is optional:
   into another's audit trail. One machine-wide hook plus a single daemon
   means every other account just spools to disk and exports nothing.
 
-The daemon autospawns from the first hook invocation, so in practice this is
-satisfied as soon as each user runs an agent once — but a fleet rollout that
-assumes a single daemon covers the host will be wrong about every account but
-one.
+`--managed` writes the all-users supervisor for exactly this reason: one unit,
+loaded separately in every account's login session, so each account gets its own
+daemon without anyone running `argus install`. It is not loaded at install time
+— `sudo` runs in root's session, which supervises nobody — so it takes effect at
+each account's next login. A fleet rollout that assumes a single daemon covers
+the host will be wrong about every account but one.
 
 ---
 
