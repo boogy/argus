@@ -2317,12 +2317,19 @@ mod tests {
             }
         }
         let wired = std::fs::read_to_string(root.path().join("etc/stub/settings.json")).unwrap();
+        // As JSON writes it: a Windows path reaches the file with every
+        // backslash doubled, so the raw path is a substring of nothing — and
+        // the second assertion below would have passed for that reason alone.
+        let as_written = |p: &Path| {
+            let quoted = serde_json::to_string(&p.to_string_lossy()).unwrap();
+            quoted.trim_matches('"').to_string()
+        };
         assert!(
-            wired.contains(deployed.to_str().unwrap()),
+            wired.contains(&as_written(&deployed)),
             "managed hooks do not run the root-owned copy: {wired}"
         );
         assert!(
-            !wired.contains(alias.to_str().unwrap()),
+            !wired.contains(&as_written(&alias)),
             "managed hooks still run the user-writable alias: {wired}"
         );
         // …and the check that reads them back agrees, rather than reporting

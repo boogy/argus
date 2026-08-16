@@ -1206,7 +1206,10 @@ mod tests {
     #[test]
     fn the_documented_baseline_policy_is_a_policy_argus_would_accept() {
         const DOC: &str = include_str!("../docs/threat-model.md");
-        let template = DOC
+        // A Windows checkout arrives with CRLF endings, which the fence
+        // delimiters below would otherwise miss — silently, as "no toml block".
+        let doc = DOC.replace("\r\n", "\n");
+        let template = doc
             .split("```toml\n")
             .nth(1)
             .and_then(|rest| rest.split("\n```").next())

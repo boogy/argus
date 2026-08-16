@@ -474,12 +474,12 @@ mod tests {
             None,
             vars,
         );
-        assert!(
-            user_unit(&env)
-                .to_string_lossy()
-                .starts_with("D:\\roam/Microsoft/Windows"),
-            "{}",
-            user_unit(&env).display()
+        // Compared as a path rather than a string: the separator `join`
+        // inserts is the *host's*, so a literal expectation would only hold on
+        // one of the two platforms that run this test.
+        assert_eq!(
+            user_unit(&env),
+            Path::new("D:\\roam").join(STARTUP_REL).join("argus.cmd")
         );
     }
 
@@ -640,9 +640,12 @@ mod tests {
     /// subprocess: every way of neutering it without deleting the file is a
     /// finding, for free, through the same `verify` the opencode plugin gets.
     ///
-    /// `KeepAlive` is the one that matters — flip it and the file still loads,
-    /// the daemon still starts at login, and the next `pkill argus` is
-    /// permanent again.
+    /// The edit that matters is the one that survives a reload: neuter the
+    /// directive that brings the daemon back and the file still loads, the
+    /// daemon still starts at login, and the next `pkill argus` is permanent
+    /// again. Each supervisor format spells that directive differently, so the
+    /// mutation is picked for the host — a plist key on a systemd unit is a
+    /// no-op, and a no-op edit would leave this test asserting nothing.
     #[test]
     fn editing_or_deleting_the_supervisor_is_broken() {
         let (home, _bin, _data, _guard) = wired_home();
@@ -657,8 +660,21 @@ mod tests {
             f[0].detail.clone()
         };
 
-        std::fs::write(&unit, good.replace("KeepAlive", "keepAlive")).unwrap();
-        assert!(broken("a disabled KeepAlive").contains("does not match"));
+        let (from, to) = match Platform::host() {
+            Platform::MacOS => ("KeepAlive", "keepAlive"),
+            Platform::Linux => ("Restart=always", "Restart=no"),
+            // No restart-on-crash to disable there, so the equivalent is the
+            // launch itself: commented out, the script still runs at logon and
+            // starts nothing.
+            Platform::Windows => ("start \"argus\"", "rem start \"argus\""),
+        };
+        let neutered = good.replace(from, to);
+        assert_ne!(
+            neutered, good,
+            "the {from} mutation did not change the unit"
+        );
+        std::fs::write(&unit, &neutered).unwrap();
+        assert!(broken("a disabled restart directive").contains("does not match"));
 
         std::fs::write(&unit, "").unwrap();
         assert!(broken("an emptied unit").contains("is empty"));
