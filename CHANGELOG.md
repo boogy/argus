@@ -5,6 +5,82 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-08-16
+
+Anti-tamper hardening. 0.2.0 could prove its wiring had not been edited; it
+could not prove it was still running, that the policy it obeyed came from
+anywhere but the watched account, or that the program behind the hook was argus.
+Every control here closes one of those, against a developer who has admin on
+their own laptop but does not own the machine-wide root.
+
+### Highlights
+
+- **Absence is an event now.** The daemon emits a health heartbeat every
+  `health.interval_secs` (default 300) whether or not anything happened,
+  carrying an install identity (`service.instance.id`), a monotonic export
+  sequence, integrity ok/broken counts, buffer and spool depth, and any
+  `ARGUS_*` override in force. A killed daemon, a wiped data directory and a
+  blocked collector each become a gap a SIEM can alert on rather than a silence
+  indistinguishable from a laptop in a drawer. A graceful stop records itself
+  before it goes.
+- **Policy moved to a layer the user cannot write.** Precedence is now
+  `defaults <- config.toml <- cached remote <- /etc/argus/config.toml`
+  (`%ProgramData%\argus\config.toml` on Windows), root-owned and merged last.
+  `install --managed` writes it; `check --managed` verifies it. Previously
+  `--managed` wired hooks machine-wide while every knob deciding what is
+  captured and where it goes stayed in a file the user owned.
+- **Remote policy proves where it came from.** With `[remote] public_key`
+  pinned, argus fetches `<url>.sig` and verifies the body (ed25519) before it
+  will cache or apply it — so a hand-written cache file is no longer a policy.
+- **The `ARGUS_*` overrides can be switched off.** `[policy]
+  allow_env_overrides = false` in the machine-wide layer neutralizes all seven,
+  and where an override is still permitted the shim stamps it into the event.
+- **The binary behind the hook is checked, not just resolved.** `check` compares
+  the running program's digest against `[integrity] binary_sha256`, so a shell
+  stub that exits 0 in the hook's place is BROKEN instead of fine. Under
+  `--managed` the baked path is root-owned rather than the `PATH` alias, which
+  on Apple silicon is user-writable.
+- **The daemon has a supervisor**, written by `install`: a launchd agent,
+  systemd user unit, or Windows Startup entry. It is an exact-match artifact in
+  the same registry the hooks use, so a removed or edited unit is a finding with
+  no new check code, and `check` probes the socket for liveness.
+- **An uninstall says so before it happens**, in all three scopes, synchronously
+  under an 8s deadline with a local-buffer fallback. `[policy]
+  allow_user_uninstall = false` refuses a user-scope uninstall without root, and
+  ships that refusal too.
+- **[docs/threat-model.md](docs/threat-model.md)** is the operator-facing half:
+  nine bypasses written as what each costs the person attempting it, what argus
+  emits, and the alert that closes it, plus a hardened baseline policy pinning
+  every key a fleet should pin. A test deserializes that template as a `Config`,
+  so a drifted example fails CI rather than deploying as no policy at all.
+
+Upgrading from 0.2.0: heartbeats are on by default, so expect steady low-volume
+traffic from every host instead of traffic only when an agent runs — that is the
+point, but budget for it. Re-run `install` to get the supervisor unit. Nothing
+else changes until you deploy a machine-wide layer; the tamper controls are all
+opt-in through it, because a permission the constrained party grants itself is
+not a permission.
+
+<details>
+<summary>Every commit in this release</summary>
+
+### 🚀 Features
+
+- make argus's own absence observable ([312b376](https://github.com/boogy/argus/commit/312b37648525d6845e9c873d3285d4cf19992562))
+- verify the binary hooks run, not just its path ([f9c284e](https://github.com/boogy/argus/commit/f9c284efb5fd54794c19ef82494ed72e356a49c1))
+- put policy in the layer the user cannot write ([ed640ed](https://github.com/boogy/argus/commit/ed640ede27938ac86aa955856f2f75657084edc0))
+- make remote policy prove where it came from ([5084c20](https://github.com/boogy/argus/commit/5084c2089a370a245b59a083c203ef606fb627bc))
+- let the machine-wide layer turn the ARGUS_* overrides off ([dcd85ad](https://github.com/boogy/argus/commit/dcd85adf2042f6dc8a5a4992641c7babe473234b))
+- give the daemon a supervisor the check already covers ([064a8a1](https://github.com/boogy/argus/commit/064a8a18cba3ef40b33a08f999846f1875d0036d))
+- make an uninstall say so before it happens ([eb6bd23](https://github.com/boogy/argus/commit/eb6bd2351bdded64d9ba5dcb8f51f95e484bf648))
+
+### 📝 Documentation
+
+- correct claims that no longer match the source ([e7310e8](https://github.com/boogy/argus/commit/e7310e876e3296b7b2d2f45638a32ddcb572d815))
+- write the threat model from the adversary's side ([30fb102](https://github.com/boogy/argus/commit/30fb10296088e918596e41df1c2af89b141c6249))
+
+</details>
+
 ## [0.2.0] - 2026-08-15
 
 First tagged release of argus: a single cross-platform Rust binary that captures
