@@ -85,6 +85,7 @@ fn a_spooled_envelope_keeps_its_capture_time() {
     }
     let captured_at = chrono::Utc::now() - chrono::Duration::hours(3);
     let envelope = Envelope {
+        env_overrides: Vec::new(),
         cloud_identity: Default::default(),
         source: "claude-code".into(),
         received_at: captured_at,
@@ -123,6 +124,7 @@ fn the_unknown_source_fallback_is_stamped_too() {
     let captured_at = chrono::Utc::now() - chrono::Duration::minutes(90);
     let events = argus::adapters::parse(
         Envelope {
+            env_overrides: Vec::new(),
             cloud_identity: Default::default(),
             source: "some-tool-we-do-not-know".into(),
             received_at: captured_at,

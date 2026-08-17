@@ -4,7 +4,8 @@ What to check when events aren't showing up, what `argus status` and `argus
 check` report and why, and the known limitations of this release.
 
 **On this page:** [`argus status`](#argus-status) · [`argus
-check`](#argus-check) · [Offline / collector
+check`](#argus-check) · [`ARGUS_*` variables have stopped doing
+anything](#argus_-variables-have-stopped-doing-anything) · [Offline / collector
 unreachable](#offline--collector-unreachable) · [Spool
 directory](#spool-directory) · [Hook not firing](#hook-not-firing) ·
 [Codex config not touched](#codex-config-not-touched) · [Known
@@ -122,6 +123,33 @@ repository, which no machine-level check can see; and a `disableAllHooks` in
 someone else's hooks file is file-scoped, disables their hooks rather than
 ours, and is deliberately not reported.
 
+### The daemon and its supervisor
+
+`install` writes a per-user supervisor beside the wiring, and `check` holds it
+to the same standard as any other file argus owns — removed, emptied or edited
+is BROKEN, byte-for-byte:
+
+| Platform | Unit                                                              |
+| -------- | ----------------------------------------------------------------- |
+| macOS    | `~/Library/LaunchAgents/io.argus.daemon.plist`                     |
+| Linux    | `~/.config/systemd/user/argus.service`                             |
+| Windows  | `%APPDATA%\…\Start Menu\Programs\Startup\argus.cmd`                |
+
+Both findings are reported only on a host where something is actually wired: a
+machine that runs no agents has nothing to keep alive, and reporting a missing
+unit there would fail every host in the fleet that has never installed an agent.
+
+The socket is probed too, and what an unreachable one means depends on the
+supervisor. Where a unit exists, the daemon was stopped and its supervisor did
+not bring it back — BROKEN, and events are spooling to disk. Where none exists,
+not running is ordinary: the hook shim starts it on demand.
+
+`--managed` writes the all-users unit (`/Library/LaunchAgents` on macOS,
+`/etc/systemd/user` on Linux, `%ProgramData%\…\StartUp` on Windows) and
+`check --managed` verifies it. It is not loaded at install time — `sudo`
+runs in root's session, which supervises nobody — so it takes effect at each
+account's next login.
+
 ### Config
 
 A remote policy (`[remote].url`) must be loaded and effective, and the
@@ -129,9 +157,25 @@ effective config must match it. Fails if the host isn't policy-managed, the
 policy never loaded (no/invalid cache → running on local/defaults), or a
 policy key isn't reflected.
 
-Because the loader is `defaults < local < remote`, a value the policy sets
-can't be weakened locally — so this verifies policy is _in force_ rather
-than spot-checking individual keys (which a targeted edit would slip past).
+Because the loader is `defaults < local < remote < machine-wide`, a value
+either policy sets can't be weakened locally — so this verifies policy is _in
+force_ rather than spot-checking individual keys (which a targeted edit would
+slip past). A [machine-wide file](configuration.md#machine-wide-config) counts
+as policy management on its own: what it pins is already beyond the user's
+reach, so a host with one and no `[remote].url` passes.
+
+Where the machine-wide file pins `[remote] public_key`, the check goes past
+agreement to authorship: the cache must carry a valid signature over its own
+bytes, and one that doesn't is BROKEN — "not applied" and not "inconsistent",
+because the loader skips it too. Without a pinned key this check compares two
+files the user can write, which proves they agree and nothing about who wrote
+them; see [Signing it](configuration.md#signing-it).
+
+The machine-wide file is checked hardest where it is weakest. One the loader
+would **skip** — malformed, or type-invalid — is BROKEN, not absent: the host
+is running on the user's config while `/etc/argus` says otherwise. And a key it
+sets above the remote policy is not reported as a deviation, so a host locked
+down harder than the fleet default isn't the one that alerts.
 
 Pass **`--remote-url <URL>`** (the canonical policy URL, from your MDM) so
 the check fails if `remote.url` was **removed or repointed** to another
@@ -149,6 +193,26 @@ Two more scopes can be added to either `--hooks` or `--config`:
 - `--project <dir>` — a repository's wiring. Missing is silent.
 - `--managed` — the administrator-owned layer. Missing is BROKEN — see
   [Machine-wide wiring](installation.md#machine-wide-wiring---managed).
+
+## `ARGUS_*` variables have stopped doing anything
+
+Expected, on a host with a [machine-wide
+config](configuration.md#machine-wide-config): deploying that file makes the
+variables listed as **gated** in [Environment
+variables](configuration.md#environment-variables) inert unless it sets
+`[policy] allow_env_overrides = true`. They are read out of the watched agent's
+environment, so leaving them live would let one line in a shell profile move
+capture somewhere the file no longer governs.
+
+The daemon logs each variable it ignores at `WARN`; the shim does not, because
+it shares the host tool's stderr and has no business writing there. Nothing
+fails — argus falls back to the installed default — and the names still reach
+the collector as
+`env.overrides` on every event and `health.env_overrides` on the heartbeat, so
+the attempt is visible whether or not it worked. Values are never sent.
+
+A machine-wide file that is not valid TOML denies them as well. If that is a
+surprise, `argus check --config` reports the file as BROKEN and says why.
 
 ## Offline / collector unreachable
 
@@ -202,8 +266,10 @@ yourself) if you want Codex wired.
 
 ## Known limitations
 
-- No OS service management (`launchd`/`systemd`/Windows service) — the
-  daemon is autospawned by the first hook invocation instead.
+- Windows has no restart-on-exit supervisor: the Startup-folder script runs
+  the daemon at logon, and a daemon killed mid-session is restarted by the
+  next hook invocation rather than by the OS. launchd and systemd do keep it
+  alive.
 - Remote config is trusted over HTTPS; no detached-signature verification
   yet.
 - Bash tool parsing reads redirection targets and the arguments of six file

@@ -185,7 +185,10 @@ unset ARGUS_RECORD_DIR
 ```
 
 Recording dumps every envelope the shim handles, verbatim and un-redacted,
-which is why `RECORD_DIR` lives under `target/`. Promotion is the step whose
+which is why `RECORD_DIR` lives under `target/` — and why a machine with a
+[machine-wide config](configuration.md#machine-wide-config) ignores the variable
+unless that file sets `[policy] allow_env_overrides = true`. Develop adapters on
+an unmanaged machine. Promotion is the step whose
 output is committed, so it redacts, normalizes the timestamp, and collapses
 repeats of an event into one file — re-running it on unchanged recordings
 leaves the tree clean.

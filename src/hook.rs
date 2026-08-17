@@ -74,6 +74,10 @@ pub fn deliver(source: &str, event: Option<&str>, raw: &str, truncated: bool) {
         // alongside every other one, so a fleet turns this off centrally
         // instead of reinstalling on every host to change what a shim reads.
         cloud_identity: crate::cloudid::current(),
+        // Read here for the same reason, and reported whether or not the
+        // machine-wide layer let them take effect: a denied attempt is a
+        // better thing for the SIEM to hold than a silence.
+        env_overrides: crate::paths::overrides_in_force(),
         source: source.to_string(),
         received_at: chrono::Utc::now(),
         event: event.map(String::from),
@@ -116,7 +120,7 @@ fn send_with_deadline(envelope: &Envelope, deadline: std::time::Duration) -> boo
 pub(crate) const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 fn autospawn_daemon() {
-    if std::env::var("ARGUS_NO_AUTOSPAWN").is_ok() {
+    if crate::paths::env_override("ARGUS_NO_AUTOSPAWN").is_some() {
         return;
     }
     if let Ok(exe) = std::env::current_exe() {
@@ -166,6 +170,13 @@ mod tests {
         let drained = crate::spool::drain().unwrap();
         assert_eq!(drained.len(), 1);
         assert_eq!(drained[0].source, "claude-code");
+        // The three variables above are exactly the redirect this test is
+        // built out of, and the envelope has to say so. Only the shim can:
+        // it is the process that holds the agent's environment.
+        assert_eq!(
+            drained[0].env_overrides,
+            ["ARGUS_DATA_DIR", "ARGUS_SOCKET", "ARGUS_NO_AUTOSPAWN"]
+        );
     }
 
     /// Exercises the deadline mechanism directly: a socket path that can never
@@ -185,6 +196,7 @@ mod tests {
         }
 
         let envelope = Envelope {
+            env_overrides: Vec::new(),
             cloud_identity: Default::default(),
             source: "claude-code".to_string(),
             received_at: chrono::Utc::now(),

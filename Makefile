@@ -40,6 +40,10 @@ test: ## Run the full test suite (unit + e2e)
 e2e: ## Run only the end-to-end test
 	$(CARGO) test --test e2e
 
+.PHONY: tamper-drill
+tamper-drill: ## Run every bypass in docs/threat-model.md against a sandboxed install (unix)
+	$(CARGO) test --test tamper_drill -- --nocapture
+
 .PHONY: fmt
 fmt: ## Format the code in place
 	$(CARGO) fmt

@@ -3,19 +3,56 @@ use crate::event::{Event, EventKind};
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
 
-pub fn to_otlp_body(events: &[Event]) -> Value {
+/// What identifies the *install* a batch came from, as opposed to the host and
+/// user already on every event.
+///
+/// This is the half of the export that is about argus itself rather than about
+/// what it saw, and it exists because every way of evading capture ends in the
+/// same observation at the collector — no events from this host — which is also
+/// what a laptop in a drawer produces. An install id that changes says the
+/// evidence was deleted; a batch sequence that skips says a batch left this
+/// daemon and never arrived. Neither is visible from the events themselves.
+#[derive(Debug, Clone, Default)]
+pub struct Resource {
+    /// This install's identity; see [`crate::buffer::Buffer::install_id`].
+    /// Empty when the batch was built outside a daemon (tests, `status`), in
+    /// which case the attribute is left off rather than sent blank.
+    pub install_id: String,
+    /// See [`crate::buffer::Buffer::batch_seq_for`]. Zero means unnumbered, and
+    /// is likewise omitted rather than exported as a real sequence number.
+    pub batch_seq: u64,
+}
+
+pub fn to_otlp_body(events: &[Event], resource: &Resource) -> Value {
     let (host, user) = events
         .first()
         .map(|e| (e.host.clone(), e.username.clone()))
         .unwrap_or_default();
     let records: Vec<Value> = events.iter().map(record).collect();
+    let mut resource_attrs = vec![
+        attr("service.name", "argus"),
+        attr("host.name", &host),
+        attr("user.name", &user),
+        // The running version, at the resource level rather than per record:
+        // it is a property of the process that sent the batch, and it is how a
+        // fleet spots the host still running the build from before the fix.
+        attr("argus.version", env!("CARGO_PKG_VERSION")),
+    ];
+    if !resource.install_id.is_empty() {
+        // OTel's own name for "which instance of this service", so a collector
+        // that already groups by it needs no argus-specific rule.
+        resource_attrs.push(attr("service.instance.id", &resource.install_id));
+    }
+    if resource.batch_seq > 0 {
+        resource_attrs.push(attr("argus.batch_seq", &resource.batch_seq.to_string()));
+        // Paired with the sequence number on purpose: a gap says a batch went
+        // missing, and this is what says how many events were in the ones that
+        // did arrive — enough to tell a lost heartbeat from a lost hour.
+        resource_attrs.push(attr("argus.batch_count", &events.len().to_string()));
+    }
     json!({
         "resourceLogs": [{
-            "resource": { "attributes": [
-                attr("service.name", "argus"),
-                attr("host.name", &host),
-                attr("user.name", &user),
-            ]},
+            "resource": { "attributes": resource_attrs },
             "scopeLogs": [{
                 "scope": { "name": "argus", "version": env!("CARGO_PKG_VERSION") },
                 "logRecords": records
@@ -303,6 +340,77 @@ fn record(e: &Event) -> Value {
             attrs.push(attr("integrity.detail", detail));
             "integrity"
         }
+        // Exhaustive for the reason given on `ToolUse`, and more so here: the
+        // whole value of a heartbeat is in the alerts written against it, and
+        // an alert can only be written against an attribute. A field added to
+        // `Health` and left in the body only would be invisible to every rule
+        // anyone writes, which for this event is the same as not collecting it.
+        EventKind::Health {
+            reason,
+            install_id,
+            version,
+            uptime_secs,
+            checks_age_secs,
+            checks_ok,
+            broken,
+            config_fingerprint,
+            policy_url,
+            buffer_events,
+            buffer_bytes,
+            spool_files,
+            spool_bytes,
+            dropped_total,
+            unreadable_total,
+            data_dir,
+            binary,
+            binary_sha256,
+            binary_pin_ok,
+            env_overrides,
+        } => {
+            attrs.push(attr("health.reason", reason));
+            attrs.push(attr("health.install_id", install_id));
+            attrs.push(attr("health.version", version));
+            attrs.push(attr("health.uptime_secs", &uptime_secs.to_string()));
+            // The count first: "no broken findings" and "no check has run" are
+            // the two answers a heartbeat exists to separate, and the second is
+            // only visible as a missing or stale age.
+            if let Some(age) = checks_age_secs {
+                attrs.push(attr("health.checks_age_secs", &age.to_string()));
+            }
+            attrs.push(attr("health.checks_ok", &checks_ok.to_string()));
+            attrs.push(attr("health.checks_broken", &broken.len().to_string()));
+            if !broken.is_empty() {
+                attrs.push(attr("health.broken", &broken.join("; ")));
+            }
+            attrs.push(attr("health.config_fingerprint", config_fingerprint));
+            if let Some(url) = policy_url {
+                attrs.push(attr("health.policy_url", url));
+            }
+            attrs.push(attr("health.buffer_events", &buffer_events.to_string()));
+            attrs.push(attr("health.buffer_bytes", &buffer_bytes.to_string()));
+            attrs.push(attr("health.spool_files", &spool_files.to_string()));
+            attrs.push(attr("health.spool_bytes", &spool_bytes.to_string()));
+            attrs.push(attr("health.dropped_total", &dropped_total.to_string()));
+            attrs.push(attr(
+                "health.unreadable_total",
+                &unreadable_total.to_string(),
+            ));
+            attrs.push(attr("health.data_dir", data_dir));
+            attrs.push(attr("health.binary", binary));
+            attrs.push(attr("health.binary_sha256", binary_sha256));
+            // Only where a pin exists: `false` is the finding, and an attribute
+            // that is absent everywhere else keeps a rule on it unambiguous.
+            if let Some(ok) = binary_pin_ok {
+                attrs.push(attr("health.binary_pin_ok", &ok.to_string()));
+            }
+            // Only when there are any: an empty attribute on every heartbeat
+            // from every healthy host is a column nobody reads, and the whole
+            // point of this one is that its presence is the signal.
+            if !env_overrides.is_empty() {
+                attrs.push(attr("health.env_overrides", &env_overrides.join(",")));
+            }
+            "health"
+        }
     };
     for (key, val) in [
         ("turn.id", &e.meta.turn_id),
@@ -321,6 +429,13 @@ fn record(e: &Event) -> Value {
             attrs.push(attr(key, v));
         }
     }
+    // Same rule as the heartbeat's copy: emitted only when something is set,
+    // because the presence of the attribute is the whole signal. This one says
+    // the *agent's* environment carried it, which the heartbeat cannot — the
+    // daemon may have been started hours earlier from a different shell.
+    if !e.meta.env_overrides.is_empty() {
+        attrs.push(attr("env.overrides", &e.meta.env_overrides.join(",")));
+    }
     attrs.insert(0, attr("event.type", event_type));
     // Broken wiring is the one finding a SIEM should alert on, so lift it out
     // of the INFO stream everything else rides in.
@@ -329,6 +444,12 @@ fn record(e: &Event) -> Value {
         // A gap in the stream is the other thing that must not scroll past in
         // an INFO firehose: it says this record is not the whole story.
         EventKind::Loss { .. } => "WARN",
+        // A heartbeat is routine — it is the *absence* of one that matters, and
+        // an alert on absence does not care about severity. But a heartbeat
+        // carrying broken findings is the same news the integrity events carry,
+        // arriving on the schedule that is actually watched, so it is raised
+        // for the same reason.
+        EventKind::Health { broken, .. } if !broken.is_empty() => "WARN",
         _ => "INFO",
     };
     json!({
@@ -384,7 +505,7 @@ impl Exporter {
         }
     }
 
-    pub async fn export(&self, events: &[Event]) -> Result<(), Rejection> {
+    pub async fn export(&self, events: &[Event], resource: &Resource) -> Result<(), Rejection> {
         let endpoint = self
             .endpoint
             .as_ref()
@@ -392,7 +513,7 @@ impl Exporter {
             .map_err(Rejection::Transient)?;
         // Serialized once, so the compressed and uncompressed paths send the
         // same bytes and only the framing differs.
-        let body = serde_json::to_vec(&to_otlp_body(events))
+        let body = serde_json::to_vec(&to_otlp_body(events, resource))
             .context("serializing the export batch")
             .map_err(Rejection::Transient)?;
         // `.json()` used to set this; sending the body ourselves means saying it.
@@ -523,7 +644,7 @@ mod tests {
                 file_contents: vec![],
             },
         );
-        let body = to_otlp_body(std::slice::from_ref(&e));
+        let body = to_otlp_body(std::slice::from_ref(&e), &Resource::default());
         let records = &body["resourceLogs"][0]["scopeLogs"][0]["logRecords"];
         assert_eq!(records.as_array().unwrap().len(), 1);
         let rec = &records[0];
@@ -577,7 +698,7 @@ mod tests {
                 file_contents: vec![],
             },
         );
-        let body = to_otlp_body(std::slice::from_ref(&e));
+        let body = to_otlp_body(std::slice::from_ref(&e), &Resource::default());
         let attrs = body["resourceLogs"][0]["scopeLogs"][0]["logRecords"][0]["attributes"]
             .as_array()
             .unwrap()
@@ -631,7 +752,7 @@ mod tests {
             ("GITHUB_TOKEN", "ghp_reallysecret"),
         ]);
 
-        let body = to_otlp_body(std::slice::from_ref(&e));
+        let body = to_otlp_body(std::slice::from_ref(&e), &Resource::default());
         let attrs = body["resourceLogs"][0]["scopeLogs"][0]["logRecords"][0]["attributes"]
             .as_array()
             .unwrap()
@@ -676,7 +797,7 @@ mod tests {
                 detail: serde_json::Value::Null,
             },
         );
-        let body = to_otlp_body(std::slice::from_ref(&e));
+        let body = to_otlp_body(std::slice::from_ref(&e), &Resource::default());
         let wire = body.to_string();
         assert!(!wire.contains("cloud."), "{wire}");
     }
@@ -724,7 +845,7 @@ mod tests {
                 ],
             },
         );
-        let body = to_otlp_body(std::slice::from_ref(&e));
+        let body = to_otlp_body(std::slice::from_ref(&e), &Resource::default());
         let attrs = body["resourceLogs"][0]["scopeLogs"][0]["logRecords"][0]["attributes"]
             .as_array()
             .unwrap()
@@ -770,7 +891,7 @@ mod tests {
                 file_contents: vec![],
             },
         );
-        let body = to_otlp_body(std::slice::from_ref(&e));
+        let body = to_otlp_body(std::slice::from_ref(&e), &Resource::default());
         let attrs = body["resourceLogs"][0]["scopeLogs"][0]["logRecords"][0]["attributes"].clone();
         let get = |k: &str| {
             attrs
@@ -792,7 +913,7 @@ mod tests {
     fn a_rewritten_prompt_is_flagged_and_an_untouched_one_is_not() {
         let attr_of = |kind| {
             let e = Event::new("copilot", None, None, kind);
-            let body = to_otlp_body(std::slice::from_ref(&e));
+            let body = to_otlp_body(std::slice::from_ref(&e), &Resource::default());
             let attrs = body["resourceLogs"][0]["scopeLogs"][0]["logRecords"][0]["attributes"]
                 .as_array()
                 .unwrap()
@@ -830,7 +951,7 @@ mod tests {
     fn error_type_recoverability_and_a_directed_compaction_are_attributes() {
         let attrs_of = |kind| {
             let e = Event::new("copilot", None, None, kind);
-            let body = to_otlp_body(std::slice::from_ref(&e));
+            let body = to_otlp_body(std::slice::from_ref(&e), &Resource::default());
             body["resourceLogs"][0]["scopeLogs"][0]["logRecords"][0]["attributes"]
                 .as_array()
                 .unwrap()
@@ -908,7 +1029,7 @@ mod tests {
             },
         );
         e.meta.model = Some("anthropic/claude-opus-5".into());
-        let body = to_otlp_body(std::slice::from_ref(&e));
+        let body = to_otlp_body(std::slice::from_ref(&e), &Resource::default());
         let attrs = body["resourceLogs"][0]["scopeLogs"][0]["logRecords"][0]["attributes"].clone();
         let get = |k: &str| {
             attrs
@@ -951,7 +1072,7 @@ mod tests {
         e.meta.effort = Some("high".into());
         e.meta.mcp_server = Some("github".into());
         e.meta.mcp_endpoint = Some("stdio:npx -y @mcp/github".into());
-        let body = to_otlp_body(std::slice::from_ref(&e));
+        let body = to_otlp_body(std::slice::from_ref(&e), &Resource::default());
         let attrs = body["resourceLogs"][0]["scopeLogs"][0]["logRecords"][0]["attributes"].clone();
         let get = |k: &str| {
             attrs
@@ -975,6 +1096,40 @@ mod tests {
         );
     }
 
+    /// An override that argus *did* honour has to be visible at the far end.
+    /// Capture that was redirected and then dutifully exported from the new
+    /// location tells the same story as capture that was never redirected —
+    /// unless the events say which one happened.
+    #[test]
+    fn an_env_override_in_the_agents_environment_reaches_the_collector() {
+        let mut e = Event::new(
+            "claude-code",
+            Some("s".into()),
+            None,
+            EventKind::Prompt { text: "hi".into() },
+        );
+        let get = |e: &Event, k: &str| {
+            to_otlp_body(std::slice::from_ref(e), &Resource::default())["resourceLogs"][0]
+                ["scopeLogs"][0]["logRecords"][0]["attributes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|a| a["key"] == k)
+                .map(|a| a["value"]["stringValue"].as_str().unwrap().to_string())
+        };
+        assert_eq!(
+            get(&e, "env.overrides"),
+            None,
+            "an empty attribute on every event from every ordinary host is a \
+             column nobody reads, and presence is the signal"
+        );
+        e.meta.env_overrides = vec!["ARGUS_DATA_DIR".into(), "ARGUS_SOCKET".into()];
+        assert_eq!(
+            get(&e, "env.overrides").as_deref(),
+            Some("ARGUS_DATA_DIR,ARGUS_SOCKET")
+        );
+    }
+
     /// A gap must not ride the INFO firehose alongside the events it says are
     /// missing.
     #[test]
@@ -989,7 +1144,7 @@ mod tests {
                 detail: "local buffer at capacity".into(),
             },
         );
-        let body = to_otlp_body(std::slice::from_ref(&e));
+        let body = to_otlp_body(std::slice::from_ref(&e), &Resource::default());
         let rec = &body["resourceLogs"][0]["scopeLogs"][0]["logRecords"][0];
         assert_eq!(rec["severityText"], "WARN");
         let attrs = rec["attributes"].as_array().unwrap();
@@ -1039,10 +1194,15 @@ mod tests {
                 detail: serde_json::Value::Null,
             },
         );
-        exporter.export(std::slice::from_ref(&e)).await.unwrap();
+        exporter
+            .export(std::slice::from_ref(&e), &Resource::default())
+            .await
+            .unwrap();
         assert_eq!(rx.recv().unwrap(), "/v1/logs");
 
-        let err = exporter.export(std::slice::from_ref(&e)).await;
+        let err = exporter
+            .export(std::slice::from_ref(&e), &Resource::default())
+            .await;
         assert!(
             err.is_err(),
             "non-2xx must surface as Err for at-least-once redelivery"
@@ -1108,14 +1268,20 @@ mod tests {
         let exporter = Exporter::new(&cfg);
         let e = Event::new("codex", None, None, EventKind::Prompt { text: "p".into() });
 
-        match exporter.export(std::slice::from_ref(&e)).await {
+        match exporter
+            .export(std::slice::from_ref(&e), &Resource::default())
+            .await
+        {
             Err(Rejection::Permanent { status, detail }) => {
                 assert_eq!(status, 400);
                 assert_eq!(detail, "record 3: attribute value too long");
             }
             other => panic!("400 must be permanent, got {other:?}"),
         }
-        match exporter.export(std::slice::from_ref(&e)).await {
+        match exporter
+            .export(std::slice::from_ref(&e), &Resource::default())
+            .await
+        {
             Err(Rejection::Transient(_)) => {}
             other => panic!("503 must be transient, got {other:?}"),
         }
@@ -1130,7 +1296,10 @@ mod tests {
             ..Default::default()
         };
         let e = Event::new("codex", None, None, EventKind::Prompt { text: "p".into() });
-        match Exporter::new(&cfg).export(std::slice::from_ref(&e)).await {
+        match Exporter::new(&cfg)
+            .export(std::slice::from_ref(&e), &Resource::default())
+            .await
+        {
             Err(Rejection::Transient(_)) => {}
             other => panic!("a connect failure must be retried, got {other:?}"),
         }
@@ -1197,7 +1366,10 @@ mod tests {
             otlp_endpoint: Some(endpoint.clone()),
             ..Default::default()
         };
-        Exporter::new(&plain).export(&events).await.unwrap();
+        Exporter::new(&plain)
+            .export(&events, &Resource::default())
+            .await
+            .unwrap();
         let (plain_headers, plain_body) = rx.recv().unwrap();
         assert_eq!(
             header(&plain_headers, "content-encoding"),
@@ -1216,7 +1388,10 @@ mod tests {
             gzip: true,
             ..Default::default()
         };
-        Exporter::new(&squeezed).export(&events).await.unwrap();
+        Exporter::new(&squeezed)
+            .export(&events, &Resource::default())
+            .await
+            .unwrap();
         let (headers, body) = rx.recv().unwrap();
         assert_eq!(
             header(&headers, "content-encoding").as_deref(),
@@ -1261,7 +1436,7 @@ mod tests {
         };
         let e = Event::new("codex", None, None, EventKind::Prompt { text: "p".into() });
         Exporter::new(&cfg)
-            .export(std::slice::from_ref(&e))
+            .export(std::slice::from_ref(&e), &Resource::default())
             .await
             .unwrap();
         let (headers, body) = rx.recv().unwrap();
@@ -1289,5 +1464,68 @@ mod tests {
             1,
             "the export loop rebuilds an Exporter per flush; the pool must survive that"
         );
+    }
+
+    fn resource_attrs(body: &serde_json::Value) -> std::collections::BTreeMap<String, String> {
+        body["resourceLogs"][0]["resource"]["attributes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| {
+                (
+                    a["key"].as_str().unwrap().to_string(),
+                    a["value"]["stringValue"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect()
+    }
+
+    /// Identity and sequence are useless if they stop at the daemon: the whole
+    /// point is that a collector can spot a wiped install or a batch that never
+    /// arrived without reaching the endpoint.
+    #[test]
+    fn identity_and_sequence_reach_the_collector() {
+        let events = [
+            Event::new("codex", None, None, EventKind::Prompt { text: "a".into() }),
+            Event::new("codex", None, None, EventKind::Prompt { text: "b".into() }),
+        ];
+        let attrs = resource_attrs(&to_otlp_body(
+            &events,
+            &Resource {
+                install_id: "11111111-2222-3333-4444-555555555555".into(),
+                batch_seq: 7,
+            },
+        ));
+        assert_eq!(
+            attrs.get("service.instance.id").map(String::as_str),
+            Some("11111111-2222-3333-4444-555555555555")
+        );
+        assert_eq!(attrs.get("argus.batch_seq").map(String::as_str), Some("7"));
+        assert_eq!(
+            attrs.get("argus.batch_count").map(String::as_str),
+            Some("2"),
+            "a gap in the sequence says nothing without the size of the batches around it"
+        );
+        assert_eq!(
+            attrs.get("argus.version").map(String::as_str),
+            Some(env!("CARGO_PKG_VERSION")),
+            "a fleet cannot tell which hosts still run the build from before a fix"
+        );
+    }
+
+    /// A daemon that could not read its own `meta` table must not invent an
+    /// identity or a sequence: an absent attribute is a fault a collector can
+    /// see, whereas a zero or a fresh UUID looks exactly like the tampering
+    /// these attributes exist to report.
+    #[test]
+    fn an_unknown_identity_is_omitted_rather_than_faked() {
+        let e = Event::new("codex", None, None, EventKind::Prompt { text: "a".into() });
+        let attrs = resource_attrs(&to_otlp_body(
+            std::slice::from_ref(&e),
+            &Resource::default(),
+        ));
+        assert!(!attrs.contains_key("service.instance.id"));
+        assert!(!attrs.contains_key("argus.batch_seq"));
+        assert!(!attrs.contains_key("argus.batch_count"));
     }
 }

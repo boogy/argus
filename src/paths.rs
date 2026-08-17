@@ -13,12 +13,202 @@ use std::path::{Path, PathBuf};
 /// merits either. Off Windows the two directories are the same path, so this
 /// changes nothing there.
 pub fn data_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("ARGUS_DATA_DIR") {
+    #[cfg(test)]
+    if let Some(dir) = TEST_DATA_DIR
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+    {
+        return dir;
+    }
+    if let Some(dir) = env_override("ARGUS_DATA_DIR") {
         return PathBuf::from(dir);
     }
     dirs::data_local_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("argus")
+}
+
+/// Where tests put their buffer, ahead of and independent of `ARGUS_DATA_DIR`.
+///
+/// A test that pinned its data directory with the environment variable would be
+/// resting on the very thing [`env_override`] exists to take away: the moment
+/// such a test also installs a machine-wide layer, its temp directory stops
+/// applying and every path it resolves — every `fs::write` it then makes —
+/// lands in the *developer's real* data directory. Pinning it here says what
+/// the test means (this run's buffer lives there) rather than what a user would
+/// have typed, and cannot be revoked by the policy under test.
+#[cfg(test)]
+pub(crate) static TEST_DATA_DIR: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+
+/// Points [`data_dir`] at `path` until it is dropped.
+///
+/// A guard for the same reason [`SystemConfig`] is one: a test that returned
+/// early while it was still set would hand its temp directory — usually already
+/// deleted — to every test after it.
+#[cfg(test)]
+pub(crate) struct DataDir;
+
+#[cfg(test)]
+impl DataDir {
+    pub(crate) fn set(path: impl Into<PathBuf>) -> Self {
+        *TEST_DATA_DIR.lock().unwrap_or_else(|e| e.into_inner()) = Some(path.into());
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for DataDir {
+    fn drop(&mut self) {
+        *TEST_DATA_DIR.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+}
+
+/// Every environment variable that moves argus off its installed defaults.
+///
+/// Listed in one place because they are read from the *agent's* environment —
+/// argus's shim runs as a child of the tool it watches, so anything in a shell
+/// profile reaches it. Each of these is a legitimate debugging affordance and
+/// also, used deliberately, a way to point capture at a directory with no
+/// daemon behind it. The list exists so that the heartbeat can say which are in
+/// force, and so a later gate has one place to consult.
+pub const OVERRIDE_ENV: [&str; 7] = [
+    "ARGUS_DATA_DIR",
+    "ARGUS_SOCKET",
+    "ARGUS_HOME",
+    "ARGUS_BIN",
+    "ARGUS_NO_AUTOSPAWN",
+    crate::record::RECORD_DIR_ENV,
+    crate::harness::SYSTEM_ROOT_ENV,
+];
+
+/// The value of an `ARGUS_*` override, or `None` where this host does not
+/// honour them.
+///
+/// Every read of every variable in [`OVERRIDE_ENV`] goes through here, and that
+/// is the whole design: these are read out of the *agent's* environment, so
+/// `export ARGUS_DATA_DIR=/tmp/x` in a shell profile pointed capture at a
+/// directory with no daemon behind it, and `ARGUS_NO_AUTOSPAWN=1` stopped one
+/// from ever starting. Two call sites reading the same variable by hand is also
+/// how a shim and a daemon come to disagree about which socket they are on.
+///
+/// A denied override is *ignored*, not fatal: the caller falls back to the
+/// installed default, which is the configuration the administrator chose. The
+/// daemon logs it at warn — the shim cannot, since it shares the host tool's
+/// stderr — and [`overrides_in_force`] reports the variable either way, to the
+/// heartbeat and to every envelope the shim builds, because an attempt is worth
+/// more to whoever is watching than a silence.
+pub fn env_override(name: &str) -> Option<std::ffi::OsString> {
+    let value = std::env::var_os(name)?;
+    if !overrides_allowed() {
+        tracing::warn!("ignoring {name}: the machine-wide config does not allow env overrides");
+        return None;
+    }
+    Some(value)
+}
+
+/// Whether this host honours `ARGUS_*` overrides at all.
+///
+/// A host with no machine-wide file has nobody to enforce this for, so
+/// everything works as it always did. A host with one is a host somebody chose
+/// to manage, and the variables are denied unless that file says otherwise —
+/// the plain reading of "an administrator configured this machine".
+///
+/// A file that is not valid TOML denies them too. It is the one case where the
+/// answer is a guess, and the safe guess is that a machine whose administrator
+/// wrote a config file is a managed machine: a typo in `/etc/argus/config.toml`
+/// should not be worth more to somebody evading monitoring than deleting the
+/// file, which they cannot do. `argus check` reports that file as BROKEN, so
+/// the typo does not stay hidden either.
+fn overrides_allowed() -> bool {
+    // Cached outside tests: the read is skipped entirely when no variable is
+    // set, but a host that does set one would otherwise re-read and re-parse
+    // the machine-wide file on every path lookup — and the shim resolves paths
+    // under a 250 ms deadline. Policy changes take effect on the next process,
+    // which for the shim is the next hook and for the daemon is a restart.
+    #[cfg(not(test))]
+    {
+        static ALLOWED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ALLOWED.get_or_init(overrides_allowed_uncached)
+    }
+    // Tests move the machine-wide file around within one process, so a cache
+    // here would answer the first test's question for every test after it.
+    #[cfg(test)]
+    overrides_allowed_uncached()
+}
+
+fn overrides_allowed_uncached() -> bool {
+    match system_policy_flag("allow_env_overrides") {
+        // No machine-wide file at all: nobody to enforce this for.
+        Err(NoSystemLayer) => true,
+        Ok(set) => set.unwrap_or(false),
+    }
+}
+
+/// Whether a user-scope `argus uninstall` is theirs to run.
+///
+/// Unset means *allowed*, even on a managed host, and the asymmetry with
+/// [`overrides_allowed`] is deliberate. An override redirects capture while
+/// leaving every file in place, so it is a bypass that looks like an install;
+/// a user-scope uninstall removes wiring the same account could have deleted by
+/// hand, and denying it by default would only move the same act somewhere argus
+/// never sees. An administrator who wants it refused says so, and gets a
+/// refusal plus the record of the attempt.
+///
+/// A file that no longer parses is read as one that never set the key, which is
+/// the opposite guess to the override gate — there the safe reading is the
+/// restrictive one, here a typo would lock every account on the host out of an
+/// act it can perform with `rm` regardless, and `argus check` already reports
+/// the file itself as BROKEN.
+pub fn user_uninstall_allowed() -> bool {
+    match system_policy_flag("allow_user_uninstall") {
+        Err(NoSystemLayer) => true,
+        Ok(set) => set.unwrap_or(true),
+    }
+}
+
+/// No machine-wide file exists, which each caller reads differently from a file
+/// that exists and leaves the key unset.
+struct NoSystemLayer;
+
+/// One boolean out of `[policy]` in the machine-wide file.
+///
+/// Deliberately not [`crate::config::system_layer`], which validates the table
+/// against `Config` — and building a `Config` builds its defaults, one of which
+/// (the Codex OTLP listener) is derived from `data_dir()`, which is a caller of
+/// this function. The gate needs one boolean out of one file, so it reads that
+/// boolean and never constructs a `Config`.
+///
+/// The cost of skipping validation is that the key is honoured even in a file
+/// the loader rejects on some *other* key. That is the direction to fail in
+/// either way: only an administrator can write the file at all, and a typo in
+/// an unrelated key should not hand back a permission the file plainly states.
+fn system_policy_flag(name: &str) -> Result<Option<bool>, NoSystemLayer> {
+    if let Some(why) = system_config_untrusted() {
+        tracing::warn!("ignoring the machine-wide config: {why}");
+        return Err(NoSystemLayer);
+    }
+    let Ok(text) = std::fs::read_to_string(system_config_path()) else {
+        return Err(NoSystemLayer);
+    };
+    Ok(text
+        .parse::<toml::Table>()
+        .ok()
+        .and_then(|t| t.get("policy")?.as_table()?.get(name)?.as_bool()))
+}
+
+/// The names from [`OVERRIDE_ENV`] that are actually set, in that order.
+///
+/// Names only. Their values are paths a user chose, and one of them
+/// (`ARGUS_RECORD_DIR`) names a directory holding *pre-redaction* envelopes —
+/// reporting where it points would put the location of the unscrubbed copy into
+/// the scrubbed stream.
+pub fn overrides_in_force() -> Vec<String> {
+    OVERRIDE_ENV
+        .iter()
+        .filter(|k| std::env::var_os(k).is_some())
+        .map(|k| (*k).to_string())
+        .collect()
 }
 
 /// The pre-0.2 location, when it is somewhere other than the current one.
@@ -27,7 +217,7 @@ pub fn data_dir() -> PathBuf {
 /// there is nothing to move, and `None` under the env override, where the user
 /// has said exactly where the data goes.
 pub fn legacy_data_dir() -> Option<PathBuf> {
-    if std::env::var("ARGUS_DATA_DIR").is_ok() {
+    if env_override("ARGUS_DATA_DIR").is_some() {
         return None;
     }
     let legacy = dirs::data_dir()?.join("argus");
@@ -200,6 +390,182 @@ pub fn cached_remote_config_path() -> PathBuf {
     data_dir().join("remote-config.cache.toml")
 }
 
+/// The detached signature over the cached policy body, base64 in a text file.
+///
+/// Beside the cache rather than inside it: the signature covers the exact bytes
+/// the server served, so anything that rewrites the body to carry its own
+/// signature would invalidate it. `.toml.sig` and not `.sig`, so the pair still
+/// sorts and reads as one thing in a directory listing.
+pub fn cached_remote_config_sig_path() -> PathBuf {
+    data_dir().join("remote-config.cache.toml.sig")
+}
+
+/// Where the machine-wide config layer lives under `root`.
+///
+/// Takes the root and the platform rather than reading either, so `install
+/// --managed` writes it in the same place `check --managed` looks for it, and
+/// so the suite exercises the Windows layout everywhere — the rule the rest of
+/// the machine-wide layer already follows.
+pub fn system_config_path_in(root: &Path, platform: crate::detect::Platform) -> PathBuf {
+    root.join(match platform {
+        crate::detect::Platform::Windows => "ProgramData/argus/config.toml",
+        crate::detect::Platform::Linux | crate::detect::Platform::MacOS => "etc/argus/config.toml",
+    })
+}
+
+/// What tests treat as the machine-wide config layer.
+///
+/// [`system_config_path`] deliberately ignores `ARGUS_SYSTEM_ROOT` (see there),
+/// so tests cannot reach it by redirecting the root the way the managed-layer
+/// tests do — and must not fall back to the host's real `/etc/argus`, which
+/// would make the suite depend on the developer's own machine. Unset means "no
+/// machine-wide layer", which is what an ordinary host has.
+#[cfg(test)]
+pub(crate) static SYSTEM_CONFIG: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+
+/// Points [`system_config_path`] at `path` until it is dropped.
+///
+/// A guard rather than a setter because the layer outranks everything: a test
+/// that returned early — or failed an assertion — while it was still pointing
+/// at its own temp file would hand that file to every test after it, and the
+/// symptom would be some unrelated test's config quietly coming back wrong.
+#[cfg(test)]
+pub(crate) struct SystemConfig;
+
+#[cfg(test)]
+impl SystemConfig {
+    /// Point the layer at `path`, and refuse to do it silently if that would
+    /// send the calling test out of its own temp directory.
+    ///
+    /// A layer that does not set `allow_env_overrides = true` denies
+    /// `ARGUS_DATA_DIR` — which for a test resting on that variable means every
+    /// path it resolves from that moment on is the *developer's real* data
+    /// directory, and the first `fs::write` lands in it. That is a footgun with
+    /// no legitimate use, so it panics rather than proceeding. Tests about the
+    /// gate itself use [`SystemConfig::set_denying_overrides`].
+    pub(crate) fn set(path: impl Into<PathBuf>) -> Self {
+        let guard = Self::set_denying_overrides(path);
+        assert!(
+            TEST_DATA_DIR
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_some()
+                || overrides_allowed()
+                || std::env::var_os("ARGUS_DATA_DIR").is_none(),
+            "this machine-wide layer denies env overrides while this test's data \
+             directory rests on ARGUS_DATA_DIR, so the rest of it would read and \
+             write the real one. Pin the directory with paths::DataDir::set instead \
+             — or use SystemConfig::set_denying_overrides if the gate is the point."
+        );
+        guard
+    }
+
+    pub(crate) fn set_denying_overrides(path: impl Into<PathBuf>) -> Self {
+        *SYSTEM_CONFIG.lock().unwrap_or_else(|e| e.into_inner()) = Some(path.into());
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for SystemConfig {
+    fn drop(&mut self) {
+        *SYSTEM_CONFIG.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+}
+
+/// The machine-wide config layer: the one file deciding what argus does that
+/// an ordinary account cannot write.
+///
+/// Unlike every other machine-wide path, this one does **not** honour
+/// `ARGUS_SYSTEM_ROOT`. That variable comes out of the watched agent's
+/// environment like any other, and a layer that stops applying because a line
+/// in `~/.zshrc` pointed argus at an empty directory is not a layer — it is a
+/// suggestion. The redirect stays where it is useful and harmless: choosing
+/// where an *install* writes.
+pub fn system_config_path() -> PathBuf {
+    #[cfg(test)]
+    {
+        return SYSTEM_CONFIG
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .unwrap_or_default();
+    }
+    #[cfg(not(test))]
+    {
+        let platform = crate::detect::Platform::host();
+        let root = Path::new(match platform {
+            crate::detect::Platform::Windows => "C:\\",
+            crate::detect::Platform::Linux | crate::detect::Platform::MacOS => "/",
+        });
+        system_config_path_in(root, platform)
+    }
+}
+
+/// `Some(why)` when the file at [`system_config_path`] is not one an ordinary
+/// account was barred from writing.
+///
+/// The machine-wide layer outranks every other layer *because* only an
+/// administrator can write it. Nothing checked that until this existed, and the
+/// gap is not theoretical: `%ProgramData%` grants standard accounts the right
+/// to create files and directories, and the creator owns what it creates. On a
+/// host the fleet never managed, a user could write
+/// `C:\ProgramData\argus\config.toml` themselves — and the layer they wrote
+/// would outrank the remote policy, deny nothing, and turn `argus check`'s
+/// honest "this host is not policy-managed" into "machine-wide config in
+/// force". False assurance is the one failure this project cannot afford, since
+/// the whole point of the layer is to be the thing that ends an argument.
+///
+/// An untrusted layer is treated as no layer at all, plus a finding. That is
+/// the correct direction: whoever wrote it gets back the unmanaged host they
+/// already had — no permission they did not have, no policy they chose — and
+/// `integrity::check_config` reports the file, so the state is visible rather
+/// than merely refused.
+pub(crate) fn system_config_untrusted() -> Option<String> {
+    // Tests point the layer at a temp file they own by construction, so the
+    // real check would fail every one of them. It is injected instead, which is
+    // also the only way to exercise what the rest of the system does with an
+    // untrusted layer — the ownership decision itself is `trust`'s to test.
+    #[cfg(test)]
+    {
+        return SYSTEM_CONFIG_TRUST
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+    }
+    #[cfg(not(test))]
+    crate::trust::writable_by_non_admin(&system_config_path())
+}
+
+/// Why tests should treat the machine-wide layer as untrusted; `None` (the
+/// default) means trusted, which is what every test but the gate's own wants.
+#[cfg(test)]
+pub(crate) static SYSTEM_CONFIG_TRUST: std::sync::Mutex<Option<String>> =
+    std::sync::Mutex::new(None);
+
+/// Makes [`system_config_untrusted`] answer `why` until it is dropped.
+#[cfg(test)]
+pub(crate) struct UntrustedSystemConfig;
+
+#[cfg(test)]
+impl UntrustedSystemConfig {
+    pub(crate) fn set(why: &str) -> Self {
+        *SYSTEM_CONFIG_TRUST
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(why.to_string());
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for UntrustedSystemConfig {
+    fn drop(&mut self) {
+        *SYSTEM_CONFIG_TRUST
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
+    }
+}
+
 /// The secret Codex presents to this install's OTLP receiver.
 ///
 /// Inside the data directory rather than beside Codex's own config, because
@@ -211,8 +577,8 @@ pub fn codex_token_path() -> PathBuf {
 /// Name used by `interprocess` local sockets. Filesystem path on Unix,
 /// named pipe on Windows. Env override keeps parallel tests isolated.
 pub fn socket_name() -> String {
-    if let Ok(name) = std::env::var("ARGUS_SOCKET") {
-        return name;
+    if let Some(name) = env_override("ARGUS_SOCKET") {
+        return name.to_string_lossy().into_owned();
     }
     #[cfg(unix)]
     {
@@ -324,6 +690,37 @@ pub fn create_private_dir(dir: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)
 }
 
+/// Create `dir` and any missing parent, traversable by every account.
+///
+/// The exact inverse of [`create_private_dir`], and it exists because the
+/// machine-wide layer is the one place argus writes *for* other users: the
+/// policy every account must read, the binary every account's hooks must
+/// execute. Those writes happen under `sudo`, so they inherit root's umask,
+/// and a hardened host sets it to 077 — which would make the directory 0700
+/// and put the file out of reach however carefully the file's own mode was
+/// set. `install --managed` would report success and monitor nobody.
+///
+/// Only levels this call actually creates are chmodded. A directory that was
+/// already there belongs to whoever made it, and widening `/usr/local` because
+/// argus happened to install underneath it is not argus's decision to make.
+pub fn create_shared_dir(dir: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        let missing: Vec<PathBuf> = dir
+            .ancestors()
+            .take_while(|p| !p.exists())
+            .map(Path::to_path_buf)
+            .collect();
+        std::fs::create_dir_all(dir)?;
+        for level in missing {
+            std::fs::set_permissions(&level, std::os::unix::fs::PermissionsExt::from_mode(0o755))?;
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    std::fs::create_dir_all(dir)
+}
+
 /// Write `body` to `path`, owner-only from the instant the file exists.
 ///
 /// The file counterpart of [`create_private_dir`], and it exists for the same
@@ -348,6 +745,128 @@ pub fn write_private(path: &Path, body: &[u8]) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The one-line bypass this gate exists for: `export ARGUS_DATA_DIR=…` in
+    /// a shell profile is inherited by the shim, and every path argus resolves
+    /// moves with it — buffer, spool, config, and the socket the daemon is
+    /// listening on. A host whose administrator deployed a machine-wide file
+    /// must not lose all of that to a line in `~/.zshrc`.
+    #[test]
+    fn a_managed_host_ignores_every_override_it_was_not_granted() {
+        let dir = tempfile::tempdir().unwrap();
+        let sys = dir.path().join("system.toml");
+        std::fs::write(&sys, "[capture]\nprompts = true\n").unwrap();
+        let _guard = SystemConfig::set_denying_overrides(&sys);
+
+        for name in OVERRIDE_ENV {
+            unsafe { std::env::set_var(name, dir.path()) };
+        }
+        for name in OVERRIDE_ENV {
+            assert_eq!(env_override(name), None, "{name} survived the layer");
+        }
+        assert_ne!(data_dir(), dir.path(), "capture followed the variable");
+        // The half that matters most: the shim and the daemon resolve the
+        // endpoint through this same function, so a denied `ARGUS_SOCKET`
+        // cannot leave one of them listening where the other is not talking.
+        #[cfg(unix)]
+        assert_eq!(
+            socket_name(),
+            data_dir().join("argus.sock").to_string_lossy()
+        );
+        // Reported all the same. A denied attempt is a better thing for the
+        // SIEM to hold than a silence.
+        assert_eq!(overrides_in_force().len(), OVERRIDE_ENV.len());
+
+        for name in OVERRIDE_ENV {
+            unsafe { std::env::remove_var(name) };
+        }
+    }
+
+    /// A layer the watched account could have written back-fires twice over: it
+    /// denies them nothing they wanted denied, and the *host* now reads as
+    /// managed. Read as no layer at all, they get the unmanaged host they
+    /// already had — and `argus check` says the file is there.
+    #[test]
+    fn a_layer_an_ordinary_account_could_have_written_governs_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let sys = dir.path().join("system.toml");
+        std::fs::write(&sys, "[capture]\nprompts = true\n").unwrap();
+        let _guard = SystemConfig::set_denying_overrides(&sys);
+        assert!(!overrides_allowed(), "control: the layer does deny them");
+
+        let _planted = UntrustedSystemConfig::set("owned by uid 501");
+        assert!(overrides_allowed());
+        assert!(
+            user_uninstall_allowed(),
+            "a planted layer could otherwise refuse an uninstall it never had \
+             the standing to refuse"
+        );
+    }
+
+    /// The layer is what makes a host managed. Every other host — every
+    /// developer running argus on their own laptop — keeps the debugging
+    /// affordances it always had.
+    #[test]
+    fn a_host_with_no_machine_wide_layer_honours_them_as_it_always_did() {
+        let dir = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("ARGUS_DATA_DIR", dir.path()) };
+        assert_eq!(data_dir(), dir.path());
+        unsafe { std::env::remove_var("ARGUS_DATA_DIR") };
+    }
+
+    /// An administrator who wants them back says so, and only an administrator
+    /// can: the key is read from the one file the watched account cannot write.
+    #[test]
+    fn a_layer_that_grants_them_gives_them_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let sys = dir.path().join("system.toml");
+        std::fs::write(&sys, "[policy]\nallow_env_overrides = true\n").unwrap();
+        let _guard = SystemConfig::set(&sys);
+        unsafe { std::env::set_var("ARGUS_DATA_DIR", dir.path()) };
+        assert_eq!(data_dir(), dir.path());
+        unsafe { std::env::remove_var("ARGUS_DATA_DIR") };
+    }
+
+    /// The uninstall gate defaults the other way round from the override gate,
+    /// and only the machine-wide file can close it.
+    #[test]
+    fn a_user_may_unwire_itself_until_the_machine_wide_layer_says_otherwise() {
+        assert!(user_uninstall_allowed(), "an unmanaged host");
+
+        let dir = tempfile::tempdir().unwrap();
+        let _data = DataDir::set(dir.path());
+        let sys = dir.path().join("system.toml");
+
+        std::fs::write(&sys, "[export]\ngzip = true\n").unwrap();
+        let layer = SystemConfig::set(&sys);
+        assert!(user_uninstall_allowed(), "managed, but the key is unset");
+        drop(layer);
+
+        std::fs::write(&sys, "[policy]\nallow_user_uninstall = false\n").unwrap();
+        let layer = SystemConfig::set(&sys);
+        assert!(!user_uninstall_allowed());
+        drop(layer);
+
+        // Unlike the override gate: a typo would lock every account out of an
+        // act it can perform with `rm` regardless, and `check` reports the file
+        // itself as BROKEN either way.
+        std::fs::write(&sys, "[policy\nallow_user_uninstall = false\n").unwrap();
+        let _layer = SystemConfig::set(&sys);
+        assert!(user_uninstall_allowed());
+    }
+
+    /// A typo in `/etc/argus/config.toml` must not be worth more to somebody
+    /// evading monitoring than deleting the file, which they cannot do.
+    #[test]
+    fn a_machine_wide_file_that_does_not_parse_denies_them_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let sys = dir.path().join("system.toml");
+        std::fs::write(&sys, "[policy\nallow_env_overrides = true\n").unwrap();
+        let _guard = SystemConfig::set_denying_overrides(&sys);
+        unsafe { std::env::set_var("ARGUS_DATA_DIR", dir.path()) };
+        assert_eq!(env_override("ARGUS_DATA_DIR"), None);
+        unsafe { std::env::remove_var("ARGUS_DATA_DIR") };
+    }
 
     #[test]
     fn data_dir_respects_env_override() {

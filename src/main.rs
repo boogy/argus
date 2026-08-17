@@ -42,6 +42,13 @@ enum Cmd {
         /// needs its own daemon (socket, OTLP port and buffer are per-user).
         #[arg(long, conflicts_with = "project")]
         managed: bool,
+        /// Install this TOML file as the machine-wide config layer
+        /// (`/etc/argus/config.toml`, `%ProgramData%\argus\config.toml`).
+        /// It outranks both the user's config and remote policy, so whatever
+        /// it pins cannot be weakened on the machine. Validated before it is
+        /// written: a file the loader would skip is no policy at all.
+        #[arg(long, value_name = "FILE", requires = "managed")]
+        policy: Option<std::path::PathBuf>,
     },
     /// Remove argus wiring from tools.
     Uninstall {
@@ -150,9 +157,10 @@ fn main() -> Result<()> {
             dry_run,
             project,
             managed,
+            policy,
         } => match (project, managed) {
             (Some(root), _) => argus::install::run_project(&root, dry_run)?,
-            (None, true) => argus::install::run_managed(dry_run)?,
+            (None, true) => argus::install::run_managed(dry_run, policy.as_deref())?,
             (None, false) => argus::install::run(dry_run)?,
         },
         Cmd::Uninstall { project, managed } => match (project, managed) {

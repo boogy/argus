@@ -205,6 +205,24 @@ pub fn discard(path: &std::path::Path) {
     }
 }
 
+/// How much is waiting on disk: files, and the bytes they occupy.
+///
+/// A read of the directory and nothing more — no parse, no delete — because the
+/// caller is the heartbeat, which must be able to state the backlog without
+/// disturbing it. A spool that keeps growing across heartbeats is a daemon that
+/// is being written to and cannot drain: the shims are still capturing, and the
+/// pipeline behind them is not.
+pub fn depth() -> (u64, u64) {
+    let Ok(entries) = std::fs::read_dir(paths::spool_dir()) else {
+        return (0, 0);
+    };
+    entries
+        .flatten()
+        .filter(|e| e.path().extension().is_some_and(|x| x == "jsonl"))
+        .filter_map(|e| e.metadata().ok())
+        .fold((0, 0), |(n, bytes), m| (n + 1, bytes + m.len()))
+}
+
 /// Take *and* delete everything, in one call.
 ///
 /// Only safe where the caller cannot lose what it is handed — tests, and the
@@ -237,6 +255,7 @@ mod tests {
     fn append_then_drain_returns_envelope_and_empties_spool() {
         let _dir = setup();
         let env = Envelope {
+            env_overrides: Vec::new(),
             cloud_identity: Default::default(),
             source: "codex".into(),
             received_at: chrono::Utc::now(),
@@ -261,6 +280,7 @@ mod tests {
     fn a_truncation_survives_the_spool() {
         let _dir = setup();
         let env = Envelope {
+            env_overrides: Vec::new(),
             cloud_identity: Default::default(),
             source: "codex".into(),
             received_at: chrono::Utc::now(),
@@ -283,6 +303,7 @@ mod tests {
         let _dir = setup();
         for i in 0..5u32 {
             let env = Envelope {
+                env_overrides: Vec::new(),
                 cloud_identity: Default::default(),
                 source: "codex".into(),
                 received_at: chrono::Utc::now(),
@@ -318,6 +339,7 @@ mod tests {
         let _dir = setup();
         for i in 0..5u32 {
             let env = Envelope {
+                env_overrides: Vec::new(),
                 cloud_identity: Default::default(),
                 source: "codex".into(),
                 received_at: chrono::Utc::now(),
@@ -347,6 +369,7 @@ mod tests {
 
     fn env(n: u32) -> Envelope {
         Envelope {
+            env_overrides: Vec::new(),
             cloud_identity: Default::default(),
             source: "codex".into(),
             received_at: chrono::Utc::now(),
@@ -470,6 +493,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let _dir = setup();
         let env = Envelope {
+            env_overrides: Vec::new(),
             cloud_identity: Default::default(),
             source: "codex".into(),
             received_at: chrono::Utc::now(),

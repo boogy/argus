@@ -58,6 +58,31 @@ Run `argus status` any time to see the resolved config, buffered event
 count, and whether the daemon is reachable. Run `argus uninstall` to
 cleanly remove all wiring.
 
+### The daemon's supervisor
+
+`argus install` also writes a supervisor for the daemon itself — whether or not
+a tool was detected, since a host that installs its first agent tomorrow needs
+the daemon that was already running today:
+
+| Platform | Unit                                                | Behaviour                     |
+| -------- | --------------------------------------------------- | ----------------------------- |
+| macOS    | `~/Library/LaunchAgents/io.argus.daemon.plist`       | `RunAtLoad` + `KeepAlive`     |
+| Linux    | `~/.config/systemd/user/argus.service`               | `Restart=always`              |
+| Windows  | `%APPDATA%\…\Start Menu\Programs\Startup\argus.cmd` | runs at logon                 |
+
+macOS and Linux units are loaded immediately, so the daemon is running before
+the first agent starts and comes back if it is killed. Windows starts it at the
+next logon; a daemon killed mid-session there is restarted by the next hook
+invocation, as it was before.
+
+On Linux, a systemd **user** manager only runs while the user has a session.
+Run `loginctl enable-linger $USER` if the daemon should survive logout — on a
+build box or any host reached over SSH, that is usually what you want.
+
+`argus check` holds the unit to the same byte-for-byte standard as the hook
+wiring and probes the socket behind it — see [`argus
+check`](troubleshooting.md#the-daemon-and-its-supervisor).
+
 ## Machine-wide wiring (`--managed`)
 
 `argus install --managed` writes into the administrator-owned layer each tool
@@ -70,6 +95,10 @@ directory: anyone who can be captured by it can also delete it.
 It needs root/Administrator. `--dry-run` does not — it writes nothing — but it
 says so on stderr when the real install would fail, because "the preview worked"
 must not read as "the install will".
+
+Wiring is half of it. Pass `--policy <file>` to put the config that decides what
+gets captured, and where it goes, in the same administrator-owned territory —
+see [The policy the layer enforces](#the-policy-the-layer-enforces).
 
 | Tool        | macOS                                      | Linux               | Windows                        |
 | ----------- | ------------------------------------------ | ------------------- | ------------------------------ |
@@ -148,14 +177,145 @@ or flipped. Unlike `--project`, a _missing_ managed artifact is BROKEN rather
 than silent — passing the flag asserts the layer should be there. Reading it
 needs no privilege, so an MDM compliance script can run it as the logged-in user.
 
+### The binary the layer runs
+
+Hooks an ordinary account cannot edit still name a program, and on a stock Apple
+Silicon laptop the path a user-scope install bakes — `/opt/homebrew/bin/argus` —
+is writable with no privilege at all. Replacing it with `#!/bin/sh\nexit 0`
+leaves the managed layer wired, intact and blind.
+
+So `install --managed` deploys its own copy of argus first and bakes that:
+
+| Platform      | Deployed to                       |
+| ------------- | --------------------------------- |
+| macOS / Linux | `/usr/local/libexec/argus/argus`  |
+| Windows       | `C:\Program Files\argus\argus.exe` |
+
+Off `PATH` deliberately — this copy exists to be run by hooks, not found by
+people, and a directory only root can write is the whole of its value. It is
+installed `0755`: every account runs it, no account but root replaces it. The
+source is digested against the running binary before the copy is made, so the
+one moment argus would launder a tampered build into a trusted location under
+`sudo` is refused instead. `uninstall --managed` removes it, after the hooks
+that referenced it are gone.
+
+Only the machine-wide layer bakes that path. User-scope installs keep pointing
+at the `PATH` alias, so removing the managed layer cannot leave every per-user
+install on the machine running a binary that no longer exists.
+
+`check --managed` reports the deployed path as BROKEN if any directory on the
+way to it is owned by a non-root account or is group- or world-writable — a
+writable parent is a rename away from a replaced binary. And every `check`,
+managed or not, compares each hook's program against the argus running the
+check, so a stub or a wrapper is a finding rather than silence. Pin
+`integrity.binary_sha256` to make that comparison against a digest you
+published rather than one the machine chose — see
+[Config reference](configuration.md#notes-on-specific-keys).
+
+### The policy the layer enforces
+
+Wiring machine-wide settles *whether* the hooks run. What they capture and where
+it goes still comes out of config — and by default the only files that answer
+that live in the user's own data directory, including the remote-policy cache,
+which is an ordinary file under a predictable name. Wiring a machine so it
+cannot be unwired, while leaving `otlp_endpoint` to a file its user can rewrite,
+is half a deployment.
+
+```sh
+sudo argus install --managed --policy ./fleet-policy.toml
+```
+
+That copies the file verbatim — comments and all, so you can diff authored
+against deployed — to the [machine-wide config
+path](configuration.md#machine-wide-config), `0644` in a `0755` directory: every
+account must be able to read the layer that governs it, and root's umask under
+`sudo` would otherwise decide otherwise.
+
+Those permissions are also what argus checks on the way back in: a machine-wide
+file that an ordinary account could have written is read as no layer at all, so
+deploy it as root (or, on Windows, from an elevated shell) and not by copying it
+into place from a user session. See [It has to be a file the user could not have
+written](configuration.md#it-has-to-be-a-file-the-user-could-not-have-written).
+
+It is validated before it is written, and refused if the loader would skip it.
+A machine-wide file with a typo in it is not a weaker policy — the host falls
+straight back to the user's own config, while `/etc/argus` makes it look
+handled. Nothing is wired behind a refused policy either: install time is the
+one moment somebody is watching the output.
+
+A minimal fleet policy is the endpoint, the policy URL and the settings you
+need beyond argument. For the other end of the scale — a template pinning every
+key a watched account could otherwise choose for itself, with the reasoning for
+each — see the [hardened
+baseline](threat-model.md#hardened-baseline-policy). An unpinned key is by
+construction user-controlled, because `argus check --config` only compares the
+keys the policy actually sets.
+
+```toml
+[export]
+otlp_endpoint = "https://collector.internal:4318"
+
+[remote]
+url = "https://config.internal/argus.toml"
+public_key = "kPqjmS…"   # base64 ed25519; policy must verify against it
+
+[redaction]
+enabled = true
+```
+
+`public_key` is what makes the remote half worth as much as this file. Without
+it the policy cache is an ordinary file in the user's data directory that
+anyone can write; with it, an unsigned or edited body is neither cached nor
+applied, and `check` reports it — see [Signing
+it](configuration.md#signing-it) for generating the key and signing a policy.
+It is honoured **only** from this file, because a key the watched account can
+choose is a key they can sign their own policy with.
+
+Deploying this file also stops argus honouring the `ARGUS_*` environment
+variables, which are otherwise read straight out of the watched agent's
+environment — one line in a shell profile moves the buffer, the socket and the
+config to a directory with no daemon behind it. If a host needs them (a
+developer debugging argus itself, a CI image), grant them back explicitly:
+
+```toml
+[policy]
+allow_env_overrides = true
+```
+
+Either way the names of any that are set travel with every event as
+`env.overrides`, so a redirect that is *permitted* is still visible. See [the
+machine-wide config](configuration.md#it-also-turns-the-environment-variables-off).
+
+Leave credentials out of it: this file is world-readable by design, exactly like
+Codex's managed layer, so `[export] headers` here hands the receiver token to
+every account on the machine. `install --managed` warns if you pin one anyway.
+
+The same file decides whether an ordinary account may unwire itself at all:
+
+```toml
+[policy]
+allow_user_uninstall = false
+```
+
+`argus uninstall` then needs root. It is off by default, because a user-scope
+uninstall only removes files that account could have deleted by hand — but
+either way the attempt is exported *before* anything is unwired, as an
+`integrity` record at WARN whose status says whether it went ahead or was
+refused. See [It can refuse a user-scope
+uninstall](configuration.md#it-can-refuse-a-user-scope-uninstall).
+
+`uninstall --managed` removes the policy last, after the wiring — a policy left
+behind governs a machine nothing is wired on.
+
 ### The multi-user consequence
 
 `--managed` wires **tools, not users**, and everything on the receiving end of a
 hook is per-user. Two things follow, and neither is optional:
 
 - **The `argus` binary must be executable by every account on the machine.**
-  The hook command is a path baked into a file every user reads. Install it
-  somewhere only root can execute, and every hook on the machine fails.
+  The hook command is a path baked into a file every user reads. The deployed
+  copy above is `0755` for exactly this reason; if you point the layer at a
+  binary only root can execute, every hook on the machine fails.
 - **Each account needs its own running daemon.** The socket (`0600` in a
   `0700` directory), the Codex OTLP port (derived from the data directory,
   deliberately not fixed), and the SQLite buffer are all per-user by
@@ -163,10 +323,12 @@ hook is per-user. Two things follow, and neither is optional:
   into another's audit trail. One machine-wide hook plus a single daemon
   means every other account just spools to disk and exports nothing.
 
-The daemon autospawns from the first hook invocation, so in practice this is
-satisfied as soon as each user runs an agent once — but a fleet rollout that
-assumes a single daemon covers the host will be wrong about every account but
-one.
+`--managed` writes the all-users supervisor for exactly this reason: one unit,
+loaded separately in every account's login session, so each account gets its own
+daemon without anyone running `argus install`. It is not loaded at install time
+— `sudo` runs in root's session, which supervises nobody — so it takes effect at
+each account's next login. A fleet rollout that assumes a single daemon covers
+the host will be wrong about every account but one.
 
 ---
 

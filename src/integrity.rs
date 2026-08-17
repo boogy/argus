@@ -43,15 +43,21 @@ pub fn check(home: &Path) -> Vec<Finding> {
 ///
 /// The point is not to spot-check individual keys (a determined user just
 /// disables the one that matters) but to confirm policy is in force. Because
-/// the loader is `defaults <- local <- remote` with remote winning, a value
-/// the policy sets *cannot* be weakened locally — so if the policy is loaded
-/// and every policy key is reflected in the effective config, tampering is
-/// inert. Findings are raised when:
-///   - no `[remote].url` is configured (host isn't policy-managed);
+/// the loader puts remote policy and the machine-wide file above the user's own
+/// config, a value either of them sets *cannot* be weakened locally — so if
+/// what they set is reflected in the effective config, tampering is inert.
+/// Findings are raised when:
+///   - a machine-wide `config.toml` exists but the loader skips it — an
+///     administrator's typo, which otherwise reverts the whole fleet to
+///     whatever each user's own file says, silently;
+///   - no `[remote].url` is configured *and* there is no machine-wide file
+///     either (host isn't policy-managed at all);
 ///   - the remote cache is missing (policy never fetched — running on
 ///     local/defaults) or invalid (skipped by the loader);
 ///   - any policy key is not reflected in the effective config (policy
-///     present but not effective).
+///     present but not effective). A key the *machine-wide* file overrides is
+///     not a deviation: it outranks remote policy by design, and reporting it
+///     would make the more locked-down host the one that alerts.
 ///
 /// `expected_url` is the canonical policy URL, passed by the monitor (MDM) —
 /// NOT read from the local config, which the user controls. When set, the
@@ -66,6 +72,17 @@ pub fn check_config(expected_url: Option<&str>) -> Vec<Finding> {
             detail: d,
         }]
     };
+    let system = crate::config::system_layer();
+    // Ahead of everything else: a machine-wide file the loader is skipping is
+    // not a weaker policy, it is *no* policy, and every check below would go on
+    // to describe a host as if the administrator had never written it.
+    let system = match system {
+        crate::config::SystemLayer::Skipped(why) => {
+            return broken(format!("machine-wide config is not in force — {why}"));
+        }
+        other => other,
+    };
+    let managed_locally = matches!(system, crate::config::SystemLayer::Present(_));
     let cfg = crate::config::load();
     let url = cfg.remote.url.as_deref();
     if let Some(exp) = expected_url {
@@ -75,14 +92,38 @@ pub fn check_config(expected_url: Option<&str>) -> Vec<Finding> {
             ));
         }
     } else if url.is_none() {
-        return broken(
-            "no [remote].url — host is not policy-managed; local config is authoritative".into(),
-        );
+        // A machine-wide file with no remote policy behind it is a complete
+        // deployment, not a half-configured one: the keys it pins are already
+        // beyond the user's reach, which is the property the remote policy was
+        // wanted for.
+        return if managed_locally {
+            vec![Finding {
+                tool: "config".into(),
+                ok: true,
+                detail: "machine-wide config in force; no remote policy configured".into(),
+            }]
+        } else {
+            broken(
+                "no [remote].url and no machine-wide config — host is not policy-managed; \
+                 local config is authoritative"
+                    .into(),
+            )
+        };
     }
     let cache = crate::paths::cached_remote_config_path();
     let Ok(text) = std::fs::read_to_string(&cache) else {
         return broken("remote policy not loaded (no cache) — running on local/defaults".into());
     };
+    // Before reading a word of it: the diff below proves the cache and the
+    // effective config agree, and both are files this account can write. Where
+    // a key is pinned, the signature is the only part of this check that says
+    // the policy came from the fleet rather than from whoever is being
+    // monitored by it.
+    if let Err(e) = crate::policysig::check_cache(&text) {
+        return broken(format!(
+            "remote policy cache does not verify against the pinned key, not applied: {e}"
+        ));
+    }
     let policy = match text.parse::<toml::Table>() {
         Ok(t) => t,
         Err(e) => {
@@ -96,15 +137,25 @@ pub fn check_config(expected_url: Option<&str>) -> Vec<Finding> {
             "remote policy cache is type-invalid — skipped by the loader, not effective".into(),
         );
     }
-    // Every leaf the policy sets must be reflected in the effective config.
+    // Every leaf the policy sets must be reflected in the effective config —
+    // except where the machine-wide file deliberately overrides it, which is
+    // the one thing on the machine that is allowed to.
+    let mut expected = policy;
+    if let crate::config::SystemLayer::Present(t) = system {
+        crate::config::deep_merge(&mut expected, t);
+    }
     let effective = crate::config::merged_table();
     let mut deviations = Vec::new();
-    diff_leaves("", &policy, &effective, &mut deviations);
+    diff_leaves("", &expected, &effective, &mut deviations);
     if deviations.is_empty() {
         vec![Finding {
             tool: "config".into(),
             ok: true,
-            detail: "remote policy loaded and effective".into(),
+            detail: if managed_locally {
+                "remote policy and machine-wide config loaded and effective".into()
+            } else {
+                "remote policy loaded and effective".to_string()
+            },
         }]
     } else {
         deviations
@@ -115,6 +166,37 @@ pub fn check_config(expected_url: Option<&str>) -> Vec<Finding> {
                 detail: format!("policy not effective: {d}"),
             })
             .collect()
+    }
+}
+
+/// What the running binary is made of, and whether policy expected this one.
+///
+/// A different question from the wiring checks, which prove the hooks run
+/// *this* binary: that comparison is between two things on the same machine,
+/// so it holds just as well when both were replaced together. Only a digest
+/// chosen off the machine — `[integrity] binary_sha256`, published with the
+/// release — closes that, and the digest is printed either way so an operator
+/// has the value to pin.
+fn check_binary(pin: Option<&str>) -> Finding {
+    let finding = |ok, detail| Finding {
+        tool: "binary".into(),
+        ok,
+        detail,
+    };
+    let Some(sha) = crate::harness::own_binary_digest() else {
+        return finding(false, "cannot read this binary to digest it".into());
+    };
+    match pin {
+        None => finding(true, format!("sha256:{sha} (no digest pinned by policy)")),
+        Some(p) if p.eq_ignore_ascii_case(&sha) => {
+            finding(true, format!("sha256:{sha} is the pinned release"))
+        }
+        Some(p) => finding(
+            false,
+            format!(
+                "running sha256:{sha}, policy pins sha256:{p} — this is not the deployed build"
+            ),
+        ),
     }
 }
 
@@ -152,11 +234,23 @@ pub fn check_and_report(
 ) -> bool {
     let mut findings = Vec::new();
     if do_hooks {
-        let hooks = check(&crate::install::home());
+        // First, because every hook finding below is a statement about what
+        // *this* binary expects, and is only worth as much as this binary is.
+        findings.push(check_binary(
+            crate::config::load().integrity.binary_sha256.as_deref(),
+        ));
+        let home = crate::install::home();
+        let hooks = check(&home);
         if hooks.is_empty() {
             println!("hooks: ok (no supported tools detected)");
         }
+        // The supervisor and the socket behind it. Only meaningful next to the
+        // wiring — a host nothing is wired on has nothing to keep alive — so
+        // the wiring's own emptiness decides whether a missing unit is a
+        // finding or a fact about a machine that runs no agents.
+        let wired = !hooks.is_empty();
         findings.extend(hooks);
+        findings.extend(crate::service::check(&home, wired));
         // Additive, never a substitute: a repository's hooks run *alongside*
         // the user's, so a broken repository is a finding on top of whatever
         // the user-level check said, not instead of it.
@@ -209,29 +303,98 @@ fn finding_event(f: &Finding) -> Event {
     )
 }
 
+/// The result of the last full self-check, for readers that need to state the
+/// posture rather than react to a change in it.
+///
+/// Exists so the heartbeat and the integrity loop can share one pass over the
+/// wiring instead of each running its own on its own schedule — the checks read
+/// files and hash them, and in Phase 3 they will exec the binary, none of which
+/// wants doing twice.
+///
+/// `checked_at` is the load-bearing field. Findings alone cannot distinguish
+/// "nothing is broken" from "no check has run since this daemon came up", and
+/// those are the two states a tamper alert most needs to tell apart.
+#[derive(Debug, Clone, Default)]
+pub struct Summary {
+    pub checked_at: Option<std::time::Instant>,
+    /// Tools checked and intact.
+    pub ok: u32,
+    /// `tool: detail`, one per broken finding.
+    pub broken: Vec<String>,
+}
+
+pub type SharedSummary = Arc<RwLock<Summary>>;
+
+/// Every check this host is subject to, in one pass.
+///
+/// The two conditional checks are conditional for opposite reasons.
+/// `check_config` is skipped when no policy URL is configured because it would
+/// otherwise report "this host is not policy-managed" once an hour on every
+/// developer laptop running argus locally — a true statement, and not one
+/// anybody needs repeated. `check_managed` is skipped unless
+/// `[integrity] managed` says the layer was deployed, because a missing managed
+/// artifact is BROKEN by design, so running it unasked reports tampering on
+/// every machine that never had the layer at all.
+fn check_all(cfg: &Config) -> Vec<Finding> {
+    let home = crate::install::home();
+    let mut findings = check(&home);
+    let wired = !findings.is_empty();
+    findings.extend(crate::service::check(&home, wired));
+    findings.push(check_binary(cfg.integrity.binary_sha256.as_deref()));
+    if cfg.remote.url.is_some() {
+        // `None`: the daemon has no source for the canonical URL that the user
+        // does not also control, so it can only assert that *a* policy is
+        // loaded and effective. Phase 2's system layer is what turns this into
+        // an authenticated comparison.
+        findings.extend(check_config(None));
+    }
+    if cfg.integrity.managed {
+        let platform = crate::detect::Platform::host();
+        let root = crate::harness::system_root(platform);
+        findings.extend(crate::harness::check_managed(&root.path, platform));
+    }
+    findings
+}
+
 /// Daemon task: periodically self-check wiring and buffer a finding for every
 /// *broken* tool (which then exports to the SIEM/collector like any event).
-/// Healthy tools emit nothing — an "ok" every interval would be pure noise;
-/// whether the daemon itself is alive is answered by `argus check` /
-/// process monitoring, not here. A broken finding re-emits each cycle until
-/// re-install, keeping the alert live.
-pub async fn integrity_loop(shared: Arc<RwLock<Config>>, buffer: Arc<Buffer>) {
+/// Healthy tools emit nothing — an "ok" every interval would be pure noise. A
+/// broken finding re-emits each cycle until re-install, keeping the alert live.
+///
+/// Whether the daemon itself is alive is *not* answered here, and cannot be:
+/// this loop's silence is the same silence a stopped daemon produces. That is
+/// what [`crate::health`] is for, and it is why the summary is published rather
+/// than merely acted on — the heartbeat carries the posture out on a schedule,
+/// so an absence of findings is only trusted when something also says a check
+/// ran.
+pub async fn integrity_loop(
+    shared: Arc<RwLock<Config>>,
+    buffer: Arc<Buffer>,
+    summary: SharedSummary,
+) {
     loop {
-        let (enabled, interval) = {
-            let cfg = shared.read().unwrap();
-            (cfg.integrity.enabled, cfg.integrity.interval_secs)
-        };
-        if enabled {
-            for f in check(&crate::install::home()) {
-                if !f.ok {
-                    tracing::warn!("integrity: {} {}", f.tool, f.detail);
-                    if let Err(e) = buffer.push(&finding_event(&f)) {
-                        tracing::error!("integrity buffer push failed: {e}");
-                    }
+        let cfg = { shared.read().unwrap_or_else(|e| e.into_inner()).clone() };
+        if cfg.integrity.enabled {
+            let findings = check_all(&cfg);
+            let mut next = Summary {
+                checked_at: Some(std::time::Instant::now()),
+                ok: 0,
+                broken: Vec::new(),
+            };
+            for f in &findings {
+                if f.ok {
+                    next.ok += 1;
+                    continue;
+                }
+                tracing::warn!("integrity: {} {}", f.tool, f.detail);
+                next.broken.push(format!("{}: {}", f.tool, f.detail));
+                if let Err(e) = buffer.push(&finding_event(f)) {
+                    tracing::error!("integrity buffer push failed: {e}");
                 }
             }
+            *summary.write().unwrap_or_else(|e| e.into_inner()) = next;
         }
-        tokio::time::sleep(Duration::from_secs(interval.max(30))).await;
+        tokio::time::sleep(Duration::from_secs(cfg.integrity.interval_secs.max(30))).await;
     }
 }
 
@@ -256,13 +419,7 @@ mod tests {
         }
         let claude = dir.path().join(".claude");
         std::fs::create_dir_all(&claude).unwrap();
-        let exe = dir.path().join("argus");
-        std::fs::write(&exe, "#!/bin/sh\nexit 0\n").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        let exe = crate::harness::fake_argus(dir.path(), "argus");
         // Written by `install` rather than hand-assembled here. The old
         // version built each entry by iterating `EVENTS` — the same constant
         // `check` reads — so the two sides moved together and a hook dropped
@@ -310,28 +467,44 @@ mod tests {
     #[test]
     fn check_detects_a_hook_entry_that_is_not_the_one_argus_writes() {
         type Edit = fn(&mut serde_json::Value);
-        let cases: [(&str, Edit); 3] = [
+        let cases: [(&str, Edit, &str); 3] = [
             // Same program, different arguments: the events still arrive and
             // are handed to the wrong adapter, which is worse than silence
             // because the rows look real.
-            ("retargeted at another adapter", |e| {
-                let c = e["hooks"][0]["command"].as_str().unwrap().to_string();
-                e["hooks"][0]["command"] =
-                    serde_json::json!(c.replace("--source claude-code", "--source codex"));
-            }),
+            (
+                "retargeted at another adapter",
+                |e| {
+                    let c = e["hooks"][0]["command"].as_str().unwrap().to_string();
+                    e["hooks"][0]["command"] =
+                        serde_json::json!(c.replace("--source claude-code", "--source codex"));
+                },
+                "hooks altered: PreToolUse",
+            ),
             // Wired, launched, killed before it can hand anything over.
-            ("timeout zeroed", |e| {
-                e["hooks"][0]["timeout"] = serde_json::json!(0)
-            }),
+            (
+                "timeout zeroed",
+                |e| e["hooks"][0]["timeout"] = serde_json::json!(0),
+                "hooks altered: PreToolUse",
+            ),
             // A hook body appended beside ours *inside* our own entry runs
             // under our marker, so `is_ours` alone would keep calling it ours.
-            ("a second hook body smuggled into our entry", |e| {
-                let extra =
-                    serde_json::json!({ "type": "command", "command": "curl evil.example" });
-                e["hooks"].as_array_mut().unwrap().push(extra);
-            }),
+            // Reported by name rather than as an altered entry: every command
+            // in one of our entries is checked against argus's own bytes, and
+            // naming the smuggled program is the more useful of the two things
+            // that are true here. Asserted only on the program name, because
+            // whether `curl` resolves on PATH differs per platform and decides
+            // which of the two command findings fires.
+            (
+                "a second hook body smuggled into our entry",
+                |e| {
+                    let extra =
+                        serde_json::json!({ "type": "command", "command": "curl evil.example" });
+                    e["hooks"].as_array_mut().unwrap().push(extra);
+                },
+                "curl",
+            ),
         ];
-        for (what, edit) in cases {
+        for (what, edit, want) in cases {
             let home = wired_claude_home();
             let path = home.path().join(".claude/settings.json");
             let mut doc: serde_json::Value =
@@ -344,11 +517,7 @@ mod tests {
                 .find(|f| f.tool == "claude-code")
                 .unwrap();
             assert!(!cc.ok, "{what}: {cc:?}");
-            assert!(
-                cc.detail.contains("hooks altered") && cc.detail.contains("PreToolUse"),
-                "{what}: {}",
-                cc.detail
-            );
+            assert!(cc.detail.contains(want), "{what}: {}", cc.detail);
         }
     }
 
@@ -392,6 +561,29 @@ mod tests {
             .find(|f| f.tool == "opencode")
             .unwrap();
         assert!(!oc.ok, "missing plugin file must be flagged");
+    }
+
+    /// The one check that can outlive a machine-wide compromise: the digest is
+    /// chosen by whoever publishes the release, not by the host comparing
+    /// itself against itself.
+    #[test]
+    fn an_unpinned_binary_is_reported_and_a_mispinned_one_is_broken() {
+        let sha = crate::harness::own_binary_digest().expect("a test can read its own binary");
+
+        let unpinned = check_binary(None);
+        assert!(unpinned.ok, "no pin is not a finding: {unpinned:?}");
+        assert!(
+            unpinned.detail.contains(&sha),
+            "an operator has no value to pin: {}",
+            unpinned.detail
+        );
+
+        // Hex case is a formatting choice of whoever wrote the policy file.
+        assert!(check_binary(Some(&sha.to_uppercase())).ok);
+
+        let wrong = check_binary(Some(&"ab".repeat(32)));
+        assert!(!wrong.ok, "a build nobody published passed: {wrong:?}");
+        assert!(wrong.detail.contains(&sha), "{}", wrong.detail);
     }
 
     #[test]
@@ -465,13 +657,11 @@ mod tests {
         }
     }
 
-    fn set_data_dir() -> tempfile::TempDir {
+    fn set_data_dir() -> (tempfile::TempDir, crate::paths::DataDir) {
         let dir = tempfile::tempdir().unwrap();
-        unsafe {
-            std::env::set_var("ARGUS_DATA_DIR", dir.path());
-        }
+        let data = crate::paths::DataDir::set(dir.path());
         std::fs::create_dir_all(dir.path()).unwrap();
-        dir
+        (dir, data)
     }
 
     #[test]
@@ -573,6 +763,118 @@ mod tests {
         assert!(fs.iter().all(|f| f.ok), "policy effective => ok: {fs:?}");
     }
 
+    /// Consistency is not authenticity. Diffing the cache against the merged
+    /// config proves two user-writable files agree — which they always will,
+    /// since one of them is built from the other. Where a key is pinned, the
+    /// check has to say who wrote the cache, and "nobody with the key" is
+    /// BROKEN however consistent the machine looks.
+    #[test]
+    fn an_unsigned_policy_cache_is_broken_however_well_it_agrees_with_itself() {
+        let d = set_data_dir();
+        let (sk, pk) = crate::policysig::testkeys::keypair();
+        let body = "[capture]\ntool_inputs = true\n";
+        std::fs::write(
+            crate::paths::config_path(),
+            "[remote]\nurl = \"https://p\"\n",
+        )
+        .unwrap();
+        std::fs::write(crate::paths::cached_remote_config_path(), body).unwrap();
+        assert!(
+            check_config(None)[0].ok,
+            "unpinned, this is the old ok case"
+        );
+
+        let sys = d.0.path().join("system.toml");
+        std::fs::write(&sys, format!("[remote]\npublic_key = \"{pk}\"\n")).unwrap();
+        let _guard = crate::paths::SystemConfig::set(&sys);
+        let f = &check_config(None)[0];
+        assert!(!f.ok, "{f:?}");
+        assert!(f.detail.contains("does not verify"), "{f:?}");
+
+        std::fs::write(
+            crate::paths::cached_remote_config_sig_path(),
+            crate::policysig::testkeys::sign(&sk, body),
+        )
+        .unwrap();
+        assert!(check_config(None)[0].ok, "{:?}", check_config(None));
+    }
+
+    /// "Not policy-managed" is the right verdict for a laptop with nothing but
+    /// its own config, and the wrong one for a host whose administrator chose
+    /// to pin the settings locally instead of serving them. Both are fully
+    /// deployed; only one of them is a host anybody can reconfigure.
+    #[test]
+    fn a_machine_wide_config_is_policy_management_even_with_no_remote_url() {
+        let d = set_data_dir();
+        std::fs::write(crate::paths::config_path(), "[capture]\nprompts = true\n").unwrap();
+        assert!(!check_config(None)[0].ok, "no layer, no policy");
+
+        let sys = d.0.path().join("system.toml");
+        std::fs::write(&sys, "[capture]\nprompts = true\n").unwrap();
+        let _guard = crate::paths::SystemConfig::set(&sys);
+        let f = &check_config(None)[0];
+        assert!(f.ok, "{f:?}");
+        assert!(f.detail.contains("machine-wide config in force"), "{f:?}");
+    }
+
+    /// The file being there is not the control — the loader applying it is.
+    /// A machine-wide file with a typo in it leaves the host running on the
+    /// user's own config while looking, to anyone who goes and reads
+    /// `/etc/argus`, entirely governed.
+    #[test]
+    fn a_machine_wide_config_the_loader_skips_is_broken_not_merely_absent() {
+        let d = set_data_dir();
+        std::fs::write(
+            crate::paths::config_path(),
+            "[remote]\nurl = \"https://p\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            crate::paths::cached_remote_config_path(),
+            "[redaction]\nenabled = true\n",
+        )
+        .unwrap();
+        assert!(check_config(None).iter().all(|f| f.ok), "baseline");
+
+        let sys = d.0.path().join("system.toml");
+        std::fs::write(&sys, "[capture\nprompts = true\n").unwrap();
+        let _guard = crate::paths::SystemConfig::set(&sys);
+        let f = &check_config(None)[0];
+        assert!(!f.ok, "{f:?}");
+        assert!(f.detail.contains("not in force"), "{f:?}");
+    }
+
+    /// A host locked down *harder* than the served policy must not be the one
+    /// that alerts. The machine-wide layer sits above the remote cache
+    /// precisely so an administrator can pin a key beyond the fleet default,
+    /// and reporting that as "policy not effective" would train operators to
+    /// ignore the finding that catches real tampering.
+    #[test]
+    fn the_machine_wide_layer_overriding_remote_policy_is_not_a_deviation() {
+        let d = set_data_dir();
+        std::fs::write(
+            crate::paths::config_path(),
+            "[remote]\nurl = \"https://p\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            crate::paths::cached_remote_config_path(),
+            "[capture]\nprompts = false\ntool_inputs = true\n",
+        )
+        .unwrap();
+        let sys = d.0.path().join("system.toml");
+        std::fs::write(&sys, "[capture]\nprompts = true\n").unwrap();
+        let _guard = crate::paths::SystemConfig::set(&sys);
+
+        assert!(
+            crate::config::load().capture.prompts,
+            "the layer has to actually win for the finding to be about anything"
+        );
+        let fs = check_config(None);
+        assert!(fs.iter().all(|f| f.ok), "{fs:?}");
+        assert!(fs[0].detail.contains("machine-wide"), "{fs:?}");
+    }
+
     #[test]
     fn broken_finding_maps_to_warn_severity() {
         let f = Finding {
@@ -580,7 +882,10 @@ mod tests {
             ok: false,
             detail: "missing hooks: PreToolUse".into(),
         };
-        let body = crate::export::to_otlp_body(std::slice::from_ref(&finding_event(&f)));
+        let body = crate::export::to_otlp_body(
+            std::slice::from_ref(&finding_event(&f)),
+            &crate::export::Resource::default(),
+        );
         let rec = &body["resourceLogs"][0]["scopeLogs"][0]["logRecords"][0];
         assert_eq!(rec["severityText"], "WARN");
         let attrs = rec["attributes"].as_array().unwrap();

@@ -12,6 +12,38 @@ pub struct Config {
     pub spool: SpoolCfg,
     pub codex: CodexCfg,
     pub integrity: IntegrityCfg,
+    pub health: HealthCfg,
+    pub policy: PolicyCfg,
+}
+
+/// Keys that say what an *account* on this machine may do to argus, as opposed
+/// to what argus captures.
+///
+/// Only ever read from the machine-wide layer — a permission the constrained
+/// party grants itself is not a permission. They are declared here so that a
+/// machine-wide file setting them still deserializes as a `Config`; an unknown
+/// key would make the loader skip the whole layer, which would turn "lock this
+/// host down" into "apply no policy at all".
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct PolicyCfg {
+    /// Whether `ARGUS_*` variables out of the watched agent's environment are
+    /// honoured.
+    ///
+    /// Unset means *denied* on any host that has a machine-wide file at all:
+    /// an administrator who deployed one has said this host is theirs to
+    /// configure, and an override that survives that is a one-line bypass of
+    /// everything else in the file. Hosts without the layer are unaffected —
+    /// there is nobody there to enforce it for. Set it to `true` to keep the
+    /// variables working on a managed host.
+    pub allow_env_overrides: Option<bool>,
+    /// Whether an ordinary account may run `argus uninstall` on its own wiring.
+    ///
+    /// Unset means *allowed*, which is the other way round from
+    /// `allow_env_overrides`; see [`crate::paths::user_uninstall_allowed`] for
+    /// why the two defaults differ. `false` refuses it without root — and
+    /// either way the attempt is exported before anything is unwired.
+    pub allow_user_uninstall: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -19,12 +51,21 @@ pub struct Config {
 pub struct RemoteCfg {
     pub url: Option<String>,
     pub poll_interval_secs: u64,
+    /// base64 ed25519 public key that remote policy must verify against.
+    ///
+    /// Only read from the machine-wide layer — see [`crate::policysig`] for
+    /// why a key the watched user could set would prove nothing. It is
+    /// declared here so a machine-wide file that sets it still deserializes
+    /// as a `Config`; the loader would otherwise skip the whole layer over an
+    /// unknown key, turning "sign the policy" into "apply no policy at all".
+    pub public_key: Option<String>,
 }
 impl Default for RemoteCfg {
     fn default() -> Self {
         Self {
             url: None,
             poll_interval_secs: 300,
+            public_key: None,
         }
     }
 }
@@ -327,17 +368,66 @@ impl Default for CodexCfg {
 pub struct IntegrityCfg {
     pub enabled: bool,
     pub interval_secs: u64,
+    /// Whether this machine is supposed to carry the `--managed` layer.
+    ///
+    /// Off by default and set by fleet policy, because it is the operator who
+    /// deployed the layer who knows it should be there — and because
+    /// `check_managed` treats a *missing* managed artifact as tampering, which
+    /// is the right answer on a machine that was wired that way and pure noise
+    /// on one that never was. On a fleet, this belongs in the policy the user
+    /// cannot edit; a local `false` then loses to it, which is the point.
+    pub managed: bool,
+    /// The sha256 the fleet expects the argus binary to have, lowercase hex.
+    ///
+    /// Without it, "is this the real argus" can only be answered relative to
+    /// the binary asking — which is the right answer for a laptop and a weak
+    /// one for a fleet, because a machine where *both* copies were replaced
+    /// agrees with itself. Set in policy to the digest of the release that was
+    /// deployed, this makes the hook's program answerable to something the user
+    /// cannot rewrite.
+    ///
+    /// Unset by default: a wrong pin reports every machine as tampered with,
+    /// so it has to be a deliberate act by whoever publishes the release.
+    pub binary_sha256: Option<String>,
 }
 impl Default for IntegrityCfg {
     fn default() -> Self {
         Self {
             enabled: true,
             interval_secs: 3600,
+            managed: false,
+            binary_sha256: None,
         }
     }
 }
 
-/// defaults <- local file <- cached remote (remote is fleet policy, wins).
+/// Liveness heartbeat. On by default, and for a stronger reason than the
+/// integrity check: every way of defeating capture — killing the daemon,
+/// deleting its data directory, blocking the collector — ends in silence, and
+/// silence is indistinguishable from an idle machine unless something is
+/// expected to arrive on a schedule.
+///
+/// Five minutes by default: short enough that an absence alert fires within a
+/// coffee break, long enough that a fleet of ten thousand costs the collector
+/// about thirty events a second. `interval_secs` is floored at 30 for the same
+/// reason the integrity interval is — a typo must not turn the heartbeat into
+/// the load.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct HealthCfg {
+    pub enabled: bool,
+    pub interval_secs: u64,
+}
+impl Default for HealthCfg {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            interval_secs: 300,
+        }
+    }
+}
+
+/// defaults <- local file <- cached remote <- machine-wide file.
 ///
 /// Each layer is validated to deserialize as a `Config` overlay on its own,
 /// and again after merging, before being kept. A syntactically-valid but
@@ -349,19 +439,53 @@ pub fn load() -> Config {
 }
 
 /// The merged config as a raw TOML table (defaults omitted — only what the
-/// files actually set), same precedence as `load`: local file, then cached
-/// remote (remote wins). Exposed so the integrity check can compare the
-/// *effective* config against the remote policy without re-implementing the
-/// merge.
+/// files actually set), same precedence as `load`. Exposed so the integrity
+/// check can compare the *effective* config against the remote policy without
+/// re-implementing the merge.
+///
+/// The order is the order of trust, and the last layer is the point of the
+/// list: the local file and the remote *cache* both live in the per-user data
+/// directory, so a user who would rather not be monitored can write either of
+/// them by hand — hand-authoring a permissive `remote-config.cache.toml` is
+/// not even a subtle trick. The machine-wide file is the only layer whose
+/// contents an ordinary account cannot choose, so it is the only one that can
+/// end an argument, and it goes on top.
+///
+/// A fleet that wants live policy control still has it: leave a key out of the
+/// machine-wide file and the remote policy decides it. What the machine-wide
+/// file pins, it pins for good.
+///
+/// The remote cache carries one extra condition the other two layers do not:
+/// where the machine-wide layer pins `[remote] public_key`, a cache that does
+/// not verify against it is skipped entirely rather than applied — a
+/// hand-written cache is then not policy, it is a file.
 pub fn merged_table() -> toml::Table {
     let mut merged = toml::Table::new();
-    for path in [
-        crate::paths::config_path(),
-        crate::paths::cached_remote_config_path(),
+    // Applying a layer only if the result is still a valid config: one bad key
+    // in a layer must not take the layers under it down with it.
+    let apply = |merged: &mut toml::Table, table: toml::Table, path: &std::path::Path| {
+        let mut candidate = merged.clone();
+        deep_merge(&mut candidate, table);
+        match candidate.clone().try_into::<Config>() {
+            Ok(_) => *merged = candidate,
+            Err(e) => tracing::warn!("ignoring config {path:?}: merge invalidates config: {e}"),
+        }
+    };
+    for (path, signed) in [
+        (crate::paths::config_path(), false),
+        (crate::paths::cached_remote_config_path(), true),
     ] {
         let Ok(text) = std::fs::read_to_string(&path) else {
             continue;
         };
+        // The cache claims to speak for the fleet, and it is a file in the
+        // user's own directory. Where a key is pinned, checking that claim
+        // here rather than only in `check` is what makes signing prevention
+        // instead of a report filed after the policy already applied.
+        if signed && let Err(e) = crate::policysig::check_cache(&text) {
+            tracing::warn!("ignoring unverified remote policy {path:?}: {e}");
+            continue;
+        }
         let table = match text.parse::<toml::Table>() {
             Ok(table) => table,
             Err(e) => {
@@ -373,17 +497,66 @@ pub fn merged_table() -> toml::Table {
             tracing::warn!("ignoring type-mismatched config {path:?}: {e}");
             continue;
         }
-        let mut candidate = merged.clone();
-        deep_merge(&mut candidate, table);
-        match candidate.clone().try_into::<Config>() {
-            Ok(_) => merged = candidate,
-            Err(e) => tracing::warn!("ignoring config {path:?}: merge invalidates config: {e}"),
+        apply(&mut merged, table, &path);
+    }
+    // Last, and through `system_layer` rather than another read of the same
+    // file: what the loader applies and what `check` reports have to be the
+    // same decision, including the ownership gate, or `check` reports a policy
+    // that is not in force.
+    match system_layer() {
+        SystemLayer::Absent => {}
+        SystemLayer::Skipped(why) => tracing::warn!("ignoring the machine-wide config: {why}"),
+        SystemLayer::Present(table) => {
+            apply(&mut merged, table, &crate::paths::system_config_path());
         }
     }
     merged
 }
 
-fn deep_merge(base: &mut toml::Table, over: toml::Table) {
+/// The machine-wide layer as the loader sees it.
+///
+/// Separate from [`merged_table`], which only needs to know what to apply,
+/// because the *reason* a machine-wide file is not applying is the interesting
+/// half: an administrator's typo silently reverts a whole fleet to whatever
+/// each user's own config says, and nothing would otherwise say so.
+pub enum SystemLayer {
+    /// No machine-wide file — an ordinary, unmanaged host.
+    Absent,
+    /// Present, and skipped by the loader for the reason given.
+    Skipped(String),
+    Present(toml::Table),
+}
+
+/// Read and validate the machine-wide layer, exactly as [`merged_table`] does.
+pub fn system_layer() -> SystemLayer {
+    let path = crate::paths::system_config_path();
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return SystemLayer::Absent;
+    };
+    // Before the contents are read as policy, the question of whether this file
+    // speaks for the machine at all. See `paths::system_config_untrusted`.
+    if let Some(why) = crate::paths::system_config_untrusted() {
+        return SystemLayer::Skipped(format!(
+            "{} does not carry the authority of the machine: {why}",
+            path.display()
+        ));
+    }
+    let table = match text.parse::<toml::Table>() {
+        Ok(t) => t,
+        Err(e) => {
+            return SystemLayer::Skipped(format!("{} is not valid TOML: {e}", path.display()));
+        }
+    };
+    if let Err(e) = table.clone().try_into::<Config>() {
+        return SystemLayer::Skipped(format!(
+            "{} does not match the config schema: {e}",
+            path.display()
+        ));
+    }
+    SystemLayer::Present(table)
+}
+
+pub(crate) fn deep_merge(base: &mut toml::Table, over: toml::Table) {
     for (k, v) in over {
         match (base.get_mut(&k), v) {
             (Some(toml::Value::Table(bt)), toml::Value::Table(ot)) => deep_merge(bt, ot),
@@ -394,11 +567,26 @@ fn deep_merge(base: &mut toml::Table, over: toml::Table) {
     }
 }
 
-/// Returns Ok(None) on 304; Ok(Some((body, etag))) on 200.
-pub async fn fetch_remote(
-    url: &str,
-    etag: Option<&str>,
-) -> anyhow::Result<Option<(String, Option<String>)>> {
+/// One fetched policy: the body the server served, its ETag, and — when this
+/// host pins a key — the detached signature that says the server is the one
+/// that served it.
+#[derive(Debug)]
+pub struct RemotePolicy {
+    pub body: String,
+    pub etag: Option<String>,
+    /// base64 ed25519 signature over `body`, `None` on a host pinning no key.
+    pub signature: Option<String>,
+}
+
+/// Returns Ok(None) on 304; Ok(Some(policy)) on 200.
+///
+/// Where a key is pinned this also fetches `<url>.sig` and verifies the body
+/// before returning it, so an unsigned or mismatched body never reaches the
+/// caching path at all. A signature the server cannot produce is an error and
+/// not a downgrade: the caller keeps polling and keeps running on the last
+/// cache that *did* verify, which is the behaviour a policy server rolled back
+/// mid-deploy deserves.
+pub async fn fetch_remote(url: &str, etag: Option<&str>) -> anyhow::Result<Option<RemotePolicy>> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         .build()?;
@@ -419,7 +607,28 @@ pub async fn fetch_remote(
     let body = resp.text().await?;
     // Validate before caching: a bad remote config must not poison the agent.
     body.parse::<toml::Table>()?;
-    Ok(Some((body, new_etag)))
+
+    let signature = match crate::policysig::pinned_key() {
+        None => None,
+        Some(key) => {
+            let sig_url = crate::policysig::sig_url(url);
+            let sig = client
+                .get(&sig_url)
+                .send()
+                .await?
+                .error_for_status()?
+                .text()
+                .await?;
+            crate::policysig::verify(body.as_bytes(), &sig, &key)
+                .map_err(|e| anyhow::anyhow!("policy at {url} failed verification: {e}"))?;
+            Some(sig)
+        }
+    };
+    Ok(Some(RemotePolicy {
+        body,
+        etag: new_etag,
+        signature,
+    }))
 }
 
 /// One poll's worth of "the server sent a new body": validate it, cache it,
@@ -431,9 +640,9 @@ pub async fn fetch_remote(
 fn apply_remote(
     shared: &std::sync::RwLock<Config>,
     etag: &mut Option<String>,
-    body: &str,
-    new_etag: Option<String>,
+    policy: &RemotePolicy,
 ) {
+    let body = &policy.body;
     // Gate the cache write on Config-shape validity, not just TOML syntax: a
     // type-mismatched remote body must not overwrite the last-known-good cache.
     match body
@@ -443,6 +652,17 @@ fn apply_remote(
         Ok(_) => {
             let cache = crate::paths::cached_remote_config_path();
             let tmp = cache.with_extension("tmp");
+            // The signature first, and deliberately: the loader refuses a pair
+            // that does not match, so a crash between the two writes leaves a
+            // cache that is skipped rather than one that is trusted. Fetching
+            // it again next poll is the cheap half of that trade.
+            if let Some(sig) = &policy.signature {
+                let path = crate::paths::cached_remote_config_sig_path();
+                if let Err(e) = std::fs::write(&path, sig) {
+                    tracing::warn!("could not cache policy signature at {path:?}: {e}");
+                    return;
+                }
+            }
             match std::fs::write(&tmp, body).and_then(|()| std::fs::rename(&tmp, &cache)) {
                 Ok(()) => {
                     // Only now. An ETag committed ahead of the write makes
@@ -452,7 +672,7 @@ fn apply_remote(
                     // being applied again, on the quiet path where 304 means
                     // "you already have it". The daemon would look healthy
                     // while running on local config alone.
-                    *etag = new_etag;
+                    *etag = policy.etag.clone();
                     *shared.write().unwrap() = load();
                     tracing::info!("remote config applied");
                 }
@@ -479,9 +699,7 @@ pub async fn poll_loop(shared: std::sync::Arc<std::sync::RwLock<Config>>) {
         };
         if let Some(url) = url {
             match fetch_remote(&url, etag.as_deref()).await {
-                Ok(Some((body, new_etag))) => {
-                    apply_remote(&shared, &mut etag, &body, new_etag);
-                }
+                Ok(Some(policy)) => apply_remote(&shared, &mut etag, &policy),
                 Ok(None) => {}
                 Err(e) => tracing::warn!("remote config fetch failed (using cache): {e}"),
             }
@@ -494,12 +712,20 @@ pub async fn poll_loop(shared: std::sync::Arc<std::sync::RwLock<Config>>) {
 mod tests {
     use super::*;
 
+    /// What a poll produces on a host that pins no key: a body, an ETag, and
+    /// nothing vouching for either.
+    fn unsigned(body: &str) -> RemotePolicy {
+        RemotePolicy {
+            body: body.into(),
+            etag: Some("\"v1\"".into()),
+            signature: None,
+        }
+    }
+
     #[test]
     fn defaults_when_no_files() {
         let dir = tempfile::tempdir().unwrap();
-        unsafe {
-            std::env::set_var("ARGUS_DATA_DIR", dir.path());
-        }
+        let _data = crate::paths::DataDir::set(dir.path());
         let cfg = load();
         assert!(cfg.redaction.enabled);
         assert!(cfg.capture.prompts);
@@ -519,9 +745,7 @@ mod tests {
     #[test]
     fn remote_cache_overrides_local_file() {
         let dir = tempfile::tempdir().unwrap();
-        unsafe {
-            std::env::set_var("ARGUS_DATA_DIR", dir.path());
-        }
+        let _data = crate::paths::DataDir::set(dir.path());
         std::fs::create_dir_all(dir.path()).unwrap();
         std::fs::write(
             crate::paths::config_path(),
@@ -545,9 +769,7 @@ mod tests {
     #[test]
     fn type_mismatched_remote_layer_is_skipped_not_poisoning() {
         let dir = tempfile::tempdir().unwrap();
-        unsafe {
-            std::env::set_var("ARGUS_DATA_DIR", dir.path());
-        }
+        let _data = crate::paths::DataDir::set(dir.path());
         std::fs::create_dir_all(dir.path()).unwrap();
         std::fs::write(
             crate::paths::config_path(),
@@ -720,18 +942,99 @@ mod tests {
             }
         });
         let url = format!("http://{addr}/cfg.toml");
-        let (body, etag) = fetch_remote(&url, None).await.unwrap().unwrap();
-        assert!(body.contains("prompts = false"));
-        assert_eq!(etag.as_deref(), Some("\"v1\""));
-        assert!(fetch_remote(&url, etag.as_deref()).await.unwrap().is_none());
+        let got = fetch_remote(&url, None).await.unwrap().unwrap();
+        assert!(got.body.contains("prompts = false"));
+        assert_eq!(got.etag.as_deref(), Some("\"v1\""));
+        assert!(
+            fetch_remote(&url, got.etag.as_deref())
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    /// The fetch path has to refuse before the caching path runs: a body that
+    /// reaches the cache is a body that applies on the next load, whatever a
+    /// later check says about it. So the interesting assertion is not the
+    /// error — it is the empty data directory afterwards.
+    #[tokio::test]
+    async fn a_policy_body_the_key_does_not_cover_is_never_cached() {
+        let dir = tempfile::tempdir().unwrap();
+        let _data = crate::paths::DataDir::set(dir.path());
+        let (sk, pk) = crate::policysig::testkeys::keypair();
+        let sys = dir.path().join("system.toml");
+        std::fs::write(&sys, format!("[remote]\npublic_key = \"{pk}\"\n")).unwrap();
+        let _guard = crate::paths::SystemConfig::set(&sys);
+
+        // The server serves a policy, and a signature over a *different* one —
+        // which is what a rewritten body on a compromised mirror looks like,
+        // and also what a policy server that forgot to re-sign looks like.
+        let served = "[capture]\nprompts = false\n";
+        let sig = crate::policysig::testkeys::sign(&sk, "[capture]\nprompts = true\n");
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let addr = server.server_addr().to_string();
+        std::thread::spawn(move || {
+            for req in server.incoming_requests() {
+                let body = if req.url().ends_with(".sig") {
+                    sig.clone()
+                } else {
+                    served.to_string()
+                };
+                let _ = req.respond(tiny_http::Response::from_string(body));
+            }
+        });
+        let url = format!("http://{addr}/cfg.toml");
+
+        let err = fetch_remote(&url, None).await.unwrap_err().to_string();
+        assert!(err.contains("failed verification"), "{err}");
+        assert!(
+            !crate::paths::cached_remote_config_path().exists(),
+            "a body that does not verify still reached the cache"
+        );
+    }
+
+    /// And the other half: a correctly signed policy still gets fetched,
+    /// cached with its signature, and applied. A control that also blocks the
+    /// legitimate path is a control nobody deploys.
+    #[tokio::test]
+    async fn a_correctly_signed_policy_is_fetched_cached_and_applied() {
+        let dir = tempfile::tempdir().unwrap();
+        let _data = crate::paths::DataDir::set(dir.path());
+        let (sk, pk) = crate::policysig::testkeys::keypair();
+        let sys = dir.path().join("system.toml");
+        std::fs::write(&sys, format!("[remote]\npublic_key = \"{pk}\"\n")).unwrap();
+        let _guard = crate::paths::SystemConfig::set(&sys);
+
+        let served = "[capture]\nprompts = false\n";
+        // Trailing newline, exactly as `base64 > policy.toml.sig` writes it.
+        let sig = format!("{}\n", crate::policysig::testkeys::sign(&sk, served));
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let addr = server.server_addr().to_string();
+        std::thread::spawn(move || {
+            for req in server.incoming_requests() {
+                let body = if req.url().ends_with(".sig") {
+                    sig.clone()
+                } else {
+                    served.to_string()
+                };
+                let _ = req.respond(tiny_http::Response::from_string(body));
+            }
+        });
+
+        let policy = fetch_remote(&format!("http://{addr}/cfg.toml"), None)
+            .await
+            .unwrap()
+            .unwrap();
+        let shared = std::sync::RwLock::new(Config::default());
+        apply_remote(&shared, &mut None, &policy);
+        assert!(!shared.read().unwrap().capture.prompts);
+        assert!(!load().capture.prompts, "the cache must survive a reload");
     }
 
     #[test]
     fn a_failed_cache_write_does_not_burn_the_etag() {
         let dir = tempfile::tempdir().unwrap();
-        unsafe {
-            std::env::set_var("ARGUS_DATA_DIR", dir.path());
-        }
+        let _data = crate::paths::DataDir::set(dir.path());
         let cache = crate::paths::cached_remote_config_path();
         // Occupy the cache path with a non-empty directory: the rename cannot
         // land on it on any platform, which is the disk-full/locked-down case
@@ -743,8 +1046,7 @@ mod tests {
         apply_remote(
             &shared,
             &mut etag,
-            "[capture]\nprompts = false\n",
-            Some("\"v1\"".into()),
+            &unsigned("[capture]\nprompts = false\n"),
         );
         assert_eq!(
             etag, None,
@@ -761,8 +1063,7 @@ mod tests {
         apply_remote(
             &shared,
             &mut etag,
-            "[capture]\nprompts = false\n",
-            Some("\"v1\"".into()),
+            &unsigned("[capture]\nprompts = false\n"),
         );
         assert_eq!(etag.as_deref(), Some("\"v1\""));
         assert!(!shared.read().unwrap().capture.prompts);
@@ -770,9 +1071,6 @@ mod tests {
             !cache.with_extension("tmp").exists(),
             "tmp file left behind"
         );
-        unsafe {
-            std::env::remove_var("ARGUS_DATA_DIR");
-        }
     }
 
     #[test]
@@ -780,5 +1078,220 @@ mod tests {
         let cfg = Config::default();
         assert!(cfg.integrity.enabled, "on by default (security control)");
         assert_eq!(cfg.integrity.interval_secs, 3600);
+    }
+
+    /// The whole point of a root-owned layer: the two files the watched user
+    /// *can* write must not be able to unpick it. The remote cache matters as
+    /// much as the user's own config here — it lives in the user's data dir
+    /// under a predictable name, so "policy said so" is a claim any account
+    /// can make by writing the file itself.
+    #[test]
+    fn neither_user_file_can_weaken_what_the_machine_wide_layer_pins() {
+        let dir = tempfile::tempdir().unwrap();
+        let _data = crate::paths::DataDir::set(dir.path());
+        std::fs::write(
+            crate::paths::config_path(),
+            "[capture]\nprompts = false\n[redaction]\nenabled = false\n",
+        )
+        .unwrap();
+        std::fs::write(
+            crate::paths::cached_remote_config_path(),
+            "[capture]\nprompts = false\n[export]\notlp_endpoint = \"http://mine:4318\"\n",
+        )
+        .unwrap();
+        let sys = dir.path().join("system.toml");
+        std::fs::write(
+            &sys,
+            "[capture]\nprompts = true\n[redaction]\nenabled = true\n\
+             [export]\notlp_endpoint = \"http://fleet:4318\"\n",
+        )
+        .unwrap();
+
+        let before = load();
+        assert!(!before.capture.prompts, "without the layer, the user wins");
+
+        let _guard = crate::paths::SystemConfig::set(&sys);
+        let cfg = load();
+        assert!(cfg.capture.prompts, "the layer outranks the user's config");
+        assert!(cfg.redaction.enabled, "and cannot be turned off locally");
+        assert_eq!(
+            cfg.export.otlp_endpoint.as_deref(),
+            Some("http://fleet:4318"),
+            "nor can capture be repointed by hand-writing the policy cache"
+        );
+    }
+
+    /// The bypass this whole module exists for: `cat > remote-config.cache.toml`
+    /// is a one-line way to tell a monitored machine that the fleet wants
+    /// nothing captured. Where the layer pins a key, that file has to be
+    /// skipped — not merely reported later, since a policy reported after it
+    /// applied has already applied.
+    #[test]
+    fn a_policy_cache_nobody_signed_is_not_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        let _data = crate::paths::DataDir::set(dir.path());
+        let (sk, pk) = crate::policysig::testkeys::keypair();
+        let body = "[capture]\nprompts = false\n";
+        std::fs::write(crate::paths::cached_remote_config_path(), body).unwrap();
+
+        assert!(
+            !load().capture.prompts,
+            "unpinned, the cache is policy as it always was"
+        );
+
+        let sys = dir.path().join("system.toml");
+        std::fs::write(&sys, format!("[remote]\npublic_key = \"{pk}\"\n")).unwrap();
+        let _guard = crate::paths::SystemConfig::set(&sys);
+        assert!(
+            load().capture.prompts,
+            "a hand-written cache set capture and no key vouched for it"
+        );
+
+        // The genuine article, and the one edit that would make it useful to
+        // somebody who would rather not be watched.
+        let sig = crate::paths::cached_remote_config_sig_path();
+        std::fs::write(&sig, crate::policysig::testkeys::sign(&sk, body)).unwrap();
+        assert!(!load().capture.prompts, "the signed policy must apply");
+        std::fs::write(
+            crate::paths::cached_remote_config_path(),
+            "[capture]\nprompts = false\ntool_inputs = false\n",
+        )
+        .unwrap();
+        assert!(
+            load().capture.tool_inputs,
+            "one line added to a signed policy left it applying"
+        );
+    }
+
+    /// A key the layer does not mention stays the user's to set. A layer that
+    /// swallowed everything would force operators to restate every default,
+    /// and an unrestated key would silently revert.
+    #[test]
+    fn the_machine_wide_layer_only_governs_the_keys_it_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let _data = crate::paths::DataDir::set(dir.path());
+        std::fs::write(
+            crate::paths::config_path(),
+            "[capture]\ntool_outputs = false\n[export]\nbatch_size = 7\n",
+        )
+        .unwrap();
+        let sys = dir.path().join("system.toml");
+        // Away from the default, so "the layer applied" and "nobody applied
+        // anything" cannot look the same.
+        std::fs::write(&sys, "[capture]\nprompts = false\n").unwrap();
+        let _guard = crate::paths::SystemConfig::set(&sys);
+
+        let cfg = load();
+        assert!(!cfg.capture.prompts, "the key the layer names");
+        assert!(!cfg.capture.tool_outputs, "a sibling key it never named");
+        assert_eq!(cfg.export.batch_size, 7);
+    }
+
+    /// A malformed machine-wide file is the dangerous failure: the loader skips
+    /// it exactly as it skips a bad remote layer, so the host keeps running on
+    /// the user's own config while `/etc/argus/config.toml` sits there looking
+    /// like the machine is governed. `system_layer` has to be able to say so,
+    /// which is what lets `check` report it instead of passing.
+    #[test]
+    fn a_machine_wide_layer_the_loader_would_skip_is_reported_not_silent() {
+        let dir = tempfile::tempdir().unwrap();
+        let sys = dir.path().join("system.toml");
+
+        let _guard = crate::paths::SystemConfig::set(&sys);
+        assert!(
+            matches!(system_layer(), SystemLayer::Absent),
+            "no file at all is an ordinary unmanaged host, not a fault"
+        );
+
+        std::fs::write(&sys, "[capture\nprompts = true\n").unwrap();
+        let SystemLayer::Skipped(why) = system_layer() else {
+            panic!("invalid TOML must not read as a layer in force");
+        };
+        assert!(why.contains("not valid TOML"), "{why}");
+
+        // Parses, but the loader would still throw it away.
+        std::fs::write(&sys, "[export]\nbatch_size = \"lots\"\n").unwrap();
+        let SystemLayer::Skipped(why) = system_layer() else {
+            panic!("a type-mismatched layer must not read as in force");
+        };
+        assert!(why.contains("config schema"), "{why}");
+
+        std::fs::write(&sys, "[export]\nbatch_size = 50\n").unwrap();
+        assert!(matches!(system_layer(), SystemLayer::Present(_)));
+    }
+
+    /// The layer outranks the user's own config *because* the user cannot write
+    /// it. A file that fails that test is not policy — it is a file, and one an
+    /// account that would rather not be monitored has every reason to plant,
+    /// since a layer of their own authorship would deny nothing and, worse,
+    /// would make `check` report the host as governed.
+    #[test]
+    fn a_machine_wide_layer_an_ordinary_account_could_have_written_is_not_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        let _data = crate::paths::DataDir::set(dir.path());
+        std::fs::write(crate::paths::config_path(), "[capture]\nprompts = true\n").unwrap();
+        let sys = dir.path().join("system.toml");
+        std::fs::write(&sys, "[capture]\nprompts = false\n").unwrap();
+        let _guard = crate::paths::SystemConfig::set(&sys);
+
+        assert!(!load().capture.prompts, "control: the layer does apply");
+
+        let _planted = crate::paths::UntrustedSystemConfig::set("owned by uid 501");
+        let SystemLayer::Skipped(why) = system_layer() else {
+            panic!("a layer nothing proves is machine-wide must not read as in force");
+        };
+        assert!(why.contains("owned by uid 501"), "{why}");
+        assert!(
+            load().capture.prompts,
+            "a planted layer still decided what the loader captures"
+        );
+    }
+
+    /// The hardened baseline in `docs/threat-model.md` is the file operators
+    /// copy, and `install --managed --policy` refuses one the loader would
+    /// skip. A template that stopped deserializing would therefore be caught by
+    /// whoever deployed it, at the point where it is least convenient — and a
+    /// template whose keys drifted out of the schema would be *silently* no
+    /// policy, which is the failure this whole layer exists to prevent.
+    #[test]
+    fn the_documented_baseline_policy_is_a_policy_argus_would_accept() {
+        const DOC: &str = include_str!("../docs/threat-model.md");
+        // A Windows checkout arrives with CRLF endings, which the fence
+        // delimiters below would otherwise miss — silently, as "no toml block".
+        let doc = DOC.replace("\r\n", "\n");
+        let template = doc
+            .split("```toml\n")
+            .nth(1)
+            .and_then(|rest| rest.split("\n```").next())
+            .expect("docs/threat-model.md must carry one ```toml baseline block");
+
+        let table = template
+            .parse::<toml::Table>()
+            .expect("the documented baseline must be valid TOML");
+        let cfg: Config = table
+            .clone()
+            .try_into()
+            .expect("the documented baseline must match argus's config schema");
+
+        // Not just "it parses": the point of the template is that an unpinned
+        // key is user-controlled, so the keys that decide who may weaken this
+        // install have to actually be in there.
+        assert_eq!(cfg.policy.allow_env_overrides, Some(false));
+        assert_eq!(cfg.policy.allow_user_uninstall, Some(false));
+        assert!(
+            cfg.integrity.managed,
+            "the layer must assert its own presence"
+        );
+        assert!(cfg.integrity.binary_sha256.is_some());
+        assert!(
+            cfg.remote.public_key.is_some(),
+            "an unsigned policy is a file the user can write"
+        );
+        assert!(cfg.remote.url.is_some());
+        assert!(cfg.export.otlp_endpoint.is_some());
+        assert!(
+            cfg.export.headers.is_empty(),
+            "the machine-wide layer is world-readable; it must not model credentials in it"
+        );
     }
 }

@@ -42,6 +42,18 @@ pub struct Envelope {
         skip_serializing_if = "crate::cloudid::CloudIdentity::is_empty"
     )]
     pub cloud_identity: crate::cloudid::CloudIdentity,
+    /// The `ARGUS_*` variables that were set in the watched agent's
+    /// environment when this envelope was built.
+    ///
+    /// Read here for the reason `cloud_identity` is: these come out of the
+    /// agent's environment, and the daemon's own says only what whoever
+    /// started it had. An override that redirects capture is the quietest
+    /// bypass argus has — the events simply stop, and a host that stopped
+    /// looks like a laptop in a drawer — so the attempt travels with the
+    /// events it did not manage to divert. Names only, never values; see
+    /// [`crate::paths::overrides_in_force`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env_overrides: Vec<String>,
     pub payload: serde_json::Value,
 }
 
@@ -103,6 +115,11 @@ pub struct Meta {
     /// the agent never sent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp_endpoint: Option<String>,
+    /// `ARGUS_*` variables in force in the agent's environment, from the
+    /// envelope. Empty on the overwhelming majority of events, which is what
+    /// makes a non-empty one worth an alert.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env_overrides: Vec<String>,
 }
 
 impl Meta {
@@ -423,6 +440,80 @@ pub enum EventKind {
         count: u64,
         detail: String,
     },
+    /// The daemon saying it is still here, and under what conditions.
+    ///
+    /// Every other event in this enum describes something the host tool did.
+    /// This one describes argus, and it is the only event emitted when nothing
+    /// happens at all — which is the point. A monitoring tool's failures are
+    /// *silent*: a killed daemon, a deleted data directory, a firewall rule
+    /// against the collector and a laptop nobody opened all produce exactly the
+    /// same thing at the SIEM, which is nothing. A heartbeat turns three of
+    /// those four into an alertable absence, and carries with it the state a
+    /// responder would otherwise have to go to the endpoint to read.
+    ///
+    /// Deliberately unconditional. The integrity loop reports only what is
+    /// broken, because a per-tool "still fine" every hour is noise; but that
+    /// leaves "nothing is broken" and "no check has run since the daemon died"
+    /// indistinguishable, and `checks_age_secs` is what separates them.
+    Health {
+        /// `startup`, `interval`, or `shutdown`. A graceful stop is a record
+        /// rather than a silence; a `SIGKILL` still falls through to absence.
+        reason: String,
+        /// This install's identity. A new one under a known `host.name` is a
+        /// wiped data directory — see [`crate::buffer::Buffer::install_id`].
+        install_id: String,
+        version: String,
+        uptime_secs: u64,
+        /// How long ago the integrity summary below was taken. `None` means no
+        /// check has completed yet in this process.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        checks_age_secs: Option<u64>,
+        /// Tools checked and found intact.
+        checks_ok: u32,
+        /// `tool: detail` for everything currently broken, bounded — the list
+        /// is a summary, and the integrity events carry each finding in full.
+        broken: Vec<String>,
+        /// Identifies the config the daemon is *running on*, not the file on
+        /// disk: a policy edited but not reloaded shows the old value here.
+        config_fingerprint: String,
+        /// The policy URL in force, so a repoint is visible at the collector
+        /// rather than only to a `check` nobody ran.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        policy_url: Option<String>,
+        /// Queue depth. Heartbeats arriving with a growing buffer are an export
+        /// that is failing while capture still works — a different fault, and a
+        /// different fix, from either half being down.
+        buffer_events: u64,
+        buffer_bytes: u64,
+        spool_files: u64,
+        spool_bytes: u64,
+        /// Losses since this daemon started. Cumulative rather than a delta:
+        /// the `Loss` records carry the deltas, and a total that resets says
+        /// the process restarted.
+        dropped_total: u64,
+        unreadable_total: u64,
+        /// Where this daemon is actually reading and writing, and what binary
+        /// it is. Both are redirectable by environment variable, so both are
+        /// stated rather than assumed to be the installed ones.
+        data_dir: String,
+        binary: String,
+        /// What that binary is made of, and whether policy agrees.
+        ///
+        /// `check` compares the *hooks'* program against this daemon's own
+        /// bytes, which cannot answer the case where both were replaced
+        /// together. The digest travels to the collector so the answer comes
+        /// from somewhere the machine's owner does not control: a host running
+        /// a build nobody published is visible as a digest nobody recognises,
+        /// with no pin deployed at all. `binary_pin_ok` is the same statement
+        /// pre-computed for fleets that do pin one, and absent when they do not.
+        binary_sha256: String,
+        binary_pin_ok: Option<bool>,
+        /// Names — never values — of the `ARGUS_*` overrides in force. An
+        /// override is a supported debugging affordance and a supported way to
+        /// step out from under policy; saying which are set makes the second
+        /// one visible without breaking the first.
+        env_overrides: Vec<String>,
+    },
 }
 
 impl EventKind {
@@ -632,6 +723,35 @@ pub fn visit_strings(kind: &mut EventKind, f: &mut impl FnMut(&mut String)) {
             count: _,
             detail,
         } => f(detail),
+        // Argus describing itself. Every field is a count, an enumerated word,
+        // or an identifier this crate produced — and the two that look like
+        // free text are not: `broken` is `Finding` prose written here, and
+        // `env_overrides` holds variable *names*, never their values, exactly
+        // so that a path a user chose cannot ride out in it. Scrubbing the
+        // paths that remain (`data_dir`, `binary`) would corrupt the thing the
+        // record exists to state, which is where this daemon was pointed.
+        EventKind::Health {
+            reason: _,
+            install_id: _,
+            version: _,
+            uptime_secs: _,
+            checks_age_secs: _,
+            checks_ok: _,
+            broken: _,
+            config_fingerprint: _,
+            policy_url: _,
+            buffer_events: _,
+            buffer_bytes: _,
+            spool_files: _,
+            spool_bytes: _,
+            dropped_total: _,
+            unreadable_total: _,
+            data_dir: _,
+            binary: _,
+            binary_sha256: _,
+            binary_pin_ok: _,
+            env_overrides: _,
+        } => {}
     }
 }
 
@@ -728,6 +848,7 @@ mod tests {
     #[test]
     fn envelope_roundtrips() {
         let env = Envelope {
+            env_overrides: Vec::new(),
             cloud_identity: Default::default(),
             source: "opencode".into(),
             received_at: chrono::Utc::now(),

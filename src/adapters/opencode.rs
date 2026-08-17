@@ -316,6 +316,7 @@ mod tests {
 
     fn env(payload: serde_json::Value) -> Envelope {
         Envelope {
+            env_overrides: Vec::new(),
             cloud_identity: Default::default(),
             source: "opencode".into(),
             received_at: chrono::Utc::now(),

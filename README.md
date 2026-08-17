@@ -39,7 +39,7 @@ durable buffering, and batched export with backoff.
 | ☁️  | **Cloud identity, never credentials**     | Captures the AWS/Azure/GCP/K8s/Vault identity an agent was holding — role, account, project — and only the _names_ of credential variables in scope. |
 | 🏢  | **Three independent install scopes**      | Per-user, per-repository, and administrator-managed (`--managed`) installs.                                                                          |
 | 📶  | **Remote fleet config**                   | ETag-conditional polling of a central policy URL, cached to disk so it still applies offline; always wins over the local file.                       |
-| 🛡️  | **Self-integrity checks**                 | `argus check` verifies hooks/plugins haven't been tampered with or silently disabled, for fleet monitoring.                                          |
+| 🛡️  | **Self-integrity checks**                 | `argus check` verifies hooks/plugins haven't been tampered with, silently disabled, or pointed at a binary that isn't argus, for fleet monitoring. See the [threat model](docs/threat-model.md). |
 
 ## Quick start
 
@@ -117,8 +117,9 @@ operating, extending). Individual pages:
 
 ## Known limitations
 
-- No OS service management (`launchd`/`systemd`/Windows service) — the daemon
-  is autospawned by the first hook invocation instead.
+- Windows has no restart-on-exit supervisor — the Startup-folder script runs the
+  daemon at logon and a hook restarts it mid-session. launchd and systemd do
+  keep it alive.
 - Remote config is trusted over HTTPS; no detached-signature verification yet.
 - Bash tool parsing reads redirection targets and six file verbs, not the file
   argument of every program.
