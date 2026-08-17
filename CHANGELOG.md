@@ -5,7 +5,7 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.3.0] - 2026-08-16
+## [0.3.0] - 2026-08-17
 
 Anti-tamper hardening. 0.2.0 could prove its wiring had not been edited; it
 could not prove it was still running, that the policy it obeyed came from
