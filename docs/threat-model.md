@@ -207,6 +207,19 @@ layer from which the security-relevant keys are read at all —
 `[remote] public_key` are ignored wherever else they appear. A permission the
 constrained party grants itself is not a permission.
 
+"Only root can write it" is checked rather than assumed, because on Windows it
+was not true. `%ProgramData%` grants standard accounts the right to create files
+and directories and the creator owns what it creates, so on a host the fleet
+never managed, a user could write `C:\ProgramData\argus\config.toml`
+themselves — a layer of their own authorship, outranking the remote policy,
+denying nothing, and turning `argus check`'s honest "this host is not
+policy-managed" into "machine-wide config in force". So argus now requires the
+file and every directory above it to be owned by `uid 0` (Unix) or by
+`LocalSystem` / `BUILTIN\Administrators` / `TrustedInstaller` (Windows) before
+reading a word of it. One that is not is treated as no layer at all — its author
+gets back the unmanaged host they already had — and `argus check` reports the
+file. See [Machine-wide config](configuration.md#machine-wide-config).
+
 Hand-writing the remote cache is closed by signing rather than by ownership:
 with `[remote] public_key` pinned in the machine-wide layer, a policy body is
 fetched alongside its `.sig`, verified with ed25519, and refused — neither
@@ -375,8 +388,9 @@ would pass just as well against a `check` that reports everything as broken.
 
 Two things it deliberately does not cover, rather than covering them weakly:
 case 9 collapses into case 1 here, and the `allow_env_overrides` /
-`allow_user_uninstall` refusals live behind a root-owned path that a test
-process cannot redirect, so they are proven in the unit suite instead.
+`allow_user_uninstall` refusals — along with the ownership gate on the
+machine-wide layer — live behind a root-owned path that a test process cannot
+redirect, so they are proven in the unit suite instead.
 
 ## What is still open
 

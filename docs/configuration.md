@@ -94,6 +94,35 @@ Two consequences worth knowing:
 writes, and it comes out of the watched agent's environment like any other
 variable — a layer a line in `~/.zshrc` could switch off would not be one.
 
+### It has to be a file the user could not have written
+
+The layer outranks everything below it because an ordinary account cannot write
+it, so argus checks that this is true before reading a word of it:
+
+| Platform    | Accepted when                                                                                          |
+| ----------- | ------------------------------------------------------------------------------------------------------ |
+| macOS/Linux | the file and every directory above it are owned by `uid 0` and are not group- or world-writable         |
+| Windows     | the file and every directory above it are owned by `LocalSystem`, `BUILTIN\Administrators` or `TrustedInstaller` |
+
+`install --managed --policy` produces exactly that (`0644` in a `0755`
+directory, written as root; created by an elevated process on Windows), so a
+deployed policy passes. A file that does not is treated as **no layer at all**
+— the host goes back to being an unmanaged one — and `argus check` reports it.
+
+This is not bookkeeping. `%ProgramData%` grants standard accounts the right to
+create files and directories, and the creator owns what it creates, so on a
+Windows host the fleet never managed, a user could write
+`C:\ProgramData\argus\config.toml` themselves. Without the ownership test that
+file would outrank the remote policy, deny nothing, and turn `argus check`'s
+honest "this host is not policy-managed" into "machine-wide config in force".
+Reading it as no layer gives its author only the unmanaged host they already
+had. (They cannot overwrite a file an administrator already deployed either
+way; the exposure was the *unmanaged* host that looked managed.)
+
+The Windows test is ownership, not a full ACL walk. An administrator who
+deliberately loosens the ACL on their own machine-wide file is an administrator
+choosing to, not a bypass.
+
 ### It also turns the environment variables off
 
 Deploying this file makes the host managed, and on a managed host the `ARGUS_*`

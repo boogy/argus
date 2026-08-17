@@ -25,10 +25,15 @@ their own laptop but does not own the machine-wide root.
   before it goes.
 - **Policy moved to a layer the user cannot write.** Precedence is now
   `defaults <- config.toml <- cached remote <- /etc/argus/config.toml`
-  (`%ProgramData%\argus\config.toml` on Windows), root-owned and merged last.
-  `install --managed` writes it; `check --managed` verifies it. Previously
-  `--managed` wired hooks machine-wide while every knob deciding what is
-  captured and where it goes stayed in a file the user owned.
+  (`%ProgramData%\argus\config.toml` on Windows), merged last. `install
+  --managed` writes it; `check --managed` verifies it. Previously `--managed`
+  wired hooks machine-wide while every knob deciding what is captured and where
+  it goes stayed in a file the user owned. That the layer is out of a user's
+  reach is checked rather than assumed: the file and every directory above it
+  must be owned by `uid 0`, or by `LocalSystem` / `BUILTIN\Administrators` /
+  `TrustedInstaller` on Windows, where `%ProgramData%` otherwise lets a standard
+  account plant one. A layer that fails the test is no layer at all — and is
+  reported, since a host that merely *looks* managed is the worse outcome.
 - **Remote policy proves where it came from.** With `[remote] public_key`
   pinned, argus fetches `<url>.sig` and verifies the body (ed25519) before it
   will cache or apply it — so a hand-written cache file is no longer a policy.

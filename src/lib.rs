@@ -21,3 +21,4 @@ pub mod record;
 pub mod redact;
 pub mod service;
 pub mod spool;
+pub mod trust;

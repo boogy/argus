@@ -184,6 +184,10 @@ struct NoSystemLayer;
 /// either way: only an administrator can write the file at all, and a typo in
 /// an unrelated key should not hand back a permission the file plainly states.
 fn system_policy_flag(name: &str) -> Result<Option<bool>, NoSystemLayer> {
+    if let Some(why) = system_config_untrusted() {
+        tracing::warn!("ignoring the machine-wide config: {why}");
+        return Err(NoSystemLayer);
+    }
     let Ok(text) = std::fs::read_to_string(system_config_path()) else {
         return Err(NoSystemLayer);
     };
@@ -498,6 +502,70 @@ pub fn system_config_path() -> PathBuf {
     }
 }
 
+/// `Some(why)` when the file at [`system_config_path`] is not one an ordinary
+/// account was barred from writing.
+///
+/// The machine-wide layer outranks every other layer *because* only an
+/// administrator can write it. Nothing checked that until this existed, and the
+/// gap is not theoretical: `%ProgramData%` grants standard accounts the right
+/// to create files and directories, and the creator owns what it creates. On a
+/// host the fleet never managed, a user could write
+/// `C:\ProgramData\argus\config.toml` themselves — and the layer they wrote
+/// would outrank the remote policy, deny nothing, and turn `argus check`'s
+/// honest "this host is not policy-managed" into "machine-wide config in
+/// force". False assurance is the one failure this project cannot afford, since
+/// the whole point of the layer is to be the thing that ends an argument.
+///
+/// An untrusted layer is treated as no layer at all, plus a finding. That is
+/// the correct direction: whoever wrote it gets back the unmanaged host they
+/// already had — no permission they did not have, no policy they chose — and
+/// `integrity::check_config` reports the file, so the state is visible rather
+/// than merely refused.
+pub(crate) fn system_config_untrusted() -> Option<String> {
+    // Tests point the layer at a temp file they own by construction, so the
+    // real check would fail every one of them. It is injected instead, which is
+    // also the only way to exercise what the rest of the system does with an
+    // untrusted layer — the ownership decision itself is `trust`'s to test.
+    #[cfg(test)]
+    {
+        return SYSTEM_CONFIG_TRUST
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+    }
+    #[cfg(not(test))]
+    crate::trust::writable_by_non_admin(&system_config_path())
+}
+
+/// Why tests should treat the machine-wide layer as untrusted; `None` (the
+/// default) means trusted, which is what every test but the gate's own wants.
+#[cfg(test)]
+pub(crate) static SYSTEM_CONFIG_TRUST: std::sync::Mutex<Option<String>> =
+    std::sync::Mutex::new(None);
+
+/// Makes [`system_config_untrusted`] answer `why` until it is dropped.
+#[cfg(test)]
+pub(crate) struct UntrustedSystemConfig;
+
+#[cfg(test)]
+impl UntrustedSystemConfig {
+    pub(crate) fn set(why: &str) -> Self {
+        *SYSTEM_CONFIG_TRUST
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(why.to_string());
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for UntrustedSystemConfig {
+    fn drop(&mut self) {
+        *SYSTEM_CONFIG_TRUST
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
+    }
+}
+
 /// The secret Codex presents to this install's OTLP receiver.
 ///
 /// Inside the data directory rather than beside Codex's own config, because
@@ -712,6 +780,27 @@ mod tests {
         for name in OVERRIDE_ENV {
             unsafe { std::env::remove_var(name) };
         }
+    }
+
+    /// A layer the watched account could have written back-fires twice over: it
+    /// denies them nothing they wanted denied, and the *host* now reads as
+    /// managed. Read as no layer at all, they get the unmanaged host they
+    /// already had — and `argus check` says the file is there.
+    #[test]
+    fn a_layer_an_ordinary_account_could_have_written_governs_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let sys = dir.path().join("system.toml");
+        std::fs::write(&sys, "[capture]\nprompts = true\n").unwrap();
+        let _guard = SystemConfig::set_denying_overrides(&sys);
+        assert!(!overrides_allowed(), "control: the layer does deny them");
+
+        let _planted = UntrustedSystemConfig::set("owned by uid 501");
+        assert!(overrides_allowed());
+        assert!(
+            user_uninstall_allowed(),
+            "a planted layer could otherwise refuse an uninstall it never had \
+             the standing to refuse"
+        );
     }
 
     /// The layer is what makes a host managed. Every other host — every

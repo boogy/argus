@@ -599,40 +599,6 @@ fn deploy_managed_binary(root: &Path, platform: Platform, dry_run: bool) -> Resu
     Ok(dest)
 }
 
-/// `Some(why)` when a path can be rewritten by somebody who is not root.
-///
-/// The question every machine-wide control ultimately rests on: hooks that an
-/// ordinary account cannot edit are worth nothing if the program they run sits
-/// in a directory that account owns. Answered only on Unix — Windows ACLs are
-/// not readable this cheaply, and a wrong answer here is worse than none.
-#[cfg(unix)]
-fn writable_by_non_root(path: &Path) -> Option<String> {
-    use std::os::unix::fs::MetadataExt;
-    // The directories count as much as the file: write permission on a
-    // directory is permission to replace what is in it, whoever owns that.
-    let mut here = Some(path);
-    while let Some(p) = here {
-        let md = std::fs::metadata(p).ok()?;
-        if md.uid() != 0 {
-            return Some(format!("{} is owned by uid {}", p.display(), md.uid()));
-        }
-        if md.mode() & 0o022 != 0 {
-            return Some(format!(
-                "{} is group- or world-writable (mode {:o})",
-                p.display(),
-                md.mode() & 0o777
-            ));
-        }
-        here = p.parent().filter(|q| *q != p);
-    }
-    None
-}
-
-#[cfg(not(unix))]
-fn writable_by_non_root(_path: &Path) -> Option<String> {
-    None
-}
-
 /// An entry on `PATH` that names this same binary under a stable alias.
 ///
 /// "Same binary" is decided by canonicalisation, not by name, so an unrelated
@@ -1244,12 +1210,12 @@ fn check_managed_in(harnesses: &[&dyn Harness], root: &Path, platform: Platform)
     let sr = system_root(platform);
     if sr.real && sr.path == root {
         let baked = managed_bin(root, platform);
-        let problem = writable_by_non_root(&baked);
+        let problem = crate::trust::writable_by_non_admin(&baked);
         out.push(Finding {
             tool: "binary (managed)".into(),
             ok: problem.is_none(),
             detail: match &problem {
-                None => format!("{} is root-owned", baked.display()),
+                None => format!("only an administrator can replace {}", baked.display()),
                 Some(why) => format!(
                     "hooks run {}, which any account can replace: {why} — \
                      re-run `argus install --managed`",
@@ -2396,11 +2362,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mine = fake_binary(dir.path(), "argus");
         assert!(
-            writable_by_non_root(&mine).is_some(),
+            crate::trust::writable_by_non_admin(&mine).is_some(),
             "a binary in the caller's own temp dir read as root-owned"
         );
         // A path whose whole chain is root-owned on every Unix argus supports.
-        assert_eq!(writable_by_non_root(Path::new("/usr/bin")), None);
+        assert_eq!(
+            crate::trust::writable_by_non_admin(Path::new("/usr/bin")),
+            None
+        );
     }
 
     /// The one that matters under `sudo`: a harness answering with a path in

@@ -231,6 +231,12 @@ path](configuration.md#machine-wide-config), `0644` in a `0755` directory: every
 account must be able to read the layer that governs it, and root's umask under
 `sudo` would otherwise decide otherwise.
 
+Those permissions are also what argus checks on the way back in: a machine-wide
+file that an ordinary account could have written is read as no layer at all, so
+deploy it as root (or, on Windows, from an elevated shell) and not by copying it
+into place from a user session. See [It has to be a file the user could not have
+written](configuration.md#it-has-to-be-a-file-the-user-could-not-have-written).
+
 It is validated before it is written, and refused if the loader would skip it.
 A machine-wide file with a typo in it is not a weaker policy — the host falls
 straight back to the user's own config, while `/etc/argus` makes it look

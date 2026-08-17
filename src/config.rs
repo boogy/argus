@@ -461,10 +461,19 @@ pub fn load() -> Config {
 /// hand-written cache is then not policy, it is a file.
 pub fn merged_table() -> toml::Table {
     let mut merged = toml::Table::new();
+    // Applying a layer only if the result is still a valid config: one bad key
+    // in a layer must not take the layers under it down with it.
+    let apply = |merged: &mut toml::Table, table: toml::Table, path: &std::path::Path| {
+        let mut candidate = merged.clone();
+        deep_merge(&mut candidate, table);
+        match candidate.clone().try_into::<Config>() {
+            Ok(_) => *merged = candidate,
+            Err(e) => tracing::warn!("ignoring config {path:?}: merge invalidates config: {e}"),
+        }
+    };
     for (path, signed) in [
         (crate::paths::config_path(), false),
         (crate::paths::cached_remote_config_path(), true),
-        (crate::paths::system_config_path(), false),
     ] {
         let Ok(text) = std::fs::read_to_string(&path) else {
             continue;
@@ -488,11 +497,17 @@ pub fn merged_table() -> toml::Table {
             tracing::warn!("ignoring type-mismatched config {path:?}: {e}");
             continue;
         }
-        let mut candidate = merged.clone();
-        deep_merge(&mut candidate, table);
-        match candidate.clone().try_into::<Config>() {
-            Ok(_) => merged = candidate,
-            Err(e) => tracing::warn!("ignoring config {path:?}: merge invalidates config: {e}"),
+        apply(&mut merged, table, &path);
+    }
+    // Last, and through `system_layer` rather than another read of the same
+    // file: what the loader applies and what `check` reports have to be the
+    // same decision, including the ownership gate, or `check` reports a policy
+    // that is not in force.
+    match system_layer() {
+        SystemLayer::Absent => {}
+        SystemLayer::Skipped(why) => tracing::warn!("ignoring the machine-wide config: {why}"),
+        SystemLayer::Present(table) => {
+            apply(&mut merged, table, &crate::paths::system_config_path());
         }
     }
     merged
@@ -518,6 +533,14 @@ pub fn system_layer() -> SystemLayer {
     let Ok(text) = std::fs::read_to_string(&path) else {
         return SystemLayer::Absent;
     };
+    // Before the contents are read as policy, the question of whether this file
+    // speaks for the machine at all. See `paths::system_config_untrusted`.
+    if let Some(why) = crate::paths::system_config_untrusted() {
+        return SystemLayer::Skipped(format!(
+            "{} does not carry the authority of the machine: {why}",
+            path.display()
+        ));
+    }
     let table = match text.parse::<toml::Table>() {
         Ok(t) => t,
         Err(e) => {
@@ -1195,6 +1218,33 @@ mod tests {
 
         std::fs::write(&sys, "[export]\nbatch_size = 50\n").unwrap();
         assert!(matches!(system_layer(), SystemLayer::Present(_)));
+    }
+
+    /// The layer outranks the user's own config *because* the user cannot write
+    /// it. A file that fails that test is not policy — it is a file, and one an
+    /// account that would rather not be monitored has every reason to plant,
+    /// since a layer of their own authorship would deny nothing and, worse,
+    /// would make `check` report the host as governed.
+    #[test]
+    fn a_machine_wide_layer_an_ordinary_account_could_have_written_is_not_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        let _data = crate::paths::DataDir::set(dir.path());
+        std::fs::write(crate::paths::config_path(), "[capture]\nprompts = true\n").unwrap();
+        let sys = dir.path().join("system.toml");
+        std::fs::write(&sys, "[capture]\nprompts = false\n").unwrap();
+        let _guard = crate::paths::SystemConfig::set(&sys);
+
+        assert!(!load().capture.prompts, "control: the layer does apply");
+
+        let _planted = crate::paths::UntrustedSystemConfig::set("owned by uid 501");
+        let SystemLayer::Skipped(why) = system_layer() else {
+            panic!("a layer nothing proves is machine-wide must not read as in force");
+        };
+        assert!(why.contains("owned by uid 501"), "{why}");
+        assert!(
+            load().capture.prompts,
+            "a planted layer still decided what the loader captures"
+        );
     }
 
     /// The hardened baseline in `docs/threat-model.md` is the file operators
