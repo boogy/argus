@@ -363,6 +363,21 @@ argus check --managed --remote-url https://policy.corp.example/argus.toml
 # exit 0 = intact, 2 = something is broken
 ```
 
+## Checking that this document is true
+
+Every bypass above is performed, in order, by `make tamper-drill`
+([`tests/tamper_drill.rs`](../tests/tamper_drill.rs)) — against a real install
+in a temporary home, a real daemon, and a mock collector that records what it
+receives. Each case asserts the alert this page promises: the attribute on the
+OTLP body, or the exit code and wording of `check`. One further test installs
+and touches nothing, and asserts the host is clean — without it the other eight
+would pass just as well against a `check` that reports everything as broken.
+
+Two things it deliberately does not cover, rather than covering them weakly:
+case 9 collapses into case 1 here, and the `allow_env_overrides` /
+`allow_user_uninstall` refusals live behind a root-owned path that a test
+process cannot redirect, so they are proven in the unit suite instead.
+
 ## What is still open
 
 **An unwired agent is invisible.** A developer who installs Cursor, Aider, a

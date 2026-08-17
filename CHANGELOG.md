@@ -53,6 +53,11 @@ their own laptop but does not own the machine-wide root.
   emits, and the alert that closes it, plus a hardened baseline policy pinning
   every key a fleet should pin. A test deserializes that template as a `Config`,
   so a drifted example fails CI rather than deploying as no policy at all.
+- **`make tamper-drill` runs those bypasses for real**, against a sandboxed
+  install and a mock collector: each one is performed on the assembled binary
+  and the alert the document promises is asserted on the OTLP body or the exit
+  code of `check`. A passing unit suite proves the code does what it says; this
+  proves the product does.
 
 Upgrading from 0.2.0: heartbeats are on by default, so expect steady low-volume
 traffic from every host instead of traffic only when an agent runs — that is the
