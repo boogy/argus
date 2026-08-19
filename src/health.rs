@@ -182,9 +182,13 @@ mod tests {
     }
 
     fn monitor(dir: &tempfile::TempDir) -> (Monitor, Arc<Buffer>) {
+        monitor_with(dir, Config::default())
+    }
+
+    fn monitor_with(dir: &tempfile::TempDir, cfg: Config) -> (Monitor, Arc<Buffer>) {
         let _ = dir;
         let buffer = Arc::new(Buffer::open(&BufferCfg::default()).unwrap());
-        let cfg = Arc::new(RwLock::new(Config::default()));
+        let cfg = Arc::new(RwLock::new(cfg));
         let summary = SharedSummary::default();
         (Monitor::new(buffer.clone(), cfg, summary), buffer)
     }
@@ -396,8 +400,10 @@ mod tests {
         );
     }
 
-    /// And that the heartbeat actually carries it — a pure helper nothing calls
-    /// would satisfy the test above while shipping no signal at all.
+    /// And that the heartbeat actually carries it — both branches. A field
+    /// wired to a constant `None` satisfies the unmanaged case while shipping
+    /// no signal at all on the managed one, which is the only case the alert
+    /// exists for.
     #[test]
     fn the_heartbeat_carries_the_policy_age() {
         let dir = tmp();
@@ -411,6 +417,31 @@ mod tests {
         assert_eq!(
             policy_age_secs, None,
             "the test monitor configures no remote.url"
+        );
+
+        // `LAST_POLICY_OK` is only ever written by `poll_loop`, which no unit
+        // test drives, so a managed host in this binary has always been in the
+        // never-fetched state — the `-1` is stable, not a race with a sibling
+        // test.
+        let cfg = Config {
+            remote: crate::config::RemoteCfg {
+                url: Some("https://policy.example/argus.toml".into()),
+                ..Default::default()
+            },
+            ..Config::default()
+        };
+        let (mon, _buffer) = monitor_with(&dir, cfg);
+        let EventKind::Health {
+            policy_age_secs, ..
+        } = mon.snapshot("interval").kind
+        else {
+            panic!("expected a health event");
+        };
+        assert_eq!(
+            policy_age_secs,
+            Some(-1),
+            "a managed host that has never had an answer must say so; this is \
+             the assertion a hardcoded `None` fails"
         );
     }
 }
