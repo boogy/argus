@@ -1228,6 +1228,15 @@ mod tests {
         };
         assert!(why.contains("config schema"), "{why}");
 
+        // Serde ignores a key it does not know, so this parses and matches the
+        // schema — and would read as a layer in force while the pin it means to
+        // set is not there at all.
+        std::fs::write(&sys, "[remote]\npublik_key = \"x\"\n").unwrap();
+        let SystemLayer::Skipped(why) = system_layer() else {
+            panic!("a misspelled pin must not read as a layer in force");
+        };
+        assert!(why.contains("publik_key"), "{why}");
+
         std::fs::write(&sys, "[export]\nbatch_size = 50\n").unwrap();
         assert!(matches!(system_layer(), SystemLayer::Present(_)));
     }
