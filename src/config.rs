@@ -1323,4 +1323,44 @@ mod tests {
             "the machine-wide layer is world-readable; it must not model credentials in it"
         );
     }
+
+    /// Reporting a rollback and refusing to *apply* one are different jobs.
+    /// `integrity::check_config` only tells the fleet; this is the gate that
+    /// decides what the daemon actually runs on. Without it a host would obey
+    /// the attacker's older policy while dutifully reporting that it was.
+    #[test]
+    fn a_rolled_back_cache_is_not_applied() {
+        let dir = tempfile::tempdir().unwrap();
+        let _data = crate::paths::DataDir::set(dir.path());
+        let (sk, pk) = crate::policysig::testkeys::keypair();
+        let sys = dir.path().join("system.toml");
+        std::fs::write(&sys, format!("[remote]\npublic_key = \"{pk}\"\n")).unwrap();
+        let _guard = crate::paths::SystemConfig::set(&sys);
+
+        let cache = crate::paths::cached_remote_config_path();
+        let sigp = crate::paths::cached_remote_config_sig_path();
+
+        // `batch_size` rather than a capture switch: every capture default is
+        // permissive, so "the old policy applied" and "the old policy was
+        // discarded" would read the same. A value no default shares is the
+        // only way the assertion can tell them apart.
+        let current = "[remote]\npolicy_serial = 7\n[export]\nbatch_size = 512\n";
+        std::fs::write(&cache, current).unwrap();
+        std::fs::write(&sigp, crate::policysig::testkeys::sign(&sk, current)).unwrap();
+        assert_eq!(load().export.batch_size, 512, "the policy should apply");
+
+        let rolled_back = "[remote]\npolicy_serial = 6\n[export]\nbatch_size = 999\n";
+        std::fs::write(&cache, rolled_back).unwrap();
+        std::fs::write(&sigp, crate::policysig::testkeys::sign(&sk, rolled_back)).unwrap();
+        assert!(
+            crate::policysig::check_cache(rolled_back).is_ok(),
+            "the signature is genuine, which is the whole difficulty"
+        );
+        assert_eq!(
+            load().export.batch_size,
+            256,
+            "the older policy must not take effect; the host falls back to the \
+             built-in default and `argus check` reports the refusal"
+        );
+    }
 }
