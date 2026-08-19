@@ -5,6 +5,37 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-08-19
+
+Install once. Until now an argus install only wired the AI tools present the
+moment it ran, so a fleet had to re-run `install` on a schedule to catch tools
+added later and to repair hooks a user removed — and on macOS that recurring
+run is what surfaced a daily "background item added" notification.
+
+### Highlights
+
+- **The daemon closes its own wiring gaps.** The integrity loop now re-runs
+  `install` for any supported tool it finds present but unwired — a tool
+  installed after argus (opencode, PI, Codex, …), or hooks a user deleted —
+  gated on `[integrity].self_heal` (on by default). It runs *after* the findings
+  are emitted, so the new-tool or tamper event still reaches the SIEM before the
+  gap is closed, and it is idempotent, so a healthy host writes nothing and
+  ships no traffic.
+- **MDM installs once.** With the daemon self-healing on its hourly self-check,
+  Jamf/Intune no longer need a recurring install policy — a one-time
+  Enrollment-Complete install is enough. That removes the daily re-run behind
+  the macOS background-item notification while new tools still get wired
+  automatically.
+
+Upgrading from 0.3.0: nothing to do. Self-heal is on by default and only acts on
+a host whose wiring already drifted; set `[integrity].self_heal = false` to keep
+the check purely observational.
+
+### 🚀 Features
+* daemon self-heals wiring so a fleet installs once ([f846505](https://github.com/boogy/argus/commit/f846505a6a42e4bbc02d6669349276ace89cfacd))
+
+**Full Changelog**: https://github.com/boogy/argus/compare/v0.3.0...v0.4.0
+
 ## [0.3.0] - 2026-08-17
 
 Anti-tamper hardening. 0.2.0 could prove its wiring had not been edited; it

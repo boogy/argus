@@ -356,6 +356,29 @@ fn check_all(cfg: &Config) -> Vec<Finding> {
     findings
 }
 
+/// Re-wire supported tools that are present but unwired: a tool installed
+/// after argus, or hooks a user removed. Idempotent — `install` refreshes only
+/// what is missing or altered — and gated on the wiring check actually being
+/// broken, so a healthy host writes nothing. Returns whether it re-ran install.
+///
+/// This is what lets a fleet `install` once and let the agent keep itself
+/// wired, rather than an MDM re-running install on a visible daily cadence.
+fn self_heal(home: &Path) -> bool {
+    if check(home).iter().all(|f| f.ok) {
+        return false;
+    }
+    match crate::harness::install(home, false) {
+        Ok(()) => {
+            tracing::info!("self-heal: re-ran install to wire missing or altered hooks");
+            true
+        }
+        Err(e) => {
+            tracing::error!("self-heal install failed: {e}");
+            false
+        }
+    }
+}
+
 /// Daemon task: periodically self-check wiring and buffer a finding for every
 /// *broken* tool (which then exports to the SIEM/collector like any event).
 /// Healthy tools emit nothing — an "ok" every interval would be pure noise. A
@@ -393,6 +416,13 @@ pub async fn integrity_loop(
                 }
             }
             *summary.write().unwrap_or_else(|e| e.into_inner()) = next;
+            // Close the gaps just found: wire tools installed after argus and
+            // re-wire hooks a user removed. Runs *after* emitting the findings,
+            // so the new-tool / tamper event still reaches the SIEM before it
+            // is healed.
+            if cfg.integrity.self_heal {
+                self_heal(&crate::install::home());
+            }
         }
         tokio::time::sleep(Duration::from_secs(cfg.integrity.interval_secs.max(30))).await;
     }
@@ -459,6 +489,31 @@ mod tests {
             .unwrap();
         assert!(!cc.ok);
         assert!(cc.detail.contains("PreToolUse"), "detail: {}", cc.detail);
+    }
+
+    #[test]
+    fn self_heal_rewires_a_removed_hook() {
+        let home = wired_claude_home();
+        // A user strips a hook, blinding capture for that event.
+        let path = home.path().join(".claude/settings.json");
+        let mut doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        doc["hooks"]["PreToolUse"] = serde_json::json!([]);
+        std::fs::write(&path, doc.to_string()).unwrap();
+        assert!(
+            check(home.path()).iter().any(|f| !f.ok),
+            "broken before heal"
+        );
+
+        assert!(self_heal(home.path()), "self_heal re-ran install");
+
+        let cc = check(home.path())
+            .into_iter()
+            .find(|f| f.tool == "claude-code")
+            .unwrap();
+        assert!(cc.ok, "re-wired after self-heal: {cc:?}");
+        // A healthy host must not trigger a write.
+        assert!(!self_heal(home.path()), "no-op when nothing is broken");
     }
 
     /// Present is not intact. None of these entries is missing and every one
