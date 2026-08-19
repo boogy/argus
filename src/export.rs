@@ -537,6 +537,24 @@ impl Exporter {
             .map_err(|e| Rejection::Transient(e.into()))?;
         let status = response.status();
         if status.is_success() {
+            // OTLP/HTTP lets a collector answer 200 and still say it dropped
+            // records — `partialSuccess.rejectedLogRecords`. Acking on the
+            // status alone deletes those records from the buffer, so the one
+            // party that knows they were lost has already been told and
+            // forgotten. Retrying the whole batch may duplicate the records
+            // that *were* kept, which is the right trade against losing the
+            // ones that were not: a duplicate is visible downstream and a
+            // silent hole is not.
+            let body = response.text().await.unwrap_or_default();
+            if let Some(rejected) = rejected_log_records(&body) {
+                return Err(Rejection::Permanent {
+                    status: status.as_u16(),
+                    detail: first_line(
+                        &format!("collector rejected {rejected} of the batch's records: {body}"),
+                        200,
+                    ),
+                });
+            }
             return Ok(());
         }
         if is_permanent(status.as_u16()) {
@@ -615,6 +633,18 @@ fn first_line(body: &str, max: usize) -> String {
         Some((i, _)) => format!("{}…", &line[..i]),
         None => line.to_string(),
     }
+}
+
+/// How many records a 2xx said it threw away, or `None` for a clean export.
+///
+/// Tolerant on purpose: the field is a string in the JSON mapping of a proto
+/// int64, collectors have been seen sending a bare number, and a body that is
+/// not JSON at all is a collector that answered 200 and meant it.
+fn rejected_log_records(body: &str) -> Option<u64> {
+    let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    let n = v.get("partialSuccess")?.get("rejectedLogRecords")?;
+    let n = n.as_u64().or_else(|| n.as_str()?.parse().ok())?;
+    (n > 0).then_some(n)
 }
 
 #[cfg(test)]
@@ -1207,6 +1237,86 @@ mod tests {
             err.is_err(),
             "non-2xx must surface as Err for at-least-once redelivery"
         );
+    }
+
+    /// A collector is allowed to answer 200 and still say it threw records away.
+    /// Treating that as a clean export acks the batch, the buffer deletes it, and
+    /// the rejected records are gone without a `loss` record naming them — which
+    /// is the one outcome the pipeline is built never to produce silently.
+    #[tokio::test]
+    async fn a_partial_success_body_is_not_a_success() {
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let addr = server.server_addr().to_string();
+        std::thread::spawn(move || {
+            for req in server.incoming_requests() {
+                let body = r#"{"partialSuccess":{"rejectedLogRecords":"3","errorMessage":"bad attribute"}}"#;
+                let _ = req.respond(tiny_http::Response::from_string(body));
+            }
+        });
+        let cfg = crate::config::ExportCfg {
+            otlp_endpoint: Some(format!("http://{addr}")),
+            ..Default::default()
+        };
+        let exporter = Exporter::new(&cfg);
+        let e = Event::new(
+            "codex",
+            None,
+            None,
+            EventKind::Session {
+                action: "start".into(),
+                detail: serde_json::Value::Null,
+            },
+        );
+        let err = exporter
+            .export(std::slice::from_ref(&e), &Resource::default())
+            .await
+            .expect_err("a body that rejects records is not a clean export");
+        let text = format!("{err:?}");
+        assert!(
+            text.contains('3') && text.contains("bad attribute"),
+            "{text}"
+        );
+    }
+
+    /// The ordinary case has to stay ordinary: an empty body, `{}`, and an
+    /// explicit zero are all complete successes, and a collector that answers
+    /// with something that is not JSON at all is not a reason to retry a batch
+    /// it just accepted.
+    #[tokio::test]
+    async fn an_ordinary_2xx_is_still_a_success() {
+        for body in [
+            "",
+            "{}",
+            r#"{"partialSuccess":{}}"#,
+            r#"{"partialSuccess":{"rejectedLogRecords":"0"}}"#,
+            "not json at all",
+        ] {
+            let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+            let addr = server.server_addr().to_string();
+            let owned = body.to_string();
+            std::thread::spawn(move || {
+                for req in server.incoming_requests() {
+                    let _ = req.respond(tiny_http::Response::from_string(owned.clone()));
+                }
+            });
+            let cfg = crate::config::ExportCfg {
+                otlp_endpoint: Some(format!("http://{addr}")),
+                ..Default::default()
+            };
+            let e = Event::new(
+                "codex",
+                None,
+                None,
+                EventKind::Session {
+                    action: "start".into(),
+                    detail: serde_json::Value::Null,
+                },
+            );
+            Exporter::new(&cfg)
+                .export(std::slice::from_ref(&e), &Resource::default())
+                .await
+                .unwrap_or_else(|e| panic!("body {body:?} should be a success: {e:?}"));
+        }
     }
 
     /// The endpoint in config is a base, and the exporter owns the `/v1/logs`
