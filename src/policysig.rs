@@ -157,6 +157,75 @@ pub fn check_cache(body: &str) -> Result<(), String> {
     verify(body.as_bytes(), &sig, &key)
 }
 
+/// The monotonic serial a policy declares, as `[remote] policy_serial`.
+///
+/// Optional, because every policy deployed before this existed has none and
+/// those fleets must keep working. A policy that declares one opts its fleet
+/// into refusing anything older — which is the only defence against a
+/// genuinely-signed *old* policy being put back, since the cache it lands in
+/// belongs to the account the policy constrains.
+pub fn policy_serial(body: &str) -> Option<u64> {
+    body.parse::<toml::Table>()
+        .ok()?
+        .get("remote")?
+        .as_table()?
+        .get("policy_serial")?
+        .as_integer()?
+        .try_into()
+        .ok()
+}
+
+/// Where the highest serial this host has ever applied is remembered.
+///
+/// In the data directory rather than in `events.db`, because it has to be
+/// readable before the buffer is opened — which also puts it within reach of
+/// the account the policy constrains. That is survivable only because both
+/// readers of it treat a refusal exactly as they treat a cache that will not
+/// verify: `argus check` reports `ok: false`. Raising the floor to lock out
+/// a genuine policy is therefore as loud as deleting the cache outright, and
+/// deleting the floor buys exactly one rollback.
+fn serial_path() -> std::path::PathBuf {
+    crate::paths::data_dir().join("policy-serial")
+}
+
+/// Remember `body`'s serial as the floor for every later policy.
+pub fn record_serial(body: &str) {
+    let Some(n) = policy_serial(body) else { return };
+    let path = serial_path();
+    let seen = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(0);
+    if n > seen {
+        let _ = crate::paths::write_private(&path, n.to_string().as_bytes());
+    }
+}
+
+/// Whether `body` is at least as new as the newest policy already applied.
+pub fn check_rollback(body: &str) -> Result<(), String> {
+    // Only where a key is pinned. Without a pin an attacker writes the policy
+    // *and* its serial, so a floor defends nothing — while still being a file
+    // the watched account could raise to lock every later policy out. Cost
+    // with no benefit is not a trade worth making.
+    if pinned_key().is_none() {
+        return Ok(());
+    }
+    let Some(n) = policy_serial(body) else {
+        return Ok(());
+    };
+    let seen = std::fs::read_to_string(serial_path())
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(0);
+    if n < seen {
+        return Err(format!(
+            "policy serial {n} is older than the {seen} this host already \
+             applied; refusing to roll back"
+        ));
+    }
+    Ok(())
+}
+
 /// Where the detached signature for `url` is fetched from.
 ///
 /// Before the query string, not after it: a policy server that takes
@@ -357,5 +426,112 @@ mod tests {
                 "{plausible} would wrongly disable the whole machine-wide layer"
             );
         }
+    }
+
+    /// A signature says who wrote a policy, not which policy it is. Yesterday's
+    /// permissive policy is as authentic as today's strict one, and the cache it
+    /// would be restored into is a file in the watched user's own data directory
+    /// — so without a serial, tightening a fleet's policy can be undone by
+    /// putting back a file the administrator themselves signed.
+    #[test]
+    fn an_authentically_signed_older_policy_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let _data = crate::paths::DataDir::set(dir.path());
+        let (sk, pk) = keypair();
+        let sys = dir.path().join("system.toml");
+        std::fs::write(&sys, format!("[remote]\npublic_key = \"{pk}\"\n")).unwrap();
+        let _guard = crate::paths::SystemConfig::set(&sys);
+
+        let new = "[remote]\npolicy_serial = 7\n[capture]\nprompts = true\n";
+        let old = "[remote]\npolicy_serial = 6\n[capture]\nprompts = false\n";
+        assert_eq!(policy_serial(new), Some(7));
+
+        let sig = crate::paths::cached_remote_config_sig_path();
+        std::fs::write(&sig, sign(&sk, new)).unwrap();
+        std::fs::write(crate::paths::cached_remote_config_path(), new).unwrap();
+        assert_eq!(check_cache(new), Ok(()));
+        record_serial(new);
+
+        // The rollback: both files replaced with an older policy the same key
+        // really did sign.
+        std::fs::write(&sig, sign(&sk, old)).unwrap();
+        assert!(
+            check_cache(old).is_ok(),
+            "the signature itself is genuine, and that is the point"
+        );
+        assert!(
+            check_rollback(old).is_err(),
+            "an older serial than the one already applied must be refused"
+        );
+        assert_eq!(
+            check_rollback(new),
+            Ok(()),
+            "the current serial still applies"
+        );
+    }
+
+    /// A policy with no serial at all is the deployments that exist today, and
+    /// they must keep working — the check only binds once a policy opts in.
+    ///
+    /// Pinned on purpose: without a key the pin gate would short-circuit and
+    /// this would pass without ever reaching the no-serial path it names.
+    #[test]
+    fn a_policy_without_a_serial_is_not_a_rollback() {
+        let dir = tempfile::tempdir().unwrap();
+        let _data = crate::paths::DataDir::set(dir.path());
+        let (_sk, pk) = keypair();
+        let sys = dir.path().join("system.toml");
+        std::fs::write(&sys, format!("[remote]\npublic_key = \"{pk}\"\n")).unwrap();
+        let _guard = crate::paths::SystemConfig::set(&sys);
+
+        assert_eq!(policy_serial("[capture]\nprompts = true\n"), None);
+        assert_eq!(check_rollback("[capture]\nprompts = true\n"), Ok(()));
+    }
+
+    /// Unpinned, the serial defends nothing: whoever writes the policy writes
+    /// its serial too. Binding anyway would hand the watched account a one-line
+    /// way to refuse every future policy, so the floor must stay inert here.
+    #[test]
+    fn without_a_pinned_key_the_floor_does_not_bind() {
+        let dir = tempfile::tempdir().unwrap();
+        let _data = crate::paths::DataDir::set(dir.path());
+        let sys = dir.path().join("system.toml");
+        std::fs::write(&sys, "[capture]\nprompts = true\n").unwrap();
+        let _guard = crate::paths::SystemConfig::set(&sys);
+
+        std::fs::write(dir.path().join("policy-serial"), "99").unwrap();
+        assert_eq!(
+            check_rollback("[remote]\npolicy_serial = 1\n"),
+            Ok(()),
+            "with no key pinned there is nothing to roll back to"
+        );
+    }
+
+    /// The floor is a file the account under monitoring can write, so raising it
+    /// denies the host its fleet policy. That is allowed to be *possible* — argus
+    /// does not out-privilege a root user — but never allowed to be quiet.
+    #[test]
+    fn a_poisoned_floor_is_reported_not_silent() {
+        let dir = tempfile::tempdir().unwrap();
+        let _data = crate::paths::DataDir::set(dir.path());
+        let (sk, pk) = keypair();
+        let sys = dir.path().join("system.toml");
+        std::fs::write(&sys, format!("[remote]\npublic_key = \"{pk}\"\n")).unwrap();
+        let _guard = crate::paths::SystemConfig::set(&sys);
+
+        let body = "[remote]\nurl = \"https://p.example/policy.toml\"\npolicy_serial = 7\n";
+        std::fs::write(crate::paths::cached_remote_config_path(), body).unwrap();
+        std::fs::write(
+            crate::paths::cached_remote_config_sig_path(),
+            sign(&sk, body),
+        )
+        .unwrap();
+
+        std::fs::write(dir.path().join("policy-serial"), u64::MAX.to_string()).unwrap();
+        let findings = crate::integrity::check_config(None);
+        assert!(
+            findings.iter().any(|f| !f.ok),
+            "a host refusing its own fleet policy must not look healthy: {findings:?}"
+        );
     }
 }

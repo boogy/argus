@@ -482,9 +482,17 @@ pub fn merged_table() -> toml::Table {
         // user's own directory. Where a key is pinned, checking that claim
         // here rather than only in `check` is what makes signing prevention
         // instead of a report filed after the policy already applied.
-        if signed && let Err(e) = crate::policysig::check_cache(&text) {
-            tracing::warn!("ignoring unverified remote policy {path:?}: {e}");
-            continue;
+        if signed {
+            if let Err(e) = crate::policysig::check_cache(&text) {
+                tracing::warn!("ignoring unverified remote policy {path:?}: {e}");
+                continue;
+            }
+            if let Err(e) = crate::policysig::check_rollback(&text) {
+                tracing::warn!("ignoring rolled-back remote policy {path:?}: {e}");
+                continue;
+            }
+            // Only a body that verified and is not a rollback raises the floor.
+            crate::policysig::record_serial(&text);
         }
         let table = match text.parse::<toml::Table>() {
             Ok(table) => table,

@@ -225,6 +225,17 @@ with `[remote] public_key` pinned in the machine-wide layer, a policy body is
 fetched alongside its `.sig`, verified with ed25519, and refused — neither
 cached nor applied — if it does not verify.
 
+Signing alone says who wrote a policy, not which one. Where a key is pinned,
+a policy that sets `[remote] policy_serial` also refuses anything older than
+the highest serial the host has applied, so an administrator who tightens a
+policy cannot have that undone by restoring a copy they themselves signed.
+Policies without a serial, and hosts without a pinned key, are unaffected.
+
+The floor itself is a file in the user's data directory, so it can be raised
+to refuse even a current policy. That is a denial of policy, not a weakening
+of one, and `argus check` reports it the same way it reports a cache that
+will not verify — the host stops looking healthy.
+
 **What argus emits:** `health.config_fingerprint` on every heartbeat, plus
 `health.policy_url`. `argus check --config --remote-url <canonical>` fails
 unless the running `remote.url` matches exactly, which is what catches a
@@ -344,6 +355,9 @@ url = "https://policy.corp.example/argus.toml"
 # file the watched user can write.
 public_key = "…"
 poll_interval_secs = 300
+# Bump on every tightening. Refuses a genuinely-signed but older policy body
+# being restored — the rollback a pinned key alone does not catch.
+policy_serial = 1
 
 [integrity]
 enabled = true

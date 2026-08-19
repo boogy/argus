@@ -92,6 +92,18 @@ pub fn check_config(expected_url: Option<&str>) -> Vec<Finding> {
             ));
         }
     } else if url.is_none() {
+        // The loader may have discarded a cache that still sits on disk —
+        // most likely because it is a signed rollback — and merges to no
+        // `[remote].url` as a result. "No remote policy configured" would
+        // then hide exactly the attack the floor exists to catch, so a cache
+        // that verifies but fails the rollback check is reported here too,
+        // before it can be mistaken for a host that was never given one.
+        if let Ok(text) = std::fs::read_to_string(crate::paths::cached_remote_config_path())
+            && crate::policysig::check_cache(&text).is_ok()
+            && let Err(e) = crate::policysig::check_rollback(&text)
+        {
+            return broken(format!("remote policy cache is not applied: {e}"));
+        }
         // A machine-wide file with no remote policy behind it is a complete
         // deployment, not a half-configured one: the keys it pins are already
         // beyond the user's reach, which is the property the remote policy was
@@ -123,6 +135,9 @@ pub fn check_config(expected_url: Option<&str>) -> Vec<Finding> {
         return broken(format!(
             "remote policy cache does not verify against the pinned key, not applied: {e}"
         ));
+    }
+    if let Err(e) = crate::policysig::check_rollback(&text) {
+        return broken(format!("remote policy cache is not applied: {e}"));
     }
     let policy = match text.parse::<toml::Table>() {
         Ok(t) => t,
