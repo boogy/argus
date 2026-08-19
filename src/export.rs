@@ -541,10 +541,14 @@ impl Exporter {
             // records — `partialSuccess.rejectedLogRecords`. Acking on the
             // status alone deletes those records from the buffer, so the one
             // party that knows they were lost has already been told and
-            // forgotten. Retrying the whole batch may duplicate the records
-            // that *were* kept, which is the right trade against losing the
-            // ones that were not: a duplicate is visible downstream and a
-            // silent hole is not.
+            // forgotten. So it settles like any other refusal: `Permanent`
+            // acks the batch and leaves an `export_rejected` record naming the
+            // count. Retrying is not the alternative — the collector read this
+            // request and refused part of it, so re-sending would re-deliver
+            // what it kept and be refused again for what it did not, wedging
+            // the head of the queue behind events it will never take. The loss
+            // is not preventable here, only reportable, and reporting it is
+            // the whole point.
             let body = response.text().await.unwrap_or_default();
             if let Some(rejected) = rejected_log_records(&body) {
                 return Err(Rejection::Permanent {
