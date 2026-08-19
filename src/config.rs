@@ -553,6 +553,18 @@ pub fn system_layer() -> SystemLayer {
             path.display()
         ));
     }
+    // A key serde ignored is a key the administrator believes is in force.
+    // Harmless for most of the schema, and not harmless for the one key that
+    // decides whether remote policy is authenticated at all.
+    let typos = crate::policysig::suspicious_remote_keys(&table);
+    if !typos.is_empty() {
+        return SystemLayer::Skipped(format!(
+            "{} has misspelled [remote] keys ({}), so the policy it means to \
+             pin is not in force",
+            path.display(),
+            typos.join(", ")
+        ));
+    }
     SystemLayer::Present(table)
 }
 

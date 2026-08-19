@@ -47,6 +47,69 @@ pub fn pinned_key() -> Option<String> {
         .map(str::to_owned)
 }
 
+/// The keys in `[remote]` that are close enough to a real one to be a typo.
+///
+/// A misspelled `public_key` is worse than an absent one: absent is a host
+/// that never pinned, which is a supported deployment, while misspelled is a
+/// host whose administrator believes it pinned and whose users can write
+/// their own policy cache. Serde ignores keys it does not know, so nothing
+/// downstream will ever notice on its own.
+///
+/// Edit distance 1 against `public_key` alone — the substitution and
+/// dropped/added-letter cases (`publik_key`, `pubic_key`, `public_ket`). A
+/// true transposition like `pubilc_key` is two edits and is deliberately not
+/// caught: widening to distance 2 would start flagging real keys.
+///
+/// Only `public_key`, and not every known key, because a hit here makes the
+/// loader skip the whole machine-wide layer — so a false positive disables
+/// the very control this protects. `url` is three characters long and its
+/// one-edit neighbourhood is full of plausible words (`uri`, `curl`); the
+/// neighbourhood of a ten-character key is not. The check is aimed at the one
+/// key whose silent absence is a security failure rather than a visible one.
+pub fn suspicious_remote_keys(table: &toml::Table) -> Vec<String> {
+    const KNOWN: &[&str] = &["url", "public_key", "poll_interval_secs", "policy_serial"];
+    let Some(remote) = table.get("remote").and_then(toml::Value::as_table) else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = remote
+        .keys()
+        .filter(|k| !KNOWN.contains(&k.as_str()))
+        .filter(|k| within_one_edit(k, "public_key"))
+        .cloned()
+        .collect();
+    out.sort();
+    out
+}
+
+/// Whether `a` reaches `b` in one insertion, deletion or substitution.
+fn within_one_edit(a: &str, b: &str) -> bool {
+    let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+    if a.len().abs_diff(b.len()) > 1 {
+        return false;
+    }
+    let (mut i, mut j, mut slack) = (0, 0, true);
+    while i < a.len() && j < b.len() {
+        if a[i] == b[j] {
+            i += 1;
+            j += 1;
+            continue;
+        }
+        if !slack {
+            return false;
+        }
+        slack = false;
+        match a.len().cmp(&b.len()) {
+            std::cmp::Ordering::Greater => i += 1,
+            std::cmp::Ordering::Less => j += 1,
+            std::cmp::Ordering::Equal => {
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+    slack || (a.len() - i) + (b.len() - j) == 0
+}
+
 /// Verify `body` against a base64 detached `signature` and base64 `key`.
 ///
 /// The error is prose for an operator, not a type: every caller either logs it
@@ -242,5 +305,57 @@ mod tests {
             "https://h/p.toml.sig?host=a&v=2"
         );
         assert_eq!(sig_url("https://h/p.toml#x"), "https://h/p.toml.sig#x");
+    }
+
+    /// The failure this module cannot afford is the silent one. A key that is
+    /// present but misspelled reads exactly like a host that pinned nothing, so
+    /// signature checking switches off and the `cat > cache.toml` attack in the
+    /// module doc works again — on a fleet whose administrator believes it is
+    /// pinned. Being wrong has to be louder than being absent.
+    #[test]
+    fn a_misspelled_public_key_is_reported_rather_than_read_as_unpinned() {
+        let dir = tempfile::tempdir().unwrap();
+        let _data = crate::paths::DataDir::set(dir.path());
+        let (_, pk) = keypair();
+        let sys = dir.path().join("system.toml");
+        std::fs::write(&sys, format!("[remote]\npublik_key = \"{pk}\"\n")).unwrap();
+        let _guard = crate::paths::SystemConfig::set(&sys);
+
+        assert_eq!(pinned_key(), None, "a misspelling is not a key");
+
+        let table: toml::Table = std::fs::read_to_string(&sys).unwrap().parse().unwrap();
+        assert_eq!(
+            suspicious_remote_keys(&table),
+            vec!["publik_key".to_string()],
+            "the misspelling has to be nameable, or nothing can report it"
+        );
+    }
+
+    /// A false positive here is worse than the typo it looks for: a hit makes the
+    /// loader skip the entire machine-wide layer, so over-eager matching disables
+    /// the control instead of protecting it. Correctly spelled keys, and keys a
+    /// later version might plausibly add, must all come back clean.
+    #[test]
+    fn a_correctly_spelled_remote_table_reports_nothing() {
+        let table: toml::Table =
+            "[remote]\nurl = \"https://h/p.toml\"\npublic_key = \"x\"\npoll_interval_secs = 300\n"
+                .parse()
+                .unwrap();
+        assert!(suspicious_remote_keys(&table).is_empty());
+
+        for plausible in [
+            "policy_serial",
+            "timeout_secs",
+            "ca_bundle",
+            "retries",
+            "enabled",
+            "signature_url",
+        ] {
+            let table: toml::Table = format!("[remote]\n{plausible} = \"x\"\n").parse().unwrap();
+            assert!(
+                suspicious_remote_keys(&table).is_empty(),
+                "{plausible} would wrongly disable the whole machine-wide layer"
+            );
+        }
     }
 }
