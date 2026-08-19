@@ -480,6 +480,12 @@ pub enum EventKind {
         /// rather than only to a `check` nobody ran.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         policy_url: Option<String>,
+        /// Seconds since the policy URL last answered. Absent on a host that
+        /// configures no `remote.url`; `-1` on one that does and has never had
+        /// an answer. A blocked URL is otherwise invisible here — `policy_url`
+        /// and `config_fingerprint` both keep reporting the last good policy.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        policy_age_secs: Option<i64>,
         /// Queue depth. Heartbeats arriving with a growing buffer are an export
         /// that is failing while capture still works — a different fault, and a
         /// different fix, from either half being down.
@@ -740,6 +746,7 @@ pub fn visit_strings(kind: &mut EventKind, f: &mut impl FnMut(&mut String)) {
             broken: _,
             config_fingerprint: _,
             policy_url: _,
+            policy_age_secs: _,
             buffer_events: _,
             buffer_bytes: _,
             spool_files: _,

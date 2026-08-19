@@ -249,6 +249,15 @@ repointed or removed policy URL; pass the canonical URL from the MDM.
 > rule is a population comparison, not an equality test against a constant.
 >
 > **A12 — Policy URL.** `health.policy_url` absent, or not the canonical one.
+>
+> **A15 — Stale policy.** `health.policy_age_secs` greater than several times
+> `remote.poll_interval_secs`, or `-1` persisting past the first poll interval
+> on a host that is supposed to be managed. This is what a blocked policy URL
+> looks like: the host keeps applying the last cache it fetched, so
+> `health.policy_url` and `health.config_fingerprint` both keep looking
+> correct. A daemon reports `-1` between startup and its first successful
+> poll, so alert on `-1` that persists, not on the first heartbeat after a
+> restart.
 
 ### 7. Replace the binary
 

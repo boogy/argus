@@ -355,6 +355,7 @@ fn record(e: &Event) -> Value {
             broken,
             config_fingerprint,
             policy_url,
+            policy_age_secs,
             buffer_events,
             buffer_bytes,
             spool_files,
@@ -385,6 +386,9 @@ fn record(e: &Event) -> Value {
             attrs.push(attr("health.config_fingerprint", config_fingerprint));
             if let Some(url) = policy_url {
                 attrs.push(attr("health.policy_url", url));
+            }
+            if let Some(age) = policy_age_secs {
+                attrs.push(attr("health.policy_age_secs", &age.to_string()));
             }
             attrs.push(attr("health.buffer_events", &buffer_events.to_string()));
             attrs.push(attr("health.buffer_bytes", &buffer_bytes.to_string()));

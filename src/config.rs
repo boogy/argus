@@ -709,6 +709,25 @@ fn apply_remote(
     }
 }
 
+/// When the policy URL last answered.
+///
+/// `None` until the first successful poll. Module-level rather than threaded
+/// through `poll_loop`, because the health task is the only reader and it is
+/// nowhere near this call chain.
+static LAST_POLICY_OK: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+
+/// How long since the policy URL last answered, or `None` if it never has.
+pub fn since_last_policy_fetch() -> Option<std::time::Duration> {
+    LAST_POLICY_OK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .map(|t| t.elapsed())
+}
+
+fn note_policy_fetched() {
+    *LAST_POLICY_OK.lock().unwrap_or_else(|e| e.into_inner()) = Some(std::time::Instant::now());
+}
+
 /// Daemon task: poll remote config, atomically cache, hot-swap shared config.
 pub async fn poll_loop(shared: std::sync::Arc<std::sync::RwLock<Config>>) {
     let mut etag: Option<String> = None;
@@ -719,8 +738,13 @@ pub async fn poll_loop(shared: std::sync::Arc<std::sync::RwLock<Config>>) {
         };
         if let Some(url) = url {
             match fetch_remote(&url, etag.as_deref()).await {
-                Ok(Some(policy)) => apply_remote(&shared, &mut etag, &policy),
-                Ok(None) => {}
+                Ok(Some(policy)) => {
+                    note_policy_fetched();
+                    apply_remote(&shared, &mut etag, &policy)
+                }
+                // A 304 means the server was reached and had nothing new,
+                // which is exactly as much evidence of reachability as a body.
+                Ok(None) => note_policy_fetched(),
                 Err(e) => tracing::warn!("remote config fetch failed (using cache): {e}"),
             }
         }
