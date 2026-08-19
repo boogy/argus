@@ -1209,6 +1209,34 @@ mod tests {
         );
     }
 
+    /// The endpoint in config is a base, and the exporter owns the `/v1/logs`
+    /// path. Documenting a value that already carries the path produces
+    /// `/v1/logs/v1/logs`, which every collector answers with a 404 — a
+    /// permanent rejection, so the batch is dropped rather than retried. This
+    /// pins the contract the docs have to be written against.
+    #[test]
+    fn the_documented_endpoints_are_bases_the_exporter_can_append_to() {
+        for doc in [
+            include_str!("../README.md"),
+            include_str!("../docs/threat-model.md"),
+            include_str!("../docs/configuration.md"),
+            include_str!("../docs/installation.md"),
+        ] {
+            for line in doc.lines() {
+                let line = line.trim();
+                let Some(rest) = line.strip_prefix("otlp_endpoint = ") else {
+                    continue;
+                };
+                let value = rest.trim().trim_matches('"');
+                assert!(
+                    !value.trim_end_matches('/').ends_with("/v1/logs"),
+                    "a documented otlp_endpoint already carries the path the \
+                     exporter appends, so requests would go to /v1/logs/v1/logs: {line}"
+                );
+            }
+        }
+    }
+
     /// The two 4xx codes that mean "ask again", not "no".
     #[test]
     fn only_a_refusal_of_the_payload_counts_as_permanent() {

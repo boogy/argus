@@ -329,7 +329,10 @@ allow_env_overrides = false
 allow_user_uninstall = false
 
 [export]
-otlp_endpoint = "https://otel.corp.example/v1/logs"
+# A base URL: argus appends `/v1/logs` itself. A value that already ends in
+# `/v1/logs` posts to `/v1/logs/v1/logs`, which is a 404 — and a 404 is a
+# permanent rejection, so the batch is dropped rather than retried.
+otlp_endpoint = "https://otel.corp.example"
 # Leave credentials out of this file: it is world-readable by construction,
 # because every account on the machine has to be able to read the layer that
 # governs it. Put per-user tokens in the per-user config.
