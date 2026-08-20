@@ -5,7 +5,7 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.5.0] - 2026-08-20
+## [0.5.0] - 2026-08-21
 
 Corner cases. 0.4.0 made a fleet install once; this release is about what
 happens at the edges of the controls that install put in place — a policy that
@@ -36,16 +36,30 @@ control the code does not implement.
   its administrator believed otherwise. A `[remote]` key within one edit of
   `public_key` now makes the loader refuse the whole machine-wide layer and
   say why — a host that merely looks managed being the worse outcome.
-- **A 2xx that drops records is a loss.** An OTLP response carrying
-  `partialSuccess.rejectedLogRecords` was counted as a clean export; it is now
-  classified as a permanent rejection and recorded in the `loss` table as
-  `export_rejected`.
-- **Un-redacted data cannot land in the working directory.** If no data
-  directory can be resolved (no `HOME`, no `XDG_DATA_HOME`), argus now refuses
-  rather than falling back to the cwd — which is where the pre-redaction
-  hand-off spool would otherwise have been written.
+- **A 2xx that drops records is a loss, and it is counted as one.** An OTLP
+  response carrying `partialSuccess.rejectedLogRecords` was treated as a clean
+  export; it is now a permanent rejection recorded in the `loss` table as
+  `export_rejected`. The count recorded is the records the collector actually
+  refused — charging the whole batch would have reported one rejected record
+  out of a 256-event batch as 256 events destroyed, and `loss.count` is what a
+  fleet sums to get its loss rate. The collector's stated reason is read out of
+  the response body's JSON, so it survives a collector that pretty-prints.
+- **Un-redacted data cannot land in the working directory, and a host that
+  cannot resolve one says so.** If no data directory can be resolved (no
+  `HOME`, no `XDG_DATA_HOME`), argus refuses rather than falling back to the
+  cwd — which is where the pre-redaction hand-off spool would otherwise have
+  been written. `argus status` and the daemon now report that failure the way
+  they report any other, instead of aborting: the daemon is what a supervisor
+  restarts in a loop, and a panic there never reached the log it writes to.
+- **A URL credential inside a JSON string no longer takes the next field with
+  it.** Tool inputs are scrubbed as serialized JSON, and there the credential
+  pattern ran past the closing quote to the last `@` in the string, swallowing
+  the host, the punctuation and whatever followed. It is now bounded — without
+  narrowing the password class, which would have left any password containing
+  an escaped quote unmatched and exported in full.
 - **Smaller sharp edges:** a settings file that does not parse is refused
-  instead of being overwritten with an empty one; the remote policy fetch is
+  instead of being overwritten with an empty one, and one that exists but is
+  empty still reads as an empty object; the remote policy fetch is
   size-bounded and refuses a redirect; a URL password containing a literal `@`
   is redacted whole instead of up to its first `@`; slash-command arguments now
   honour `capture.prompts`.
@@ -67,7 +81,9 @@ about on macOS — exclude rules now match case-insensitively there, so a path
 that was being captured despite an exclude rule will stop being captured. If
 you pin `[remote] public_key`, check your published policy carries a serial
 that only ever increases; a policy without one is still accepted, but a
-decreasing one is now refused.
+decreasing one is now refused. If you chart export loss, `export_rejected`
+counts now reflect the records a collector refused rather than the batch that
+carried them, so a partial rejection reads lower than it did before.
 
 ### 🚀 Features
 * refuse a signed policy older than the one already applied ([d73f7d2](https://github.com/boogy/argus/commit/d73f7d2fedcc18d626466b1bca5b63a68387ac6d))
@@ -84,6 +100,9 @@ decreasing one is now refused.
 * re-judging the resolved path against include dropped macOS TMPDIR ([79a0526](https://github.com/boogy/argus/commit/79a0526fc885c9d30f38fe32ec42e436cde2400f))
 * bound the policy fetch and refuse a redirected one ([4764387](https://github.com/boogy/argus/commit/4764387db7811f531c2256f980dd552dae02e942))
 * a URL password containing @ was only half redacted ([6f639be](https://github.com/boogy/argus/commit/6f639be677ce25229b6cf57a68246c8f618f28d1))
+* report the records a collector rejected, not the batch that carried them ([26ab1d4](https://github.com/boogy/argus/commit/26ab1d46e63a04be13a46d5906f06e199e0b61b2))
+* report an unresolvable data directory instead of aborting ([ef97d85](https://github.com/boogy/argus/commit/ef97d8573ad0c11f131677357f550258e5bf5036))
+* bound url-credentials inside JSON without leaving a password unmatched ([7131ca5](https://github.com/boogy/argus/commit/7131ca5bc669834dafd467a145ac304474bb26af))
 
 ### 📝 Documentation
 * the baseline policy's otlp_endpoint doubled the /v1/logs path ([06aecb2](https://github.com/boogy/argus/commit/06aecb28dd943ae6d9dac268bee38d7af56808ce))
@@ -92,12 +111,15 @@ decreasing one is now refused.
 * two loss reasons the code emits were missing from the schema page ([8237b8b](https://github.com/boogy/argus/commit/8237b8b6a6bcdf544b2d57ab8e1c2a8a4b359d4e))
 * export_rejected also covers a 2xx that reports partialSuccess ([7edc85e](https://github.com/boogy/argus/commit/7edc85e3213ee6ec243421d67e8e28a86889f60f))
 * the redaction claim contradicted the spool limitation below it ([b472b2f](https://github.com/boogy/argus/commit/b472b2fc66e5a9f060503cd4eb5c7a20b6da21a2))
+* record why the url-credentials over-match is not narrowed ([75ff6d7](https://github.com/boogy/argus/commit/75ff6d77649229b9c00ee13facff38fa79295599))
 
 ### Other Changes
 * prove a misspelled pin actually skips the machine-wide layer ([625d942](https://github.com/boogy/argus/commit/625d942547061f56b9f9f0af63c5bf8ab4a03f41))
 * prove the loader refuses to apply a rolled-back policy, not just report it ([c2e2120](https://github.com/boogy/argus/commit/c2e2120625ca01e410ac42d5705a60a5c6e139b6))
 * prove the policy age reaches the heartbeat on a managed host ([7810a8f](https://github.com/boogy/argus/commit/7810a8ffbda2d3394bbd1fc142f651c040e2cbbf))
 * prove the declared-length refusal is the thing being tested ([efcdb85](https://github.com/boogy/argus/commit/efcdb85d2400ecb528af6e0b23ddba8b8c52d08d))
+* prove the heartbeat's policy age is read from the clock ([294c3fd](https://github.com/boogy/argus/commit/294c3fd2ee06843745fe3a328911ebd234ab034c))
+* pin the empty settings file, and say what KNOWN is synced against ([5ce8adc](https://github.com/boogy/argus/commit/5ce8adc15804632a00a92be21e450360e4c9098f))
 
 **Full Changelog**: https://github.com/boogy/argus/compare/v0.4.0...v0.5.0
 
