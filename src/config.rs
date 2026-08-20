@@ -697,7 +697,20 @@ async fn bounded_text(
     url: &str,
     cap: usize,
 ) -> anyhow::Result<String> {
-    if let Some(len) = resp.content_length()
+    // The header itself, not `Response::content_length()`: this client is
+    // built with reqwest's `gzip` feature, which wraps every body in a decoder
+    // whose size is unknown, so `content_length()` answers `None` for all
+    // responses and the early refusal below would never once have fired.
+    //
+    // A compressed body declares its *compressed* size here, so a small
+    // declaration that inflates past the cap slips this check — the streaming
+    // loop underneath is what actually holds the ceiling. This is the cheap
+    // refusal that avoids pulling a megabyte first, not the guarantee.
+    if let Some(len) = resp
+        .headers()
+        .get(reqwest::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok())
         && len > cap as u64
     {
         anyhow::bail!("body at {url} is too large ({len} bytes, limit {cap})");
@@ -1493,14 +1506,36 @@ mod tests {
         let addr = server.server_addr().to_string();
         std::thread::spawn(move || {
             for req in server.incoming_requests() {
-                let huge = "#".repeat(MAX_POLICY_BYTES + 1);
-                let _ = req.respond(tiny_http::Response::from_string(huge));
+                let huge = vec![b'#'; MAX_POLICY_BYTES + 1];
+                let len = huge.len();
+                // `data_length: Some(..)` is what makes tiny_http declare a
+                // `Content-Length`. `from_string` chunks instead, and a
+                // chunked body is refused by the streaming cap below rather
+                // than by the header check — which left this test passing
+                // with the header check deleted entirely.
+                let r = tiny_http::Response::new(
+                    tiny_http::StatusCode(200),
+                    vec![],
+                    std::io::Cursor::new(huge),
+                    Some(len),
+                    None,
+                )
+                // Above tiny_http's default 32 KiB threshold it chunks the
+                // body regardless of `data_length`, and a chunked response
+                // carries no `Content-Length` at all.
+                .with_chunked_threshold(usize::MAX);
+                let _ = req.respond(r);
             }
         });
         let err = fetch_remote(&format!("http://{addr}/argus.toml"), None)
             .await
             .expect_err("an unbounded body must not be buffered");
-        assert!(format!("{err:#}").contains("too large"), "{err:#}");
+        // "limit" appears only in the `Content-Length` refusal; the streaming
+        // cap says "over N bytes". Asserting the weaker "too large" passed
+        // just as happily with the header check deleted, since the streaming
+        // cap catches the same body a moment later — so the test named a
+        // guard it did not actually hold.
+        assert!(format!("{err:#}").contains("bytes, limit"), "{err:#}");
     }
 
     /// And the case the header check cannot reach: a server that declares no
