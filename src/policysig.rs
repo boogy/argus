@@ -67,6 +67,10 @@ pub fn pinned_key() -> Option<String> {
 /// neighbourhood of a ten-character key is not. The check is aimed at the one
 /// key whose silent absence is a security failure rather than a visible one.
 pub fn suspicious_remote_keys(table: &toml::Table) -> Vec<String> {
+    // Every field of `config::RemoteCfg`, plus `policy_serial`, which arrives
+    // from the network rather than the struct. Add a field there without
+    // adding it here and this function starts calling it a typo -- which
+    // skips the whole machine-wide layer for any administrator who uses it.
     const KNOWN: &[&str] = &["url", "public_key", "poll_interval_secs", "policy_serial"];
     let Some(remote) = table.get("remote").and_then(toml::Value::as_table) else {
         return Vec::new();

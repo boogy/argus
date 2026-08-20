@@ -2108,6 +2108,26 @@ mod tests {
         assert_eq!(read_json_object(&path).unwrap(), json!({}));
     }
 
+    /// The other empty case, and the one that actually happens: the file
+    /// exists but holds nothing. A truncate-then-write that died in its
+    /// window leaves exactly this, and `serde_json` refuses an empty string,
+    /// so without the special case argus would refuse to install into a host
+    /// whose settings file a crash had already emptied -- the moment it is
+    /// least welcome to fail.
+    #[test]
+    fn an_existing_but_empty_settings_file_reads_as_an_empty_object() {
+        let dir = tempfile::tempdir().unwrap();
+        for body in ["", "   \n\t "] {
+            let path = dir.path().join("settings.json");
+            std::fs::write(&path, body).unwrap();
+            assert_eq!(
+                read_json_object(&path).unwrap(),
+                json!({}),
+                "an empty file must read as an empty object, not an error"
+            );
+        }
+    }
+
     /// These files belong to the user's coding agent, not to argus. A
     /// truncate-then-write leaves a window where `settings.json` is empty, and
     /// a crash or a full disk inside it breaks the agent rather than argus.
