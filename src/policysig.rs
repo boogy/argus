@@ -534,4 +534,25 @@ mod tests {
             "a host refusing its own fleet policy must not look healthy: {findings:?}"
         );
     }
+
+    /// This module is a security control an operator has to know exists in order
+    /// to deploy. It shipped while two documents went on calling it unbuilt, and
+    /// the reader most affected — someone deciding whether to pin a key — is
+    /// exactly the one who stops at the limitations list.
+    #[test]
+    fn no_document_claims_signature_verification_is_unimplemented() {
+        for (name, text) in [
+            ("README.md", include_str!("../README.md")),
+            (
+                "docs/troubleshooting.md",
+                include_str!("../docs/troubleshooting.md"),
+            ),
+        ] {
+            let flat = text.replace('\n', " ");
+            assert!(
+                !flat.contains("no detached-signature verification"),
+                "{name} still says the signing this module implements does not exist"
+            );
+        }
+    }
 }

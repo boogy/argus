@@ -270,8 +270,10 @@ yourself) if you want Codex wired.
   the daemon at logon, and a daemon killed mid-session is restarted by the
   next hook invocation rather than by the OS. launchd and systemd do keep it
   alive.
-- Remote config is trusted over HTTPS; no detached-signature verification
-  yet.
+- Remote config authenticity is opt-in: a host verifies the ed25519 detached
+  signature only where `[remote] public_key` is pinned in the machine-wide
+  layer. A host without that layer trusts the policy it fetches over HTTPS
+  alone.
 - Bash tool parsing reads redirection targets and the arguments of six file
   verbs, not the file argument of every program. `python build.py -o dist/x`
   writes a file argus does not name — see the shell paragraph in [Per-tool

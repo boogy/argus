@@ -120,7 +120,10 @@ operating, extending). Individual pages:
 - Windows has no restart-on-exit supervisor — the Startup-folder script runs the
   daemon at logon and a hook restarts it mid-session. launchd and systemd do
   keep it alive.
-- Remote config is trusted over HTTPS; no detached-signature verification yet.
+- Remote config authenticity is opt-in: a host verifies the ed25519 detached
+  signature only where `[remote] public_key` is pinned in the machine-wide
+  layer. A host without that layer trusts the policy it fetches over HTTPS
+  alone.
 - Bash tool parsing reads redirection targets and six file verbs, not the file
   argument of every program.
 - No Claude Code transcript-path mining for token/model usage stats.
