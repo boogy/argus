@@ -52,11 +52,16 @@ pub fn normalize(path: &str) -> String {
 
 impl PathFilter {
     pub fn new(cfg: &FileContentsCfg) -> Self {
-        // Windows paths are case-insensitive, so `\NODE_MODULES\` and
-        // `\node_modules\` name one directory and must match one rule. Unix
-        // paths are not, and folding case there would exclude files a
-        // deployment did not ask to exclude.
-        Self::with_case_folding(cfg, cfg!(windows))
+        // Windows and macOS both ship case-insensitive filesystems by
+        // default, so `\NODE_MODULES\` and `\node_modules\`, or `.SSH` and
+        // `.ssh`, name one file and must match one rule. Linux is
+        // case-sensitive and folding there would exclude files a deployment
+        // did not ask to exclude.
+        //
+        // macOS can be formatted case-sensitively, and this over-excludes on
+        // such a volume. That is the right way to be wrong: the cost is a
+        // file that was not captured, against a credential that was.
+        Self::with_case_folding(cfg, cfg!(any(windows, target_os = "macos")))
     }
 
     /// Split out so the folding itself is testable on every platform. Built
@@ -764,6 +769,34 @@ mod tests {
         assert!(unix.allows(key));
         // The lower-case forms are excluded on both.
         assert!(!unix.allows(r"C:\repo\node_modules\pkg\index.js"));
+    }
+
+    /// macOS ships a case-insensitive volume by default, so `.SSH` and `.ssh`
+    /// are one directory there while an exclude rule written in one case matches
+    /// only that spelling. The filter is the security boundary; a boundary that
+    /// depends on how the agent happened to capitalise a path is not one.
+    ///
+    /// `config` rather than `id_rsa` as the probe: the default list also carries
+    /// `_rsa$`, which matches in any case and would hide the platform difference
+    /// this test exists to pin down.
+    #[test]
+    fn the_default_filter_folds_case_where_the_filesystem_does() {
+        let filter = PathFilter::new(&FileContentsCfg::default());
+        assert!(
+            !filter.allows("/Users/x/.ssh/config"),
+            "the shipped rule must match the spelling it is written in"
+        );
+        if cfg!(any(windows, target_os = "macos")) {
+            assert!(
+                !filter.allows("/Users/x/.SSH/config"),
+                "same file on this platform's default filesystem, same rule"
+            );
+        } else {
+            assert!(
+                filter.allows("/Users/x/.SSH/config"),
+                "a genuinely different file on a case-sensitive filesystem"
+            );
+        }
     }
 
     /// An empty `include` is "everything the excludes allow", not "nothing".

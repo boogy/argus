@@ -38,6 +38,11 @@ withheld body carries a `skipped` reason — `excluded`, `too_large`, `binary`,
 `budget`, `unreadable` — exported as an attribute, so over-exclusion is
 visible rather than looking like a quiet week.
 
+`include`/`exclude` matching is case-insensitive on Windows and macOS and
+case-sensitive on Linux, following each platform's default filesystem: a
+`.ssh/` rule excludes `.SSH/` too where the filesystem itself treats them as
+the same directory, and leaves them distinct where it doesn't.
+
 What the disk half will not do:
 
 - **Follow a symlink.** `/tmp/x -> ~/.ssh/id_rsa` is the oldest trick for
