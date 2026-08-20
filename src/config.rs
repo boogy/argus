@@ -812,6 +812,19 @@ fn note_policy_fetched() {
     *LAST_POLICY_OK.lock().unwrap_or_else(|e| e.into_inner()) = Some(std::time::Instant::now());
 }
 
+/// Test-only: place the last successful fetch `ago` in the past.
+///
+/// `LAST_POLICY_OK` is written only by [`poll_loop`], which no unit test
+/// drives, so without this the heartbeat's age field can only ever be
+/// observed in its never-fetched state — and a wiring that returns a
+/// constant satisfies that state while carrying no signal at all in the one
+/// case the alert exists for.
+#[cfg(test)]
+pub(crate) fn set_last_policy_fetch_for_test(ago: std::time::Duration) {
+    *LAST_POLICY_OK.lock().unwrap_or_else(|e| e.into_inner()) =
+        std::time::Instant::now().checked_sub(ago);
+}
+
 /// Daemon task: poll remote config, atomically cache, hot-swap shared config.
 pub async fn poll_loop(shared: std::sync::Arc<std::sync::RwLock<Config>>) {
     let mut etag: Option<String> = None;

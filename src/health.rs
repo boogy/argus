@@ -420,17 +420,18 @@ mod tests {
         );
 
         // `LAST_POLICY_OK` is only ever written by `poll_loop`, which no unit
-        // test drives, so a managed host in this binary has always been in the
-        // never-fetched state — the `-1` is stable, not a race with a sibling
-        // test.
-        let cfg = Config {
+        // test drives, so a managed host reaches this point in the
+        // never-fetched state. The third phase below sets it deliberately;
+        // this test is the only one that asserts on the field, so the order
+        // within it is the whole ordering that matters.
+        let managed = || Config {
             remote: crate::config::RemoteCfg {
                 url: Some("https://policy.example/argus.toml".into()),
                 ..Default::default()
             },
             ..Config::default()
         };
-        let (mon, _buffer) = monitor_with(&dir, cfg);
+        let (mon, _buffer) = monitor_with(&dir, managed());
         let EventKind::Health {
             policy_age_secs, ..
         } = mon.snapshot("interval").kind
@@ -442,6 +443,27 @@ mod tests {
             Some(-1),
             "a managed host that has never had an answer must say so; this is \
              the assertion a hardcoded `None` fails"
+        );
+
+        // The two assertions above are both satisfied by a field wired to a
+        // constant: `None` for the unmanaged host, `-1` for a managed one that
+        // has never fetched. Neither reads the clock. This third one is the
+        // only assertion that fails if the `since_last_policy_fetch()`
+        // argument is replaced by a literal — and a real elapsed age is the
+        // entire signal the staleness alert was added for.
+        crate::config::set_last_policy_fetch_for_test(std::time::Duration::from_secs(3600));
+        let (mon, _buffer) = monitor_with(&dir, managed());
+        let EventKind::Health {
+            policy_age_secs, ..
+        } = mon.snapshot("interval").kind
+        else {
+            panic!("expected a health event");
+        };
+        assert_eq!(
+            policy_age_secs,
+            Some(3600),
+            "the seconds since the last successful fetch must reach the \
+             heartbeat, not just the never-fetched sentinel"
         );
     }
 }
