@@ -135,25 +135,38 @@ const BUILTIN: &[(&str, &str)] = &[
     // failing loudly, so a look-around would silently remove URL-credential
     // redaction altogether.
     //
-    // The greediness runs to the *last* `@` before the next `/` or space, so
-    // it over-matches in two shapes. A multi-credential authority such as
-    // `redis://u:p@h1,u2:p2@h2/0` loses the intermediate host. And a URL with
-    // no trailing slash, embedded in a serialized JSON string — which is what
-    // a tool-input field often holds, since `visit_strings` scrubs each string
-    // in place — runs past the closing quote:
+    // A password class has to end somewhere, and every character excluded
+    // from it is a password shape that stops matching and gets exported in
+    // full. So the rule is written twice, narrow first and greedy second,
+    // and `scrub_str` applies them in this order.
+    //
+    // The narrow form stops at `"`. That bounds the case a tool-input field
+    // actually holds: a URL with no trailing slash inside a serialized JSON
+    // string, which `visit_strings` scrubs as one string. Greedy alone runs
+    // to the *last* `@` before the next `/` or space, so it would take the
+    // host, the JSON punctuation and the following field with it —
     //
     //     {"url":"https://u:p@h","email":"a@b"}
     //         -> {"url":"https[REDACTED:url-credentials]b"}
     //
-    // taking the host, the JSON punctuation and the following address with it.
-    // One trailing `/` after the host bounds it and the rest survives.
+    // — where the narrow form redacts `://u:p@` alone and leaves the address
+    // intact.
     //
-    // Left as it is on purpose. Narrowing the class to stop at `"` or `,`
-    // would trade this for the opposite error: a password legitimately
-    // containing either character would then fail to match at all and be
-    // exported in full. Over-redaction costs context, which is recoverable;
-    // under-redaction costs the thing this table exists to prevent, which is
-    // not.
+    // The greedy form then runs as the backstop, because the narrow one
+    // cannot match a password containing a quote at all: in JSON that
+    // character arrives escaped, as `pa\"ss`, and the class stops on it
+    // before ever reaching the mandatory `@`. On its own the narrow rule
+    // would export such a password verbatim. Running second, greedy catches
+    // it — the earlier replacement inserts only `[REDACTED:…]`, which has no
+    // `://`, so the backstop cannot re-match what the narrow rule already
+    // took.
+    //
+    // What survives both: a multi-credential authority such as
+    // `redis://u:p@h1,u2:p2@h2/0` still loses the intermediate host to the
+    // greedy form, since it holds no quote for the narrow one to stop on.
+    // Over-redaction costs context, which is recoverable; under-redaction
+    // costs the thing this table exists to prevent, which is not.
+    ("url-credentials", r"://[^\s/:@]{1,128}:[^\s/\x22]{1,256}@"),
     ("url-credentials", r"://[^\s/:@]{1,128}:[^\s/]{1,256}@"),
 ];
 
@@ -689,16 +702,15 @@ mod tests {
         );
     }
 
-    /// The password class is deliberately wide — everything but `/` and
-    /// whitespace — and the obvious way to curb the over-match documented on
-    /// the pattern is to narrow it to stop at `"` and `,` as well. These are
-    /// the inputs proving that trade is not worth taking: a password
-    /// containing either character stops matching entirely under the narrow
-    /// class and is exported in full, which is the one outcome this table
-    /// exists to prevent. Measured, not assumed — with the class narrowed to
-    /// `[^\s/,"]` both inputs below come back byte-for-byte unchanged.
+    /// Why the greedy form is kept as a second rule rather than replaced by
+    /// the narrow one. Every character excluded from the password class is a
+    /// password shape that stops matching and is exported in full — the one
+    /// outcome this table exists to prevent. These are the two inputs that
+    /// prove it: measured, not assumed, a class narrowed to `[^\s/,"]` leaves
+    /// both of them byte-for-byte unchanged. Delete the greedy rule and the
+    /// escaped-quote case below is exported verbatim.
     #[test]
-    fn narrowing_the_password_class_would_leak_the_password() {
+    fn no_password_shape_escapes_the_layered_rules() {
         for input in [
             r#"{"url":"https://u:pa,ss@h/"}"#,
             r#"{"url":"https://u:pa\"ss@h/"}"#,
@@ -713,6 +725,29 @@ mod tests {
                 "the credential was not matched at all: {out}"
             );
         }
+    }
+
+    /// The other half: the narrow rule has to actually bound the match, or
+    /// layering bought nothing. A URL with no trailing slash inside a
+    /// serialized JSON string is the shape a tool-input field holds, and
+    /// under the greedy rule alone the match ran to the last `@` in the
+    /// string — taking the host, the JSON punctuation and the address in the
+    /// next field with it.
+    #[test]
+    fn a_json_embedded_url_loses_its_credential_and_nothing_else() {
+        let out = r().scrub_str(r#"{"url":"https://u:p@h","email":"a@b.example"}"#);
+        assert!(
+            !out.contains("u:p@"),
+            "the credential itself must be gone: {out}"
+        );
+        assert!(
+            out.contains("a@b.example"),
+            "the following field must survive the redaction: {out}"
+        );
+        assert!(
+            out.contains(r#""email""#),
+            "the JSON structure must survive: {out}"
+        );
     }
 
     /// A pattern that is quadratic on a long adversarial string is a way to
