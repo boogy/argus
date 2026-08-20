@@ -135,11 +135,25 @@ const BUILTIN: &[(&str, &str)] = &[
     // failing loudly, so a look-around would silently remove URL-credential
     // redaction altogether.
     //
-    // The greediness over-matches on a multi-credential authority such as
-    // `redis://u:p@h1,u2:p2@h2/0`, redacting through to the last `@` and
-    // taking an intermediate host with it. That is the right way to be wrong:
-    // a redacted hostname costs a little context, an unredacted password
-    // costs the thing this table exists to prevent.
+    // The greediness runs to the *last* `@` before the next `/` or space, so
+    // it over-matches in two shapes. A multi-credential authority such as
+    // `redis://u:p@h1,u2:p2@h2/0` loses the intermediate host. And a URL with
+    // no trailing slash, embedded in a serialized JSON string — which is what
+    // a tool-input field often holds, since `visit_strings` scrubs each string
+    // in place — runs past the closing quote:
+    //
+    //     {"url":"https://u:p@h","email":"a@b"}
+    //         -> {"url":"https[REDACTED:url-credentials]b"}
+    //
+    // taking the host, the JSON punctuation and the following address with it.
+    // One trailing `/` after the host bounds it and the rest survives.
+    //
+    // Left as it is on purpose. Narrowing the class to stop at `"` or `,`
+    // would trade this for the opposite error: a password legitimately
+    // containing either character would then fail to match at all and be
+    // exported in full. Over-redaction costs context, which is recoverable;
+    // under-redaction costs the thing this table exists to prevent, which is
+    // not.
     ("url-credentials", r"://[^\s/:@]{1,128}:[^\s/]{1,256}@"),
 ];
 
@@ -673,6 +687,32 @@ mod tests {
             r().scrub_str("mail bob@example.com"),
             "mail bob@example.com"
         );
+    }
+
+    /// The password class is deliberately wide — everything but `/` and
+    /// whitespace — and the obvious way to curb the over-match documented on
+    /// the pattern is to narrow it to stop at `"` and `,` as well. These are
+    /// the inputs proving that trade is not worth taking: a password
+    /// containing either character stops matching entirely under the narrow
+    /// class and is exported in full, which is the one outcome this table
+    /// exists to prevent. Measured, not assumed — with the class narrowed to
+    /// `[^\s/,"]` both inputs below come back byte-for-byte unchanged.
+    #[test]
+    fn narrowing_the_password_class_would_leak_the_password() {
+        for input in [
+            r#"{"url":"https://u:pa,ss@h/"}"#,
+            r#"{"url":"https://u:pa\"ss@h/"}"#,
+        ] {
+            let out = r().scrub_str(input);
+            assert!(
+                !out.contains("pa,ss") && !out.contains("pa\\\"ss"),
+                "a password containing `,` or `\"` survived: {out}"
+            );
+            assert!(
+                out.contains("[REDACTED:url-credentials]"),
+                "the credential was not matched at all: {out}"
+            );
+        }
     }
 
     /// A pattern that is quadratic on a long adversarial string is a way to
