@@ -30,7 +30,10 @@ The database is an **export buffer, not an archive**:
   rest of the table is the whole story. `reason` says which mechanism:
   `buffer_full` (this cap), `spool_full` (the shim deleted undelivered events
   while the daemon was down), `stdin_truncated` (a hook payload over the 8 MiB
-  cap, so the event _after_ the marker is incomplete rather than missing).
+  cap, so the event _after_ the marker is incomplete rather than missing),
+  `buffer_unreadable` (rows that could not be parsed, discarded with the batch
+  around them), `export_rejected` (the collector permanently refused a batch —
+  a 4xx, which is not retried).
 - For local-only analysis, leave `export.otlp_endpoint` unset.
 
 The DB runs in WAL mode. Reading while the daemon is running is safe, but:
@@ -117,7 +120,7 @@ same session's `notify` events do carry one.
 | `usage`             | `input_tokens`, `output_tokens`, `reasoning_tokens`, `cache_read_tokens`, `cache_write_tokens`, `cost` (the host tool's own figure), `finish` (why the turn stopped). One per finished assistant turn, from opencode and pi — the only two surfaces that report a turn's accounting. The model rides in `$.meta.model` as `provider/model`                                                                                              |
 | `raw`               | `payload` (unmapped upstream event, kept verbatim)                                                                                                                                                                                                                                                                                                                                                                                    |
 | `integrity`         | `status` (`ok`/`broken`), `tool`, `detail` — the daemon's own wiring self-check                                                                                                                                                                                                                                                                                                                                                        |
-| `loss`              | `reason` (`buffer_full`/`spool_full`/`stdin_truncated`), `count`, `detail` — events destroyed rather than delivered, see [Retention semantics](#retention-semantics--read-this-first)                                                                                                                                                                                                                                                  |
+| `loss`              | `reason` (`buffer_full`/`buffer_unreadable`/`spool_full`/`stdin_truncated`/`export_rejected`), `count`, `detail` — events destroyed rather than delivered, see [Retention semantics](#retention-semantics--read-this-first)                                                                                                                                                                                                                                                  |
 
 Fields that are null/empty may be omitted entirely (`output`, `error`, `meta`,
 `detail`), so prefer `->>` (returns NULL on missing paths) over assuming presence.

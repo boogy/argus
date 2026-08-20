@@ -121,7 +121,7 @@ record: `event.type=loss`, `loss.reason=buffer_full`, carrying the count.
 **Detection:** A1 for the block itself;
 
 > **A5 — Loss records.** Any `event.type=loss` at all. `buffer_full`,
-> `spool_full` and `export_rejected` mean the pipeline shed data;
+> `buffer_unreadable`, `spool_full` and `export_rejected` mean the pipeline shed data;
 > `stdin_truncated` means one payload was too big and is expected occasionally.
 >
 > **A6 — Late arrival.** A burst of events whose timestamps are hours older than
