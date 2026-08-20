@@ -1,6 +1,16 @@
 use serde::Deserialize;
 use std::collections::BTreeMap;
 
+/// The most policy argus will buffer from one fetch. Policy is a config file
+/// an administrator wrote; a megabyte is already generous, and without a
+/// ceiling the server picks how much memory every host in the fleet spends
+/// once per poll interval.
+const MAX_POLICY_BYTES: usize = 1024 * 1024;
+
+/// A detached ed25519 signature is 64 bytes, base64'd to 88. The slack is for
+/// a trailing newline and nothing else; this one needs no generosity at all.
+const MAX_SIG_BYTES: usize = 4096;
+
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default)]
 pub struct Config {
@@ -609,6 +619,14 @@ pub struct RemotePolicy {
 pub async fn fetch_remote(url: &str, etag: Option<&str>) -> anyhow::Result<Option<RemotePolicy>> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
+        // Policy is fetched for its authenticity. A redirect is the server
+        // naming a different source, and reqwest would follow one from https
+        // to http by default — which is the network's chance to answer
+        // instead. An administrator who moves the policy changes the URL.
+        //
+        // This stops the follow but does not refuse the response; see
+        // `refuse_redirect`, which is what turns the 30x into an error.
+        .redirect(reqwest::redirect::Policy::none())
         .build()?;
     let mut req = client.get(url);
     if let Some(tag) = etag {
@@ -618,13 +636,16 @@ pub async fn fetch_remote(url: &str, etag: Option<&str>) -> anyhow::Result<Optio
     if resp.status() == reqwest::StatusCode::NOT_MODIFIED {
         return Ok(None);
     }
+    // Below the 304 check on purpose: 304 is itself a 3xx, and refusing it
+    // here would turn every cached poll into an error.
+    refuse_redirect(&resp, url)?;
     let resp = resp.error_for_status()?;
     let new_etag = resp
         .headers()
         .get("etag")
         .and_then(|v| v.to_str().ok())
         .map(String::from);
-    let body = resp.text().await?;
+    let body = bounded_text(resp, url, MAX_POLICY_BYTES).await?;
     // Validate before caching: a bad remote config must not poison the agent.
     body.parse::<toml::Table>()?;
 
@@ -632,13 +653,9 @@ pub async fn fetch_remote(url: &str, etag: Option<&str>) -> anyhow::Result<Optio
         None => None,
         Some(key) => {
             let sig_url = crate::policysig::sig_url(url);
-            let sig = client
-                .get(&sig_url)
-                .send()
-                .await?
-                .error_for_status()?
-                .text()
-                .await?;
+            let sig_resp = client.get(&sig_url).send().await?;
+            refuse_redirect(&sig_resp, &sig_url)?;
+            let sig = bounded_text(sig_resp.error_for_status()?, &sig_url, MAX_SIG_BYTES).await?;
             crate::policysig::verify(body.as_bytes(), &sig, &key)
                 .map_err(|e| anyhow::anyhow!("policy at {url} failed verification: {e}"))?;
             Some(sig)
@@ -649,6 +666,50 @@ pub async fn fetch_remote(url: &str, etag: Option<&str>) -> anyhow::Result<Optio
         etag: new_etag,
         signature,
     }))
+}
+
+/// Turn a 30x into an error.
+///
+/// `Policy::none()` stops reqwest from following a redirect but returns the
+/// 30x as an ordinary `Ok` response, and `error_for_status` passes 3xx
+/// through — so without this the body of a redirect would be parsed as
+/// policy, which is the whole attack.
+fn refuse_redirect(resp: &reqwest::Response, url: &str) -> anyhow::Result<()> {
+    if resp.status().is_redirection() {
+        let to = resp
+            .headers()
+            .get("location")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("(no Location header)");
+        anyhow::bail!("policy at {url} redirected to {to}; refusing to follow");
+    }
+    Ok(())
+}
+
+/// Read a response body, refusing one that exceeds `cap`.
+///
+/// `Content-Length` is checked first so an honest server is refused before a
+/// byte of body moves, and the stream is bounded as well because a hostile
+/// one simply omits the header. Both messages say "too large" — the caller
+/// does not care which limit caught it.
+async fn bounded_text(
+    mut resp: reqwest::Response,
+    url: &str,
+    cap: usize,
+) -> anyhow::Result<String> {
+    if let Some(len) = resp.content_length()
+        && len > cap as u64
+    {
+        anyhow::bail!("body at {url} is too large ({len} bytes, limit {cap})");
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = resp.chunk().await? {
+        body.extend_from_slice(&chunk);
+        if body.len() > cap {
+            anyhow::bail!("body at {url} is too large (over {cap} bytes)");
+        }
+    }
+    Ok(String::from_utf8(body)?)
 }
 
 /// One poll's worth of "the server sent a new body": validate it, cache it,
@@ -1386,5 +1447,87 @@ mod tests {
             "the older policy must not take effect; the host falls back to the \
              built-in default and `argus check` reports the refusal"
         );
+    }
+
+    /// Policy is the one fetch whose *authenticity* is the point. A redirect is
+    /// the server saying "ask somewhere else", and following it across schemes
+    /// turns a pinned HTTPS policy URL into an HTTP one the network can rewrite.
+    /// On a host that pins no key there is nothing downstream to catch that.
+    ///
+    /// `Policy::none()` alone would leave this failing: reqwest hands the 302
+    /// back as a normal response and `error_for_status` passes 3xx through, so
+    /// the redirect body would be parsed as policy.
+    #[tokio::test]
+    async fn a_redirected_policy_fetch_is_refused() {
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let addr = server.server_addr().to_string();
+        std::thread::spawn(move || {
+            for req in server.incoming_requests() {
+                let mut r = tiny_http::Response::empty(302);
+                r.add_header(
+                    tiny_http::Header::from_bytes(
+                        &b"Location"[..],
+                        &b"http://127.0.0.1:1/x.toml"[..],
+                    )
+                    .unwrap(),
+                );
+                let _ = req.respond(r);
+            }
+        });
+        let err = fetch_remote(&format!("http://{addr}/argus.toml"), None)
+            .await
+            .expect_err("a redirected policy fetch must not be followed");
+        assert!(
+            format!("{err:#}").to_lowercase().contains("redirect"),
+            "the error has to say why: {err:#}"
+        );
+    }
+
+    /// A body with no ceiling is a memory ceiling set by whoever runs the policy
+    /// server, re-applied on every host on every poll. This is the honest-server
+    /// case: `Content-Length` is present and the fetch is refused before a byte
+    /// of body is read.
+    #[tokio::test]
+    async fn an_oversized_policy_body_is_refused_on_its_content_length() {
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let addr = server.server_addr().to_string();
+        std::thread::spawn(move || {
+            for req in server.incoming_requests() {
+                let huge = "#".repeat(MAX_POLICY_BYTES + 1);
+                let _ = req.respond(tiny_http::Response::from_string(huge));
+            }
+        });
+        let err = fetch_remote(&format!("http://{addr}/argus.toml"), None)
+            .await
+            .expect_err("an unbounded body must not be buffered");
+        assert!(format!("{err:#}").contains("too large"), "{err:#}");
+    }
+
+    /// And the case the header check cannot reach: a server that declares no
+    /// length at all. Checking `Content-Length` and stopping there would be a
+    /// ceiling any hostile server opts out of by omitting one header.
+    #[tokio::test]
+    async fn an_oversized_policy_body_is_refused_without_a_content_length() {
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let addr = server.server_addr().to_string();
+        std::thread::spawn(move || {
+            for req in server.incoming_requests() {
+                let huge = vec![b'#'; MAX_POLICY_BYTES + 1];
+                // `data_length: None` makes tiny_http chunk it, so no
+                // `Content-Length` reaches the client.
+                let r = tiny_http::Response::new(
+                    tiny_http::StatusCode(200),
+                    vec![],
+                    std::io::Cursor::new(huge),
+                    None,
+                    None,
+                );
+                let _ = req.respond(r);
+            }
+        });
+        let err = fetch_remote(&format!("http://{addr}/argus.toml"), None)
+            .await
+            .expect_err("a chunked oversized body must not be buffered either");
+        assert!(format!("{err:#}").contains("too large"), "{err:#}");
     }
 }
