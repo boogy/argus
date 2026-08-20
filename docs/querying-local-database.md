@@ -32,8 +32,9 @@ The database is an **export buffer, not an archive**:
   while the daemon was down), `stdin_truncated` (a hook payload over the 8 MiB
   cap, so the event _after_ the marker is incomplete rather than missing),
   `buffer_unreadable` (rows that could not be parsed, discarded with the batch
-  around them), `export_rejected` (the collector permanently refused a batch —
-  a 4xx, which is not retried).
+  around them), `export_rejected` (the collector refused the batch and it was
+  not retried — a 4xx other than 408/429, or a 2xx whose `partialSuccess`
+  reported records it dropped).
 - For local-only analysis, leave `export.otlp_endpoint` unset.
 
 The DB runs in WAL mode. Reading while the daemon is running is safe, but:
