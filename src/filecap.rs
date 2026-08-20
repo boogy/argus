@@ -532,6 +532,10 @@ struct Probe {
     /// `Ok(Some)` are the bytes; `Ok(None)` means nothing was read *on
     /// purpose*; `Err` is the reason the file has no content to report.
     body: Result<Option<Vec<u8>>, SkipReason>,
+    /// What the path actually reaches, with every component resolved.
+    /// `None` when it could not be resolved — the read below then fails on
+    /// its own terms and there is nothing extra to judge.
+    resolved: Option<PathBuf>,
 }
 
 /// Stat first, and without following: the stat is what decides this is a thing
@@ -544,6 +548,7 @@ fn probe(path: &Path, ceiling: usize, want_body: bool) -> Probe {
         bytes: 0,
         mtime: None,
         body: Err(SkipReason::Unreadable),
+        resolved: None,
     };
     let Ok(md) = std::fs::symlink_metadata(path) else {
         return unreadable;
@@ -562,6 +567,10 @@ fn probe(path: &Path, ceiling: usize, want_body: bool) -> Probe {
         bytes: md.len(),
         mtime: md.modified().ok().map(DateTime::<Utc>::from),
         body: Ok(None),
+        // Resolved here rather than in the caller because this function is
+        // the one place that touches the filesystem, and it is the only one
+        // running behind the read deadline.
+        resolved: std::fs::canonicalize(path).ok(),
     };
     // Unlike a payload body, an oversized file is not truncated. The payload
     // is in memory whether we want it or not, so keeping a prefix costs
@@ -665,6 +674,22 @@ fn disk_snapshot(
         snap.skipped = Some(SkipReason::Unreadable);
         return snap;
     };
+    // `allowed` above matched the string the tool said. A symlinked parent
+    // directory means that string never contained `.ssh` while the bytes came
+    // from a directory that did, so the rules get a second look at what the
+    // path actually reached. `probe` refuses a symlink in the final position;
+    // this is the same redirection one component further up.
+    //
+    // Re-judged rather than refused outright: on macOS `/tmp`, `/var` and
+    // `/etc` are themselves links into `/private`, and refusing every path
+    // with a symlinked component would silently stop capturing everything
+    // under them — a monitoring blackout in exchange for a bypass that
+    // re-judging closes on its own.
+    let allowed = allowed
+        && p.resolved
+            .as_deref()
+            .and_then(Path::to_str)
+            .is_none_or(|r| filter.allows_in(r, cwd));
     snap.bytes = p.bytes;
     snap.mtime = p.mtime;
     let buf = match p.body {
@@ -1359,6 +1384,54 @@ mod tests {
         // never named.
         assert_eq!(snap.bytes, 0, "the link's target was measured");
         assert_eq!(snap.mtime, None, "the link's target was measured");
+    }
+
+    /// The comment on `probe` names this attack — a link that gets a privileged
+    /// reader to fetch something on your behalf, past an exclude list that
+    /// matches on the path the agent said. Refusing a symlink in the last
+    /// position only is half the defence: the same trick one directory up reads
+    /// the same file and matches no rule.
+    #[cfg(unix)]
+    #[test]
+    fn an_exclusion_holds_when_a_parent_directory_is_a_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let secret = root.join(".ssh");
+        std::fs::create_dir(&secret).unwrap();
+        // `config`, not `id_rsa`: the default list also carries `_rsa$`, which
+        // matches through the link as readily as without it and would leave this
+        // test passing whether or not the bypass is closed.
+        std::fs::write(secret.join("config"), b"IdentityFile /x").unwrap();
+        let link = root.join("innocent");
+        std::os::unix::fs::symlink(&secret, &link).unwrap();
+
+        let named = link.join("config");
+        let named = named.to_str().unwrap();
+        assert!(
+            !named.contains(".ssh"),
+            "the string the agent said carries no trace of what it reaches"
+        );
+
+        let c = on(|fc| fc.mode = ContentMode::Disk);
+        let out = snaps("Read", serde_json::json!({"file_path": named}), &c);
+        assert_eq!(out.len(), 1);
+        assert_eq!(
+            out[0].skipped,
+            Some(SkipReason::Excluded),
+            "the exclude rule must be judged on what the path resolves to"
+        );
+        assert_eq!(out[0].content, None, "an excluded file's body was shipped");
+
+        // And a file whose only links are the platform's is still captured. This
+        // is the assertion that fails if the fix refuses symlinked components
+        // outright instead of re-judging the resolved path.
+        std::fs::write(root.join("notes.md"), b"hello").unwrap();
+        let ok = snaps(
+            "Read",
+            serde_json::json!({"file_path": root.join("notes.md").to_str().unwrap()}),
+            &c,
+        );
+        assert_eq!(ok[0].content.as_deref(), Some("hello"));
     }
 
     /// Why the stat comes first. A `read()` on a fifo with no writer never
