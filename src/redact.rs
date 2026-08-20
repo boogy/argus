@@ -123,7 +123,24 @@ const BUILTIN: &[(&str, &str)] = &[
     // A connection string announces nothing in its key name — `DATABASE_URL`
     // is not a secret and its value is. Only the credentials are matched: the
     // host and path that follow are what the record exists to report.
-    ("url-credentials", r"://[^\s/:@]{1,128}:[^\s/@]{1,256}@"),
+    //
+    // Greedy through `@`, so a password containing one is redacted whole
+    // rather than up to its first. Excluding `/` and whitespace from the
+    // password class is what keeps the match inside one authority: it cannot
+    // reach past a path separator, so `https://a.example/x@y` — a path, not a
+    // credential — does not match at all.
+    //
+    // No look-around here, deliberately: this crate's `regex` has none, and
+    // `Redactor::new` *drops* a pattern that fails to compile rather than
+    // failing loudly, so a look-around would silently remove URL-credential
+    // redaction altogether.
+    //
+    // The greediness over-matches on a multi-credential authority such as
+    // `redis://u:p@h1,u2:p2@h2/0`, redacting through to the last `@` and
+    // taking an intermediate host with it. That is the right way to be wrong:
+    // a redacted hostname costs a little context, an unredacted password
+    // costs the thing this table exists to prevent.
+    ("url-credentials", r"://[^\s/:@]{1,128}:[^\s/]{1,256}@"),
 ];
 
 /// Counts regex-set compilations. Building a `Redactor` recompiles every
@@ -625,5 +642,50 @@ mod tests {
         assert!(!out.contains("abcd1234efgh"), "leaked: {out}");
         assert!(!out.contains("hunter2secret"), "leaked: {out}");
         assert!(!out.contains("ghx12345678"), "leaked: {out}");
+    }
+
+    /// RFC 3986 says a literal `@` in a password must be percent-encoded, and
+    /// people paste raw passwords anyway. Stopping at the first `@` is worse
+    /// than not matching at all: it redacts the part that looked like a
+    /// credential and exports the rest of one.
+    #[test]
+    fn a_password_containing_an_at_sign_is_redacted_whole() {
+        let out = r().scrub_str("cloned https://user:p@ssw0rd@git.example.com/repo.git");
+        assert!(
+            !out.contains("ssw0rd"),
+            "the tail of the password survived: {out}"
+        );
+        assert!(
+            out.contains("git.example.com"),
+            "the host is the finding and must survive: {out}"
+        );
+    }
+
+    /// The ordinary case has to keep working, and an email address in prose is
+    /// not a URL credential.
+    #[test]
+    fn ordinary_urls_and_addresses_are_untouched() {
+        assert_eq!(
+            r().scrub_str("see https://git.example.com/repo.git"),
+            "see https://git.example.com/repo.git"
+        );
+        assert_eq!(
+            r().scrub_str("mail bob@example.com"),
+            "mail bob@example.com"
+        );
+    }
+
+    /// A pattern that is quadratic on a long adversarial string is a way to
+    /// wedge the daemon with one tool call.
+    #[test]
+    fn the_url_pattern_stays_linear_on_a_hostile_string() {
+        let hostile = format!("://a:{}", "@".repeat(20_000));
+        let started = std::time::Instant::now();
+        let _ = r().scrub_str(&hostile);
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(500),
+            "took {:?}",
+            started.elapsed()
+        );
     }
 }
