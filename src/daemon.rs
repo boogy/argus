@@ -67,7 +67,10 @@ pub async fn run() -> Result<()> {
             left.len()
         ),
     }
-    crate::paths::create_private_dir(&crate::paths::data_dir())?;
+    // The panicking form would abort before the failure reached the log the
+    // daemon writes to -- and this is the process a supervisor restarts in a
+    // loop, so the reason has to survive.
+    crate::paths::create_private_dir(&crate::paths::try_data_dir()?)?;
 
     let shared_cfg = Arc::new(RwLock::new(config::load()));
     tokio::spawn(config::poll_loop(shared_cfg.clone()));

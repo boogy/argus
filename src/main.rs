@@ -209,7 +209,10 @@ fn main() -> Result<()> {
 }
 
 fn print_status() -> Result<()> {
-    let data_dir = argus::paths::data_dir();
+    // `status` is what a human runs when something is already wrong, so a
+    // host that cannot resolve a data directory has to produce the same
+    // "Error: …" line every other subcommand produces, not a panic.
+    let data_dir = argus::paths::try_data_dir()?;
     println!("data dir: {}", data_dir.display());
 
     let cfg = argus::config::load();
