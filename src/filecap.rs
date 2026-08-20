@@ -122,13 +122,10 @@ impl PathFilter {
     /// and payload mode never needs it to ship the body, so the `/`-anchored
     /// form stands in when it is missing.
     pub fn allows_in(&self, path: &str, cwd: Option<&str>) -> bool {
-        if self.broken {
+        if self.excludes_in(path, cwd) {
             return false;
         }
         let forms = self.forms(path, cwd);
-        if forms.iter().any(|p| self.exclude.is_match(p)) {
-            return false;
-        }
         match &self.include {
             // Any form matching is enough here too, for the same reason: an
             // `include` of `/src/` names the same files whether the call said
@@ -137,6 +134,23 @@ impl PathFilter {
             Some(inc) => forms.iter().any(|p| inc.is_match(p)),
             None => true,
         }
+    }
+
+    /// Whether the exclusions alone refuse this path, ignoring `include`.
+    ///
+    /// Split out because the two lists answer different questions. `exclude`
+    /// is the security boundary and has to hold against every name a file can
+    /// be reached by, resolved ones included. `include` is a scoping
+    /// convenience, written by an operator against the paths they expect to
+    /// see — re-judging it against a resolved path drops files they asked for
+    /// whenever the platform put a link above them.
+    pub fn excludes_in(&self, path: &str, cwd: Option<&str>) -> bool {
+        if self.broken {
+            return true;
+        }
+        self.forms(path, cwd)
+            .iter()
+            .any(|p| self.exclude.is_match(p))
     }
 
     /// Every spelling of `path` that could name the file it names.
@@ -689,7 +703,7 @@ fn disk_snapshot(
         && p.resolved
             .as_deref()
             .and_then(Path::to_str)
-            .is_none_or(|r| filter.allows_in(r, cwd));
+            .is_none_or(|r| !filter.excludes_in(r, cwd));
     snap.bytes = p.bytes;
     snap.mtime = p.mtime;
     let buf = match p.body {
@@ -822,6 +836,45 @@ mod tests {
                 "a genuinely different file on a case-sensitive filesystem"
             );
         }
+    }
+
+    /// The resolved-path second look is for exclusions only. `include` is an
+    /// operator's scoping list, written against the paths they expect to see;
+    /// judging it against what those paths resolve to drops files they
+    /// explicitly asked for whenever a link sits above them — and on macOS the
+    /// platform puts one above `TMPDIR` (`/var/folders/...`, reached through
+    /// `/var -> private/var`), where agents routinely write. That is the
+    /// monitoring blackout this task exists to avoid, arriving by a different
+    /// road than refusing symlinks outright.
+    #[cfg(unix)]
+    #[test]
+    fn an_include_list_is_not_re_judged_against_the_resolved_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let real = root.join("real");
+        std::fs::create_dir(&real).unwrap();
+        std::fs::write(real.join("notes.md"), b"hello").unwrap();
+        // The link stands in for the platform's own: the operator's `include`
+        // names the path they see, which is not the path it resolves to.
+        let link = root.join("workspace");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let named = link.join("notes.md");
+        let named = named.to_str().unwrap();
+        let inc = format!("^{}", regex::escape(link.to_str().unwrap()));
+
+        let c = on(|fc| {
+            fc.mode = ContentMode::Disk;
+            fc.include = vec![inc];
+        });
+        let out = snaps("Read", serde_json::json!({"file_path": named}), &c);
+        assert_eq!(out.len(), 1);
+        assert_eq!(
+            out[0].content.as_deref(),
+            Some("hello"),
+            "a file the operator included was dropped because the path it \
+             resolves to is not the path they wrote"
+        );
     }
 
     /// An empty `include` is "everything the excludes allow", not "nothing".

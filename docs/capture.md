@@ -51,10 +51,13 @@ What the disk half will not do:
   The stat refuses the link; the open refuses it again (`O_NOFOLLOW`), since
   swapping the path between those two syscalls is the whole point of the
   gap. A refused link is reported without even its target's size. A symlinked
-  _parent_ directory gets the same treatment a different way: `exclude`/
-  `include` are also judged against the fully resolved path, so
+  _parent_ directory gets the same treatment a different way: `exclude` is
+  judged against the fully resolved path as well as the named one, so
   `<link>/config` cannot walk a file past the rules just because the link
-  itself carries no trace of what it reaches.
+  itself carries no trace of what it reaches. `include` is not re-judged that
+  way — it is an operator's scoping list written against the paths they see,
+  and on macOS `TMPDIR` alone (`/var/folders/...`, reached through `/var ->
+  private/var`) would drop out of it.
 - **Open anything that is not a regular file.** `read()` on a fifo never
   returns; a daemon that opened one would stop enriching events entirely.
 - **Read a file bigger than the cap.** It's measured, not truncated: reading
