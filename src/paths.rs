@@ -13,20 +13,38 @@ use std::path::{Path, PathBuf};
 /// merits either. Off Windows the two directories are the same path, so this
 /// changes nothing there.
 pub fn data_dir() -> PathBuf {
+    try_data_dir().unwrap_or_else(|e| panic!("{e}"))
+}
+
+/// The fallible form, for the entry points that can report rather than abort.
+pub fn try_data_dir() -> anyhow::Result<PathBuf> {
     #[cfg(test)]
     if let Some(dir) = TEST_DATA_DIR
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .clone()
     {
-        return dir;
+        return Ok(dir);
     }
     if let Some(dir) = env_override("ARGUS_DATA_DIR") {
-        return PathBuf::from(dir);
+        return Ok(PathBuf::from(dir));
     }
-    dirs::data_local_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("argus")
+    resolve_data_dir(dirs::data_local_dir())
+}
+
+/// The data directory, given whatever the platform could tell us.
+///
+/// Split from [`data_dir`] so the failure case is testable without unsetting
+/// `HOME` in a process the test framework shares with every other test.
+fn resolve_data_dir(local: Option<PathBuf>) -> anyhow::Result<PathBuf> {
+    let Some(local) = local else {
+        anyhow::bail!(
+            "cannot resolve a data directory on this platform (no HOME or \
+             XDG_DATA_HOME); refusing to fall back to the working directory, \
+             which is where the un-redacted hand-off spool would land"
+        );
+    };
+    Ok(local.join("argus"))
 }
 
 /// Where tests put their buffer, ahead of and independent of `ARGUS_DATA_DIR`.
@@ -745,6 +763,23 @@ pub fn write_private(path: &Path, body: &[u8]) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `.` is the repository the agent is working in. The spool that lands there
+    /// holds pre-redaction payloads — the one place in the pipeline where they
+    /// exist on disk — so a data directory that silently becomes the working
+    /// directory writes secrets into a git tree. Failing is the only safe answer
+    /// available: there is no directory to fall back to that is not somebody's.
+    #[test]
+    fn an_unresolvable_data_dir_is_an_error_rather_than_the_working_directory() {
+        let e = resolve_data_dir(None).unwrap_err();
+        assert!(
+            format!("{e:#}").contains("data directory"),
+            "the error has to say what could not be resolved: {e:#}"
+        );
+
+        let ok = resolve_data_dir(Some(std::path::PathBuf::from("/somewhere"))).unwrap();
+        assert_eq!(ok, std::path::PathBuf::from("/somewhere/argus"));
+    }
 
     /// The one-line bypass this gate exists for: `export ARGUS_DATA_DIR=…` in
     /// a shell profile is inherited by the shim, and every path argus resolves

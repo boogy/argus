@@ -64,6 +64,15 @@ fn choose_payload(stdin: &str, arg: Option<&str>) -> String {
 /// Testable core: wrap raw hook text and hand it off. Malformed JSON is
 /// preserved as a string payload so nothing is ever lost.
 pub fn deliver(source: &str, event: Option<&str>, raw: &str, truncated: bool) {
+    // Everything below resolves the data directory eventually — the socket to
+    // send on, the spool to fall back to. `data_dir()` panics rather than
+    // invent `.`, and a panic here surfaces inside the user's coding tool,
+    // which is the one thing a shim must never do. Dropping the event is the
+    // better failure: a daemon receiving nothing is already alertable (A1),
+    // whereas a crashing hook gets argus uninstalled.
+    if crate::paths::try_data_dir().is_err() {
+        return;
+    }
     let payload =
         serde_json::from_str(raw).unwrap_or_else(|_| serde_json::Value::String(raw.to_string()));
     let envelope = Envelope {
