@@ -378,6 +378,15 @@ impl Default for CodexCfg {
 pub struct IntegrityCfg {
     pub enabled: bool,
     pub interval_secs: u64,
+    /// Re-run `install` from the daemon when the wiring check finds a supported
+    /// tool present but unwired — a tool installed after argus, or hooks a user
+    /// removed. Idempotent and quiet (it writes only when something is actually
+    /// missing), so a fleet can install once and let the agent keep itself
+    /// wired, instead of an MDM re-running install on a visible daily cadence.
+    /// On by default: for a security control, healing its own coverage is the
+    /// behaviour you want; set `false` in policy to make the daemon report a
+    /// gap without closing it.
+    pub self_heal: bool,
     /// Whether this machine is supposed to carry the `--managed` layer.
     ///
     /// Off by default and set by fleet policy, because it is the operator who
@@ -405,6 +414,7 @@ impl Default for IntegrityCfg {
         Self {
             enabled: true,
             interval_secs: 3600,
+            self_heal: true,
             managed: false,
             binary_sha256: None,
         }
