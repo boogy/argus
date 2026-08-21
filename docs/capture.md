@@ -38,6 +38,11 @@ withheld body carries a `skipped` reason — `excluded`, `too_large`, `binary`,
 `budget`, `unreadable` — exported as an attribute, so over-exclusion is
 visible rather than looking like a quiet week.
 
+`include`/`exclude` matching is case-insensitive on Windows and macOS and
+case-sensitive on Linux, following each platform's default filesystem: a
+`.ssh/` rule excludes `.SSH/` too where the filesystem itself treats them as
+the same directory, and leaves them distinct where it doesn't.
+
 What the disk half will not do:
 
 - **Follow a symlink.** `/tmp/x -> ~/.ssh/id_rsa` is the oldest trick for
@@ -45,7 +50,14 @@ What the disk half will not do:
   slips past an `exclude` list that only matches the path the _agent_ named.
   The stat refuses the link; the open refuses it again (`O_NOFOLLOW`), since
   swapping the path between those two syscalls is the whole point of the
-  gap. A refused link is reported without even its target's size.
+  gap. A refused link is reported without even its target's size. A symlinked
+  _parent_ directory gets the same treatment a different way: `exclude` is
+  judged against the fully resolved path as well as the named one, so
+  `<link>/config` cannot walk a file past the rules just because the link
+  itself carries no trace of what it reaches. `include` is not re-judged that
+  way — it is an operator's scoping list written against the paths they see,
+  and on macOS `TMPDIR` alone (`/var/folders/...`, reached through `/var ->
+  private/var`) would drop out of it.
 - **Open anything that is not a regular file.** `read()` on a fifo never
   returns; a daemon that opened one would stop enriching events entirely.
 - **Read a file bigger than the cap.** It's measured, not truncated: reading

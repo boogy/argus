@@ -67,7 +67,10 @@ pub async fn run() -> Result<()> {
             left.len()
         ),
     }
-    crate::paths::create_private_dir(&crate::paths::data_dir())?;
+    // The panicking form would abort before the failure reached the log the
+    // daemon writes to -- and this is the process a supervisor restarts in a
+    // loop, so the reason has to survive.
+    crate::paths::create_private_dir(&crate::paths::try_data_dir()?)?;
 
     let shared_cfg = Arc::new(RwLock::new(config::load()));
     tokio::spawn(config::poll_loop(shared_cfg.clone()));
@@ -468,10 +471,21 @@ async fn export_once(buffer: &Buffer, exporter: &Exporter, bounds: (usize, u64))
             tracing::warn!("export failed, will retry: {e}");
             Attempt::Failed
         }
-        Err(crate::export::Rejection::Permanent { status, detail }) => {
+        Err(crate::export::Rejection::Permanent {
+            status,
+            detail,
+            rejected,
+        }) => {
+            // A partial success is still a permanent refusal -- resending
+            // would re-deliver what the collector kept -- but only the
+            // records it named were lost. The whole batch leaves the buffer
+            // either way; the loss record has to say how many of them
+            // actually died, since that is what a fleet's loss rate is
+            // summed from.
+            let lost = rejected.unwrap_or(events.len() as u64);
             tracing::error!(
-                "collector refused {} events with {status} ({detail}); dropping the batch so \
-                 the queue keeps moving",
+                "collector refused {lost} of {} events with {status} ({detail}); dropping \
+                 the batch so the queue keeps moving",
                 events.len()
             );
             let _ = buffer.ack(last_seq, events.len());
@@ -482,7 +496,7 @@ async fn export_once(buffer: &Buffer, exporter: &Exporter, bounds: (usize, u64))
                     None,
                     EventKind::Loss {
                         reason: EXPORT_REJECTED.into(),
-                        count: events.len() as u64,
+                        count: lost,
                         detail: format!("collector returned {status}: {detail}"),
                     },
                 ));
@@ -1125,6 +1139,68 @@ mod tests {
             export_once(&buffer, &exporter, (100, 0)).await,
             Attempt::Idle
         );
+    }
+
+    /// A collector that answers 200 while rejecting part of the batch.
+    fn partial_collector(rejected: u64) -> Exporter {
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let addr = server.server_addr().to_string();
+        std::thread::spawn(move || {
+            for req in server.incoming_requests() {
+                let body = format!(
+                    r#"{{"partialSuccess":{{"rejectedLogRecords":"{rejected}","errorMessage":"bad attribute"}}}}"#
+                );
+                let _ = req.respond(tiny_http::Response::from_string(body));
+            }
+        });
+        let cfg = config::ExportCfg {
+            otlp_endpoint: Some(format!("http://{addr}")),
+            ..Default::default()
+        };
+        Exporter::new(&cfg)
+    }
+
+    /// A partial success settles the batch like any other refusal, but the
+    /// loss it records is the records the collector actually threw away --
+    /// not the batch that carried them. `loss.count` is documented as the
+    /// events destroyed rather than delivered, and a fleet sums it to get a
+    /// loss rate, so charging the whole batch for one rejected record
+    /// overstates that rate by up to the batch size.
+    #[tokio::test]
+    async fn a_partial_rejection_records_only_the_records_actually_lost() {
+        let dir = tempfile::tempdir().unwrap();
+        let buffer = buffer_in(dir.path());
+        let exporter = partial_collector(1);
+        for i in 0..3 {
+            buffer.push(&prompt(i)).unwrap();
+        }
+
+        assert_eq!(
+            export_once(&buffer, &exporter, (100, 0)).await,
+            Attempt::Dropped,
+            "records the collector refuses are not coming back; the batch settles"
+        );
+        let left = buffer.peek_batch(100, 0).unwrap();
+        assert_eq!(left.len(), 1, "the batch itself must leave the queue");
+        match &left[0].1.kind {
+            EventKind::Loss {
+                reason,
+                count,
+                detail,
+            } => {
+                assert_eq!(reason, EXPORT_REJECTED);
+                assert_eq!(
+                    *count, 1,
+                    "one record was rejected, so one event was lost -- not the \
+                     three the batch happened to carry"
+                );
+                assert!(
+                    detail.contains("bad attribute"),
+                    "the collector's own reason has to survive: {detail}"
+                );
+            }
+            other => panic!("expected a loss record, got {other:?}"),
+        }
     }
 
     /// The other half: an outage must not be mistaken for a refusal, or a

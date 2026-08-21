@@ -42,6 +42,20 @@ pub struct Monitor {
     summary: SharedSummary,
 }
 
+/// The `policy_age_secs` a heartbeat should carry.
+///
+/// Three states, and a responder needs all three apart: a host with no
+/// `remote.url` has no policy to be stale about, so the attribute is absent;
+/// a managed host that has never had an answer reports `-1`; one that has
+/// reports the seconds since. `-1` rather than a large number because
+/// "never" must not be a function of uptime — otherwise a daemon that
+/// started a minute ago and a host whose policy URL has been blocked for a
+/// month are told apart only by a field the attacker also influences.
+fn policy_age_secs(url: Option<&str>, since_last_ok: Option<std::time::Duration>) -> Option<i64> {
+    url?;
+    Some(since_last_ok.map_or(-1, |d| d.as_secs() as i64))
+}
+
 impl Monitor {
     pub fn new(buffer: Arc<Buffer>, cfg: Arc<RwLock<Config>>, summary: SharedSummary) -> Self {
         Monitor {
@@ -83,6 +97,10 @@ impl Monitor {
             let cfg = self.cfg.read().unwrap_or_else(|e| e.into_inner());
             (cfg.remote.url.clone(), cfg.integrity.binary_sha256.clone())
         };
+        let policy_age_secs = policy_age_secs(
+            policy_url.as_deref(),
+            crate::config::since_last_policy_fetch(),
+        );
         // Empty when this process cannot read its own file — which is itself
         // worth seeing, and better said as a blank than as a digest of nothing.
         let binary_sha256 = crate::harness::own_binary_digest().unwrap_or_default();
@@ -104,6 +122,7 @@ impl Monitor {
                 broken,
                 config_fingerprint: crate::daemon::config_fingerprint(&self.cfg),
                 policy_url,
+                policy_age_secs,
                 // A depth that cannot be read is reported as zero, which is the
                 // conservative direction: it understates a backlog rather than
                 // inventing one, and a database this daemon cannot count is
@@ -163,9 +182,13 @@ mod tests {
     }
 
     fn monitor(dir: &tempfile::TempDir) -> (Monitor, Arc<Buffer>) {
+        monitor_with(dir, Config::default())
+    }
+
+    fn monitor_with(dir: &tempfile::TempDir, cfg: Config) -> (Monitor, Arc<Buffer>) {
         let _ = dir;
         let buffer = Arc::new(Buffer::open(&BufferCfg::default()).unwrap());
-        let cfg = Arc::new(RwLock::new(Config::default()));
+        let cfg = Arc::new(RwLock::new(cfg));
         let summary = SharedSummary::default();
         (Monitor::new(buffer.clone(), cfg, summary), buffer)
     }
@@ -347,5 +370,100 @@ mod tests {
             Some(&*binary_sha256)
         );
         assert_eq!(get("health.binary_pin_ok").as_deref(), Some("false"));
+    }
+
+    /// A blocked policy URL is the one policy attack that costs nothing and, as
+    /// shipped, signalled nothing: the daemon keeps applying the last cache, the
+    /// heartbeat keeps reporting the configured URL, and the fingerprint keeps
+    /// matching the fleet. The age of the last successful fetch is what makes a
+    /// frozen host distinguishable from a current one.
+    #[test]
+    fn policy_age_separates_unmanaged_from_never_fetched_from_current() {
+        use std::time::Duration;
+        assert_eq!(
+            policy_age_secs(None, None),
+            None,
+            "a host with no policy URL has no policy age, and an attribute that \
+             is always present cannot be alerted on"
+        );
+        assert_eq!(
+            policy_age_secs(Some("https://policy.example/argus.toml"), None),
+            Some(-1),
+            "a host that has never fetched is not a host that just fetched"
+        );
+        assert_eq!(
+            policy_age_secs(
+                Some("https://policy.example/argus.toml"),
+                Some(Duration::from_secs(30))
+            ),
+            Some(30),
+        );
+    }
+
+    /// And that the heartbeat actually carries it — both branches. A field
+    /// wired to a constant `None` satisfies the unmanaged case while shipping
+    /// no signal at all on the managed one, which is the only case the alert
+    /// exists for.
+    #[test]
+    fn the_heartbeat_carries_the_policy_age() {
+        let dir = tmp();
+        let (mon, _buffer) = monitor(&dir);
+        let EventKind::Health {
+            policy_age_secs, ..
+        } = mon.snapshot("interval").kind
+        else {
+            panic!("expected a health event");
+        };
+        assert_eq!(
+            policy_age_secs, None,
+            "the test monitor configures no remote.url"
+        );
+
+        // `LAST_POLICY_OK` is only ever written by `poll_loop`, which no unit
+        // test drives, so a managed host reaches this point in the
+        // never-fetched state. The third phase below sets it deliberately;
+        // this test is the only one that asserts on the field, so the order
+        // within it is the whole ordering that matters.
+        let managed = || Config {
+            remote: crate::config::RemoteCfg {
+                url: Some("https://policy.example/argus.toml".into()),
+                ..Default::default()
+            },
+            ..Config::default()
+        };
+        let (mon, _buffer) = monitor_with(&dir, managed());
+        let EventKind::Health {
+            policy_age_secs, ..
+        } = mon.snapshot("interval").kind
+        else {
+            panic!("expected a health event");
+        };
+        assert_eq!(
+            policy_age_secs,
+            Some(-1),
+            "a managed host that has never had an answer must say so; this is \
+             the assertion a hardcoded `None` fails"
+        );
+
+        // The two assertions above are both satisfied by a field wired to a
+        // constant: `None` for the unmanaged host, `-1` for a managed one that
+        // has never fetched. Neither reads the clock. This third one is the
+        // only assertion that fails if the `since_last_policy_fetch()`
+        // argument is replaced by a literal — and a real elapsed age is the
+        // entire signal the staleness alert was added for.
+        crate::config::set_last_policy_fetch_for_test(std::time::Duration::from_secs(3600));
+        let (mon, _buffer) = monitor_with(&dir, managed());
+        let EventKind::Health {
+            policy_age_secs, ..
+        } = mon.snapshot("interval").kind
+        else {
+            panic!("expected a health event");
+        };
+        assert_eq!(
+            policy_age_secs,
+            Some(3600),
+            "the seconds since the last successful fetch must reach the \
+             heartbeat, not just the never-fetched sentinel"
+        );
     }
 }

@@ -123,7 +123,51 @@ const BUILTIN: &[(&str, &str)] = &[
     // A connection string announces nothing in its key name — `DATABASE_URL`
     // is not a secret and its value is. Only the credentials are matched: the
     // host and path that follow are what the record exists to report.
-    ("url-credentials", r"://[^\s/:@]{1,128}:[^\s/@]{1,256}@"),
+    //
+    // Greedy through `@`, so a password containing one is redacted whole
+    // rather than up to its first. Excluding `/` and whitespace from the
+    // password class is what keeps the match inside one authority: it cannot
+    // reach past a path separator, so `https://a.example/x@y` — a path, not a
+    // credential — does not match at all.
+    //
+    // No look-around here, deliberately: this crate's `regex` has none, and
+    // `Redactor::new` *drops* a pattern that fails to compile rather than
+    // failing loudly, so a look-around would silently remove URL-credential
+    // redaction altogether.
+    //
+    // A password class has to end somewhere, and every character excluded
+    // from it is a password shape that stops matching and gets exported in
+    // full. So the rule is written twice, narrow first and greedy second,
+    // and `scrub_str` applies them in this order.
+    //
+    // The narrow form stops at `"`. That bounds the case a tool-input field
+    // actually holds: a URL with no trailing slash inside a serialized JSON
+    // string, which `visit_strings` scrubs as one string. Greedy alone runs
+    // to the *last* `@` before the next `/` or space, so it would take the
+    // host, the JSON punctuation and the following field with it —
+    //
+    //     {"url":"https://u:p@h","email":"a@b"}
+    //         -> {"url":"https[REDACTED:url-credentials]b"}
+    //
+    // — where the narrow form redacts `://u:p@` alone and leaves the address
+    // intact.
+    //
+    // The greedy form then runs as the backstop, because the narrow one
+    // cannot match a password containing a quote at all: in JSON that
+    // character arrives escaped, as `pa\"ss`, and the class stops on it
+    // before ever reaching the mandatory `@`. On its own the narrow rule
+    // would export such a password verbatim. Running second, greedy catches
+    // it — the earlier replacement inserts only `[REDACTED:…]`, which has no
+    // `://`, so the backstop cannot re-match what the narrow rule already
+    // took.
+    //
+    // What survives both: a multi-credential authority such as
+    // `redis://u:p@h1,u2:p2@h2/0` still loses the intermediate host to the
+    // greedy form, since it holds no quote for the narrow one to stop on.
+    // Over-redaction costs context, which is recoverable; under-redaction
+    // costs the thing this table exists to prevent, which is not.
+    ("url-credentials", r"://[^\s/:@]{1,128}:[^\s/\x22]{1,256}@"),
+    ("url-credentials", r"://[^\s/:@]{1,128}:[^\s/]{1,256}@"),
 ];
 
 /// Counts regex-set compilations. Building a `Redactor` recompiles every
@@ -625,5 +669,98 @@ mod tests {
         assert!(!out.contains("abcd1234efgh"), "leaked: {out}");
         assert!(!out.contains("hunter2secret"), "leaked: {out}");
         assert!(!out.contains("ghx12345678"), "leaked: {out}");
+    }
+
+    /// RFC 3986 says a literal `@` in a password must be percent-encoded, and
+    /// people paste raw passwords anyway. Stopping at the first `@` is worse
+    /// than not matching at all: it redacts the part that looked like a
+    /// credential and exports the rest of one.
+    #[test]
+    fn a_password_containing_an_at_sign_is_redacted_whole() {
+        let out = r().scrub_str("cloned https://user:p@ssw0rd@git.example.com/repo.git");
+        assert!(
+            !out.contains("ssw0rd"),
+            "the tail of the password survived: {out}"
+        );
+        assert!(
+            out.contains("git.example.com"),
+            "the host is the finding and must survive: {out}"
+        );
+    }
+
+    /// The ordinary case has to keep working, and an email address in prose is
+    /// not a URL credential.
+    #[test]
+    fn ordinary_urls_and_addresses_are_untouched() {
+        assert_eq!(
+            r().scrub_str("see https://git.example.com/repo.git"),
+            "see https://git.example.com/repo.git"
+        );
+        assert_eq!(
+            r().scrub_str("mail bob@example.com"),
+            "mail bob@example.com"
+        );
+    }
+
+    /// Why the greedy form is kept as a second rule rather than replaced by
+    /// the narrow one. Every character excluded from the password class is a
+    /// password shape that stops matching and is exported in full — the one
+    /// outcome this table exists to prevent. These are the two inputs that
+    /// prove it: measured, not assumed, a class narrowed to `[^\s/,"]` leaves
+    /// both of them byte-for-byte unchanged. Delete the greedy rule and the
+    /// escaped-quote case below is exported verbatim.
+    #[test]
+    fn no_password_shape_escapes_the_layered_rules() {
+        for input in [
+            r#"{"url":"https://u:pa,ss@h/"}"#,
+            r#"{"url":"https://u:pa\"ss@h/"}"#,
+        ] {
+            let out = r().scrub_str(input);
+            assert!(
+                !out.contains("pa,ss") && !out.contains("pa\\\"ss"),
+                "a password containing `,` or `\"` survived: {out}"
+            );
+            assert!(
+                out.contains("[REDACTED:url-credentials]"),
+                "the credential was not matched at all: {out}"
+            );
+        }
+    }
+
+    /// The other half: the narrow rule has to actually bound the match, or
+    /// layering bought nothing. A URL with no trailing slash inside a
+    /// serialized JSON string is the shape a tool-input field holds, and
+    /// under the greedy rule alone the match ran to the last `@` in the
+    /// string — taking the host, the JSON punctuation and the address in the
+    /// next field with it.
+    #[test]
+    fn a_json_embedded_url_loses_its_credential_and_nothing_else() {
+        let out = r().scrub_str(r#"{"url":"https://u:p@h","email":"a@b.example"}"#);
+        assert!(
+            !out.contains("u:p@"),
+            "the credential itself must be gone: {out}"
+        );
+        assert!(
+            out.contains("a@b.example"),
+            "the following field must survive the redaction: {out}"
+        );
+        assert!(
+            out.contains(r#""email""#),
+            "the JSON structure must survive: {out}"
+        );
+    }
+
+    /// A pattern that is quadratic on a long adversarial string is a way to
+    /// wedge the daemon with one tool call.
+    #[test]
+    fn the_url_pattern_stays_linear_on_a_hostile_string() {
+        let hostile = format!("://a:{}", "@".repeat(20_000));
+        let started = std::time::Instant::now();
+        let _ = r().scrub_str(&hostile);
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(500),
+            "took {:?}",
+            started.elapsed()
+        );
     }
 }

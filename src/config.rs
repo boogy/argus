@@ -1,6 +1,16 @@
 use serde::Deserialize;
 use std::collections::BTreeMap;
 
+/// The most policy argus will buffer from one fetch. Policy is a config file
+/// an administrator wrote; a megabyte is already generous, and without a
+/// ceiling the server picks how much memory every host in the fleet spends
+/// once per poll interval.
+const MAX_POLICY_BYTES: usize = 1024 * 1024;
+
+/// A detached ed25519 signature is 64 bytes, base64'd to 88. The slack is for
+/// a trailing newline and nothing else; this one needs no generosity at all.
+const MAX_SIG_BYTES: usize = 4096;
+
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default)]
 pub struct Config {
@@ -492,9 +502,17 @@ pub fn merged_table() -> toml::Table {
         // user's own directory. Where a key is pinned, checking that claim
         // here rather than only in `check` is what makes signing prevention
         // instead of a report filed after the policy already applied.
-        if signed && let Err(e) = crate::policysig::check_cache(&text) {
-            tracing::warn!("ignoring unverified remote policy {path:?}: {e}");
-            continue;
+        if signed {
+            if let Err(e) = crate::policysig::check_cache(&text) {
+                tracing::warn!("ignoring unverified remote policy {path:?}: {e}");
+                continue;
+            }
+            if let Err(e) = crate::policysig::check_rollback(&text) {
+                tracing::warn!("ignoring rolled-back remote policy {path:?}: {e}");
+                continue;
+            }
+            // Only a body that verified and is not a rollback raises the floor.
+            crate::policysig::record_serial(&text);
         }
         let table = match text.parse::<toml::Table>() {
             Ok(table) => table,
@@ -563,6 +581,18 @@ pub fn system_layer() -> SystemLayer {
             path.display()
         ));
     }
+    // A key serde ignored is a key the administrator believes is in force.
+    // Harmless for most of the schema, and not harmless for the one key that
+    // decides whether remote policy is authenticated at all.
+    let typos = crate::policysig::suspicious_remote_keys(&table);
+    if !typos.is_empty() {
+        return SystemLayer::Skipped(format!(
+            "{} has misspelled [remote] keys ({}), so the policy it means to \
+             pin is not in force",
+            path.display(),
+            typos.join(", ")
+        ));
+    }
     SystemLayer::Present(table)
 }
 
@@ -599,6 +629,14 @@ pub struct RemotePolicy {
 pub async fn fetch_remote(url: &str, etag: Option<&str>) -> anyhow::Result<Option<RemotePolicy>> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
+        // Policy is fetched for its authenticity. A redirect is the server
+        // naming a different source, and reqwest would follow one from https
+        // to http by default — which is the network's chance to answer
+        // instead. An administrator who moves the policy changes the URL.
+        //
+        // This stops the follow but does not refuse the response; see
+        // `refuse_redirect`, which is what turns the 30x into an error.
+        .redirect(reqwest::redirect::Policy::none())
         .build()?;
     let mut req = client.get(url);
     if let Some(tag) = etag {
@@ -608,13 +646,16 @@ pub async fn fetch_remote(url: &str, etag: Option<&str>) -> anyhow::Result<Optio
     if resp.status() == reqwest::StatusCode::NOT_MODIFIED {
         return Ok(None);
     }
+    // Below the 304 check on purpose: 304 is itself a 3xx, and refusing it
+    // here would turn every cached poll into an error.
+    refuse_redirect(&resp, url)?;
     let resp = resp.error_for_status()?;
     let new_etag = resp
         .headers()
         .get("etag")
         .and_then(|v| v.to_str().ok())
         .map(String::from);
-    let body = resp.text().await?;
+    let body = bounded_text(resp, url, MAX_POLICY_BYTES).await?;
     // Validate before caching: a bad remote config must not poison the agent.
     body.parse::<toml::Table>()?;
 
@@ -622,13 +663,9 @@ pub async fn fetch_remote(url: &str, etag: Option<&str>) -> anyhow::Result<Optio
         None => None,
         Some(key) => {
             let sig_url = crate::policysig::sig_url(url);
-            let sig = client
-                .get(&sig_url)
-                .send()
-                .await?
-                .error_for_status()?
-                .text()
-                .await?;
+            let sig_resp = client.get(&sig_url).send().await?;
+            refuse_redirect(&sig_resp, &sig_url)?;
+            let sig = bounded_text(sig_resp.error_for_status()?, &sig_url, MAX_SIG_BYTES).await?;
             crate::policysig::verify(body.as_bytes(), &sig, &key)
                 .map_err(|e| anyhow::anyhow!("policy at {url} failed verification: {e}"))?;
             Some(sig)
@@ -639,6 +676,63 @@ pub async fn fetch_remote(url: &str, etag: Option<&str>) -> anyhow::Result<Optio
         etag: new_etag,
         signature,
     }))
+}
+
+/// Turn a 30x into an error.
+///
+/// `Policy::none()` stops reqwest from following a redirect but returns the
+/// 30x as an ordinary `Ok` response, and `error_for_status` passes 3xx
+/// through — so without this the body of a redirect would be parsed as
+/// policy, which is the whole attack.
+fn refuse_redirect(resp: &reqwest::Response, url: &str) -> anyhow::Result<()> {
+    if resp.status().is_redirection() {
+        let to = resp
+            .headers()
+            .get("location")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("(no Location header)");
+        anyhow::bail!("policy at {url} redirected to {to}; refusing to follow");
+    }
+    Ok(())
+}
+
+/// Read a response body, refusing one that exceeds `cap`.
+///
+/// `Content-Length` is checked first so an honest server is refused before a
+/// byte of body moves, and the stream is bounded as well because a hostile
+/// one simply omits the header. Both messages say "too large" — the caller
+/// does not care which limit caught it.
+async fn bounded_text(
+    mut resp: reqwest::Response,
+    url: &str,
+    cap: usize,
+) -> anyhow::Result<String> {
+    // The header itself, not `Response::content_length()`: this client is
+    // built with reqwest's `gzip` feature, which wraps every body in a decoder
+    // whose size is unknown, so `content_length()` answers `None` for all
+    // responses and the early refusal below would never once have fired.
+    //
+    // A compressed body declares its *compressed* size here, so a small
+    // declaration that inflates past the cap slips this check — the streaming
+    // loop underneath is what actually holds the ceiling. This is the cheap
+    // refusal that avoids pulling a megabyte first, not the guarantee.
+    if let Some(len) = resp
+        .headers()
+        .get(reqwest::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok())
+        && len > cap as u64
+    {
+        anyhow::bail!("body at {url} is too large ({len} bytes, limit {cap})");
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = resp.chunk().await? {
+        body.extend_from_slice(&chunk);
+        if body.len() > cap {
+            anyhow::bail!("body at {url} is too large (over {cap} bytes)");
+        }
+    }
+    Ok(String::from_utf8(body)?)
 }
 
 /// One poll's worth of "the server sent a new body": validate it, cache it,
@@ -699,6 +793,38 @@ fn apply_remote(
     }
 }
 
+/// When the policy URL last answered.
+///
+/// `None` until the first successful poll. Module-level rather than threaded
+/// through `poll_loop`, because the health task is the only reader and it is
+/// nowhere near this call chain.
+static LAST_POLICY_OK: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+
+/// How long since the policy URL last answered, or `None` if it never has.
+pub fn since_last_policy_fetch() -> Option<std::time::Duration> {
+    LAST_POLICY_OK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .map(|t| t.elapsed())
+}
+
+fn note_policy_fetched() {
+    *LAST_POLICY_OK.lock().unwrap_or_else(|e| e.into_inner()) = Some(std::time::Instant::now());
+}
+
+/// Test-only: place the last successful fetch `ago` in the past.
+///
+/// `LAST_POLICY_OK` is written only by [`poll_loop`], which no unit test
+/// drives, so without this the heartbeat's age field can only ever be
+/// observed in its never-fetched state — and a wiring that returns a
+/// constant satisfies that state while carrying no signal at all in the one
+/// case the alert exists for.
+#[cfg(test)]
+pub(crate) fn set_last_policy_fetch_for_test(ago: std::time::Duration) {
+    *LAST_POLICY_OK.lock().unwrap_or_else(|e| e.into_inner()) =
+        std::time::Instant::now().checked_sub(ago);
+}
+
 /// Daemon task: poll remote config, atomically cache, hot-swap shared config.
 pub async fn poll_loop(shared: std::sync::Arc<std::sync::RwLock<Config>>) {
     let mut etag: Option<String> = None;
@@ -709,8 +835,13 @@ pub async fn poll_loop(shared: std::sync::Arc<std::sync::RwLock<Config>>) {
         };
         if let Some(url) = url {
             match fetch_remote(&url, etag.as_deref()).await {
-                Ok(Some(policy)) => apply_remote(&shared, &mut etag, &policy),
-                Ok(None) => {}
+                Ok(Some(policy)) => {
+                    note_policy_fetched();
+                    apply_remote(&shared, &mut etag, &policy)
+                }
+                // A 304 means the server was reached and had nothing new,
+                // which is exactly as much evidence of reachability as a body.
+                Ok(None) => note_policy_fetched(),
                 Err(e) => tracing::warn!("remote config fetch failed (using cache): {e}"),
             }
         }
@@ -1226,6 +1357,15 @@ mod tests {
         };
         assert!(why.contains("config schema"), "{why}");
 
+        // Serde ignores a key it does not know, so this parses and matches the
+        // schema — and would read as a layer in force while the pin it means to
+        // set is not there at all.
+        std::fs::write(&sys, "[remote]\npublik_key = \"x\"\n").unwrap();
+        let SystemLayer::Skipped(why) = system_layer() else {
+            panic!("a misspelled pin must not read as a layer in force");
+        };
+        assert!(why.contains("publik_key"), "{why}");
+
         std::fs::write(&sys, "[export]\nbatch_size = 50\n").unwrap();
         assert!(matches!(system_layer(), SystemLayer::Present(_)));
     }
@@ -1303,5 +1443,149 @@ mod tests {
             cfg.export.headers.is_empty(),
             "the machine-wide layer is world-readable; it must not model credentials in it"
         );
+    }
+
+    /// Reporting a rollback and refusing to *apply* one are different jobs.
+    /// `integrity::check_config` only tells the fleet; this is the gate that
+    /// decides what the daemon actually runs on. Without it a host would obey
+    /// the attacker's older policy while dutifully reporting that it was.
+    #[test]
+    fn a_rolled_back_cache_is_not_applied() {
+        let dir = tempfile::tempdir().unwrap();
+        let _data = crate::paths::DataDir::set(dir.path());
+        let (sk, pk) = crate::policysig::testkeys::keypair();
+        let sys = dir.path().join("system.toml");
+        std::fs::write(&sys, format!("[remote]\npublic_key = \"{pk}\"\n")).unwrap();
+        let _guard = crate::paths::SystemConfig::set(&sys);
+
+        let cache = crate::paths::cached_remote_config_path();
+        let sigp = crate::paths::cached_remote_config_sig_path();
+
+        // `batch_size` rather than a capture switch: every capture default is
+        // permissive, so "the old policy applied" and "the old policy was
+        // discarded" would read the same. A value no default shares is the
+        // only way the assertion can tell them apart.
+        let current = "[remote]\npolicy_serial = 7\n[export]\nbatch_size = 512\n";
+        std::fs::write(&cache, current).unwrap();
+        std::fs::write(&sigp, crate::policysig::testkeys::sign(&sk, current)).unwrap();
+        assert_eq!(load().export.batch_size, 512, "the policy should apply");
+
+        let rolled_back = "[remote]\npolicy_serial = 6\n[export]\nbatch_size = 999\n";
+        std::fs::write(&cache, rolled_back).unwrap();
+        std::fs::write(&sigp, crate::policysig::testkeys::sign(&sk, rolled_back)).unwrap();
+        assert!(
+            crate::policysig::check_cache(rolled_back).is_ok(),
+            "the signature is genuine, which is the whole difficulty"
+        );
+        assert_eq!(
+            load().export.batch_size,
+            256,
+            "the older policy must not take effect; the host falls back to the \
+             built-in default and `argus check` reports the refusal"
+        );
+    }
+
+    /// Policy is the one fetch whose *authenticity* is the point. A redirect is
+    /// the server saying "ask somewhere else", and following it across schemes
+    /// turns a pinned HTTPS policy URL into an HTTP one the network can rewrite.
+    /// On a host that pins no key there is nothing downstream to catch that.
+    ///
+    /// `Policy::none()` alone would leave this failing: reqwest hands the 302
+    /// back as a normal response and `error_for_status` passes 3xx through, so
+    /// the redirect body would be parsed as policy.
+    #[tokio::test]
+    async fn a_redirected_policy_fetch_is_refused() {
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let addr = server.server_addr().to_string();
+        std::thread::spawn(move || {
+            for req in server.incoming_requests() {
+                let mut r = tiny_http::Response::empty(302);
+                r.add_header(
+                    tiny_http::Header::from_bytes(
+                        &b"Location"[..],
+                        &b"http://127.0.0.1:1/x.toml"[..],
+                    )
+                    .unwrap(),
+                );
+                let _ = req.respond(r);
+            }
+        });
+        let err = fetch_remote(&format!("http://{addr}/argus.toml"), None)
+            .await
+            .expect_err("a redirected policy fetch must not be followed");
+        assert!(
+            format!("{err:#}").to_lowercase().contains("redirect"),
+            "the error has to say why: {err:#}"
+        );
+    }
+
+    /// A body with no ceiling is a memory ceiling set by whoever runs the policy
+    /// server, re-applied on every host on every poll. This is the honest-server
+    /// case: `Content-Length` is present and the fetch is refused before a byte
+    /// of body is read.
+    #[tokio::test]
+    async fn an_oversized_policy_body_is_refused_on_its_content_length() {
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let addr = server.server_addr().to_string();
+        std::thread::spawn(move || {
+            for req in server.incoming_requests() {
+                let huge = vec![b'#'; MAX_POLICY_BYTES + 1];
+                let len = huge.len();
+                // `data_length: Some(..)` is what makes tiny_http declare a
+                // `Content-Length`. `from_string` chunks instead, and a
+                // chunked body is refused by the streaming cap below rather
+                // than by the header check — which left this test passing
+                // with the header check deleted entirely.
+                let r = tiny_http::Response::new(
+                    tiny_http::StatusCode(200),
+                    vec![],
+                    std::io::Cursor::new(huge),
+                    Some(len),
+                    None,
+                )
+                // Above tiny_http's default 32 KiB threshold it chunks the
+                // body regardless of `data_length`, and a chunked response
+                // carries no `Content-Length` at all.
+                .with_chunked_threshold(usize::MAX);
+                let _ = req.respond(r);
+            }
+        });
+        let err = fetch_remote(&format!("http://{addr}/argus.toml"), None)
+            .await
+            .expect_err("an unbounded body must not be buffered");
+        // "limit" appears only in the `Content-Length` refusal; the streaming
+        // cap says "over N bytes". Asserting the weaker "too large" passed
+        // just as happily with the header check deleted, since the streaming
+        // cap catches the same body a moment later — so the test named a
+        // guard it did not actually hold.
+        assert!(format!("{err:#}").contains("bytes, limit"), "{err:#}");
+    }
+
+    /// And the case the header check cannot reach: a server that declares no
+    /// length at all. Checking `Content-Length` and stopping there would be a
+    /// ceiling any hostile server opts out of by omitting one header.
+    #[tokio::test]
+    async fn an_oversized_policy_body_is_refused_without_a_content_length() {
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let addr = server.server_addr().to_string();
+        std::thread::spawn(move || {
+            for req in server.incoming_requests() {
+                let huge = vec![b'#'; MAX_POLICY_BYTES + 1];
+                // `data_length: None` makes tiny_http chunk it, so no
+                // `Content-Length` reaches the client.
+                let r = tiny_http::Response::new(
+                    tiny_http::StatusCode(200),
+                    vec![],
+                    std::io::Cursor::new(huge),
+                    None,
+                    None,
+                );
+                let _ = req.respond(r);
+            }
+        });
+        let err = fetch_remote(&format!("http://{addr}/argus.toml"), None)
+            .await
+            .expect_err("a chunked oversized body must not be buffered either");
+        assert!(format!("{err:#}").contains("too large"), "{err:#}");
     }
 }

@@ -121,8 +121,9 @@ record: `event.type=loss`, `loss.reason=buffer_full`, carrying the count.
 **Detection:** A1 for the block itself;
 
 > **A5 — Loss records.** Any `event.type=loss` at all. `buffer_full`,
-> `spool_full` and `export_rejected` mean the pipeline shed data;
-> `stdin_truncated` means one payload was too big and is expected occasionally.
+> `buffer_unreadable`, `spool_full` and `export_rejected` mean the pipeline
+> shed data; `stdin_truncated` means one payload was too big and is expected
+> occasionally.
 >
 > **A6 — Late arrival.** A burst of events whose timestamps are hours older than
 > their receipt time is a block that was lifted, and worth reviewing even though
@@ -225,6 +226,17 @@ with `[remote] public_key` pinned in the machine-wide layer, a policy body is
 fetched alongside its `.sig`, verified with ed25519, and refused — neither
 cached nor applied — if it does not verify.
 
+Signing alone says who wrote a policy, not which one. Where a key is pinned,
+a policy that sets `[remote] policy_serial` also refuses anything older than
+the highest serial the host has applied, so an administrator who tightens a
+policy cannot have that undone by restoring a copy they themselves signed.
+Policies without a serial, and hosts without a pinned key, are unaffected.
+
+The floor itself is a file in the user's data directory, so it can be raised
+to refuse even a current policy. That is a denial of policy, not a weakening
+of one, and `argus check` reports it the same way it reports a cache that
+will not verify — the host stops looking healthy.
+
 **What argus emits:** `health.config_fingerprint` on every heartbeat, plus
 `health.policy_url`. `argus check --config --remote-url <canonical>` fails
 unless the running `remote.url` matches exactly, which is what catches a
@@ -238,6 +250,15 @@ repointed or removed policy URL; pass the canonical URL from the MDM.
 > rule is a population comparison, not an equality test against a constant.
 >
 > **A12 — Policy URL.** `health.policy_url` absent, or not the canonical one.
+>
+> **A15 — Stale policy.** `health.policy_age_secs` greater than several times
+> `remote.poll_interval_secs`, or `-1` persisting past the first poll interval
+> on a host that is supposed to be managed. This is what a blocked policy URL
+> looks like: the host keeps applying the last cache it fetched, so
+> `health.policy_url` and `health.config_fingerprint` both keep looking
+> correct. A daemon reports `-1` between startup and its first successful
+> poll, so alert on `-1` that persists, not on the first heartbeat after a
+> restart.
 
 ### 7. Replace the binary
 
@@ -329,7 +350,10 @@ allow_env_overrides = false
 allow_user_uninstall = false
 
 [export]
-otlp_endpoint = "https://otel.corp.example/v1/logs"
+# A base URL: argus appends `/v1/logs` itself. A value that already ends in
+# `/v1/logs` posts to `/v1/logs/v1/logs`, which is a 404 — and a 404 is a
+# permanent rejection, so the batch is dropped rather than retried.
+otlp_endpoint = "https://otel.corp.example"
 # Leave credentials out of this file: it is world-readable by construction,
 # because every account on the machine has to be able to read the layer that
 # governs it. Put per-user tokens in the per-user config.
@@ -341,6 +365,9 @@ url = "https://policy.corp.example/argus.toml"
 # file the watched user can write.
 public_key = "…"
 poll_interval_secs = 300
+# Bump on every tightening. Refuses a genuinely-signed but older policy body
+# being restored — the rollback a pinned key alone does not catch.
+policy_serial = 1
 
 [integrity]
 enabled = true

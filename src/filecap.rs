@@ -52,11 +52,16 @@ pub fn normalize(path: &str) -> String {
 
 impl PathFilter {
     pub fn new(cfg: &FileContentsCfg) -> Self {
-        // Windows paths are case-insensitive, so `\NODE_MODULES\` and
-        // `\node_modules\` name one directory and must match one rule. Unix
-        // paths are not, and folding case there would exclude files a
-        // deployment did not ask to exclude.
-        Self::with_case_folding(cfg, cfg!(windows))
+        // Windows and macOS both ship case-insensitive filesystems by
+        // default, so `\NODE_MODULES\` and `\node_modules\`, or `.SSH` and
+        // `.ssh`, name one file and must match one rule. Linux is
+        // case-sensitive and folding there would exclude files a deployment
+        // did not ask to exclude.
+        //
+        // macOS can be formatted case-sensitively, and this over-excludes on
+        // such a volume. That is the right way to be wrong: the cost is a
+        // file that was not captured, against a credential that was.
+        Self::with_case_folding(cfg, cfg!(any(windows, target_os = "macos")))
     }
 
     /// Split out so the folding itself is testable on every platform. Built
@@ -117,13 +122,10 @@ impl PathFilter {
     /// and payload mode never needs it to ship the body, so the `/`-anchored
     /// form stands in when it is missing.
     pub fn allows_in(&self, path: &str, cwd: Option<&str>) -> bool {
-        if self.broken {
+        if self.excludes_in(path, cwd) {
             return false;
         }
         let forms = self.forms(path, cwd);
-        if forms.iter().any(|p| self.exclude.is_match(p)) {
-            return false;
-        }
         match &self.include {
             // Any form matching is enough here too, for the same reason: an
             // `include` of `/src/` names the same files whether the call said
@@ -132,6 +134,23 @@ impl PathFilter {
             Some(inc) => forms.iter().any(|p| inc.is_match(p)),
             None => true,
         }
+    }
+
+    /// Whether the exclusions alone refuse this path, ignoring `include`.
+    ///
+    /// Split out because the two lists answer different questions. `exclude`
+    /// is the security boundary and has to hold against every name a file can
+    /// be reached by, resolved ones included. `include` is a scoping
+    /// convenience, written by an operator against the paths they expect to
+    /// see — re-judging it against a resolved path drops files they asked for
+    /// whenever the platform put a link above them.
+    pub fn excludes_in(&self, path: &str, cwd: Option<&str>) -> bool {
+        if self.broken {
+            return true;
+        }
+        self.forms(path, cwd)
+            .iter()
+            .any(|p| self.exclude.is_match(p))
     }
 
     /// Every spelling of `path` that could name the file it names.
@@ -527,6 +546,10 @@ struct Probe {
     /// `Ok(Some)` are the bytes; `Ok(None)` means nothing was read *on
     /// purpose*; `Err` is the reason the file has no content to report.
     body: Result<Option<Vec<u8>>, SkipReason>,
+    /// What the path actually reaches, with every component resolved.
+    /// `None` when it could not be resolved — the read below then fails on
+    /// its own terms and there is nothing extra to judge.
+    resolved: Option<PathBuf>,
 }
 
 /// Stat first, and without following: the stat is what decides this is a thing
@@ -539,6 +562,7 @@ fn probe(path: &Path, ceiling: usize, want_body: bool) -> Probe {
         bytes: 0,
         mtime: None,
         body: Err(SkipReason::Unreadable),
+        resolved: None,
     };
     let Ok(md) = std::fs::symlink_metadata(path) else {
         return unreadable;
@@ -557,6 +581,10 @@ fn probe(path: &Path, ceiling: usize, want_body: bool) -> Probe {
         bytes: md.len(),
         mtime: md.modified().ok().map(DateTime::<Utc>::from),
         body: Ok(None),
+        // Resolved here rather than in the caller because this function is
+        // the one place that touches the filesystem, and it is the only one
+        // running behind the read deadline.
+        resolved: std::fs::canonicalize(path).ok(),
     };
     // Unlike a payload body, an oversized file is not truncated. The payload
     // is in memory whether we want it or not, so keeping a prefix costs
@@ -660,6 +688,22 @@ fn disk_snapshot(
         snap.skipped = Some(SkipReason::Unreadable);
         return snap;
     };
+    // `allowed` above matched the string the tool said. A symlinked parent
+    // directory means that string never contained `.ssh` while the bytes came
+    // from a directory that did, so the rules get a second look at what the
+    // path actually reached. `probe` refuses a symlink in the final position;
+    // this is the same redirection one component further up.
+    //
+    // Re-judged rather than refused outright: on macOS `/tmp`, `/var` and
+    // `/etc` are themselves links into `/private`, and refusing every path
+    // with a symlinked component would silently stop capturing everything
+    // under them — a monitoring blackout in exchange for a bypass that
+    // re-judging closes on its own.
+    let allowed = allowed
+        && p.resolved
+            .as_deref()
+            .and_then(Path::to_str)
+            .is_none_or(|r| !filter.excludes_in(r, cwd));
     snap.bytes = p.bytes;
     snap.mtime = p.mtime;
     let buf = match p.body {
@@ -764,6 +808,73 @@ mod tests {
         assert!(unix.allows(key));
         // The lower-case forms are excluded on both.
         assert!(!unix.allows(r"C:\repo\node_modules\pkg\index.js"));
+    }
+
+    /// macOS ships a case-insensitive volume by default, so `.SSH` and `.ssh`
+    /// are one directory there while an exclude rule written in one case matches
+    /// only that spelling. The filter is the security boundary; a boundary that
+    /// depends on how the agent happened to capitalise a path is not one.
+    ///
+    /// `config` rather than `id_rsa` as the probe: the default list also carries
+    /// `_rsa$`, which matches in any case and would hide the platform difference
+    /// this test exists to pin down.
+    #[test]
+    fn the_default_filter_folds_case_where_the_filesystem_does() {
+        let filter = PathFilter::new(&FileContentsCfg::default());
+        assert!(
+            !filter.allows("/Users/x/.ssh/config"),
+            "the shipped rule must match the spelling it is written in"
+        );
+        if cfg!(any(windows, target_os = "macos")) {
+            assert!(
+                !filter.allows("/Users/x/.SSH/config"),
+                "same file on this platform's default filesystem, same rule"
+            );
+        } else {
+            assert!(
+                filter.allows("/Users/x/.SSH/config"),
+                "a genuinely different file on a case-sensitive filesystem"
+            );
+        }
+    }
+
+    /// The resolved-path second look is for exclusions only. `include` is an
+    /// operator's scoping list, written against the paths they expect to see;
+    /// judging it against what those paths resolve to drops files they
+    /// explicitly asked for whenever a link sits above them — and on macOS the
+    /// platform puts one above `TMPDIR` (`/var/folders/...`, reached through
+    /// `/var -> private/var`), where agents routinely write. That is the
+    /// monitoring blackout this task exists to avoid, arriving by a different
+    /// road than refusing symlinks outright.
+    #[cfg(unix)]
+    #[test]
+    fn an_include_list_is_not_re_judged_against_the_resolved_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let real = root.join("real");
+        std::fs::create_dir(&real).unwrap();
+        std::fs::write(real.join("notes.md"), b"hello").unwrap();
+        // The link stands in for the platform's own: the operator's `include`
+        // names the path they see, which is not the path it resolves to.
+        let link = root.join("workspace");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let named = link.join("notes.md");
+        let named = named.to_str().unwrap();
+        let inc = format!("^{}", regex::escape(link.to_str().unwrap()));
+
+        let c = on(|fc| {
+            fc.mode = ContentMode::Disk;
+            fc.include = vec![inc];
+        });
+        let out = snaps("Read", serde_json::json!({"file_path": named}), &c);
+        assert_eq!(out.len(), 1);
+        assert_eq!(
+            out[0].content.as_deref(),
+            Some("hello"),
+            "a file the operator included was dropped because the path it \
+             resolves to is not the path they wrote"
+        );
     }
 
     /// An empty `include` is "everything the excludes allow", not "nothing".
@@ -1326,6 +1437,54 @@ mod tests {
         // never named.
         assert_eq!(snap.bytes, 0, "the link's target was measured");
         assert_eq!(snap.mtime, None, "the link's target was measured");
+    }
+
+    /// The comment on `probe` names this attack — a link that gets a privileged
+    /// reader to fetch something on your behalf, past an exclude list that
+    /// matches on the path the agent said. Refusing a symlink in the last
+    /// position only is half the defence: the same trick one directory up reads
+    /// the same file and matches no rule.
+    #[cfg(unix)]
+    #[test]
+    fn an_exclusion_holds_when_a_parent_directory_is_a_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let secret = root.join(".ssh");
+        std::fs::create_dir(&secret).unwrap();
+        // `config`, not `id_rsa`: the default list also carries `_rsa$`, which
+        // matches through the link as readily as without it and would leave this
+        // test passing whether or not the bypass is closed.
+        std::fs::write(secret.join("config"), b"IdentityFile /x").unwrap();
+        let link = root.join("innocent");
+        std::os::unix::fs::symlink(&secret, &link).unwrap();
+
+        let named = link.join("config");
+        let named = named.to_str().unwrap();
+        assert!(
+            !named.contains(".ssh"),
+            "the string the agent said carries no trace of what it reaches"
+        );
+
+        let c = on(|fc| fc.mode = ContentMode::Disk);
+        let out = snaps("Read", serde_json::json!({"file_path": named}), &c);
+        assert_eq!(out.len(), 1);
+        assert_eq!(
+            out[0].skipped,
+            Some(SkipReason::Excluded),
+            "the exclude rule must be judged on what the path resolves to"
+        );
+        assert_eq!(out[0].content, None, "an excluded file's body was shipped");
+
+        // And a file whose only links are the platform's is still captured. This
+        // is the assertion that fails if the fix refuses symlinked components
+        // outright instead of re-judging the resolved path.
+        std::fs::write(root.join("notes.md"), b"hello").unwrap();
+        let ok = snaps(
+            "Read",
+            serde_json::json!({"file_path": root.join("notes.md").to_str().unwrap()}),
+            &c,
+        );
+        assert_eq!(ok[0].content.as_deref(), Some("hello"));
     }
 
     /// Why the stat comes first. A `read()` on a fifo with no writer never

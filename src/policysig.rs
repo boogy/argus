@@ -47,6 +47,73 @@ pub fn pinned_key() -> Option<String> {
         .map(str::to_owned)
 }
 
+/// The keys in `[remote]` that are close enough to a real one to be a typo.
+///
+/// A misspelled `public_key` is worse than an absent one: absent is a host
+/// that never pinned, which is a supported deployment, while misspelled is a
+/// host whose administrator believes it pinned and whose users can write
+/// their own policy cache. Serde ignores keys it does not know, so nothing
+/// downstream will ever notice on its own.
+///
+/// Edit distance 1 against `public_key` alone — the substitution and
+/// dropped/added-letter cases (`publik_key`, `pubic_key`, `public_ket`). A
+/// true transposition like `pubilc_key` is two edits and is deliberately not
+/// caught: widening to distance 2 would start flagging real keys.
+///
+/// Only `public_key`, and not every known key, because a hit here makes the
+/// loader skip the whole machine-wide layer — so a false positive disables
+/// the very control this protects. `url` is three characters long and its
+/// one-edit neighbourhood is full of plausible words (`uri`, `curl`); the
+/// neighbourhood of a ten-character key is not. The check is aimed at the one
+/// key whose silent absence is a security failure rather than a visible one.
+pub fn suspicious_remote_keys(table: &toml::Table) -> Vec<String> {
+    // Every field of `config::RemoteCfg`, plus `policy_serial`, which arrives
+    // from the network rather than the struct. Add a field there without
+    // adding it here and this function starts calling it a typo -- which
+    // skips the whole machine-wide layer for any administrator who uses it.
+    const KNOWN: &[&str] = &["url", "public_key", "poll_interval_secs", "policy_serial"];
+    let Some(remote) = table.get("remote").and_then(toml::Value::as_table) else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = remote
+        .keys()
+        .filter(|k| !KNOWN.contains(&k.as_str()))
+        .filter(|k| within_one_edit(k, "public_key"))
+        .cloned()
+        .collect();
+    out.sort();
+    out
+}
+
+/// Whether `a` reaches `b` in one insertion, deletion or substitution.
+fn within_one_edit(a: &str, b: &str) -> bool {
+    let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+    if a.len().abs_diff(b.len()) > 1 {
+        return false;
+    }
+    let (mut i, mut j, mut slack) = (0, 0, true);
+    while i < a.len() && j < b.len() {
+        if a[i] == b[j] {
+            i += 1;
+            j += 1;
+            continue;
+        }
+        if !slack {
+            return false;
+        }
+        slack = false;
+        match a.len().cmp(&b.len()) {
+            std::cmp::Ordering::Greater => i += 1,
+            std::cmp::Ordering::Less => j += 1,
+            std::cmp::Ordering::Equal => {
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+    slack || (a.len() - i) + (b.len() - j) == 0
+}
+
 /// Verify `body` against a base64 detached `signature` and base64 `key`.
 ///
 /// The error is prose for an operator, not a type: every caller either logs it
@@ -92,6 +159,75 @@ pub fn check_cache(body: &str) -> Result<(), String> {
     let sig = std::fs::read_to_string(&path)
         .map_err(|e| format!("no signature at {}: {e}", path.display()))?;
     verify(body.as_bytes(), &sig, &key)
+}
+
+/// The monotonic serial a policy declares, as `[remote] policy_serial`.
+///
+/// Optional, because every policy deployed before this existed has none and
+/// those fleets must keep working. A policy that declares one opts its fleet
+/// into refusing anything older — which is the only defence against a
+/// genuinely-signed *old* policy being put back, since the cache it lands in
+/// belongs to the account the policy constrains.
+pub fn policy_serial(body: &str) -> Option<u64> {
+    body.parse::<toml::Table>()
+        .ok()?
+        .get("remote")?
+        .as_table()?
+        .get("policy_serial")?
+        .as_integer()?
+        .try_into()
+        .ok()
+}
+
+/// Where the highest serial this host has ever applied is remembered.
+///
+/// In the data directory rather than in `events.db`, because it has to be
+/// readable before the buffer is opened — which also puts it within reach of
+/// the account the policy constrains. That is survivable only because both
+/// readers of it treat a refusal exactly as they treat a cache that will not
+/// verify: `argus check` reports `ok: false`. Raising the floor to lock out
+/// a genuine policy is therefore as loud as deleting the cache outright, and
+/// deleting the floor buys exactly one rollback.
+fn serial_path() -> std::path::PathBuf {
+    crate::paths::data_dir().join("policy-serial")
+}
+
+/// Remember `body`'s serial as the floor for every later policy.
+pub fn record_serial(body: &str) {
+    let Some(n) = policy_serial(body) else { return };
+    let path = serial_path();
+    let seen = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(0);
+    if n > seen {
+        let _ = crate::paths::write_private(&path, n.to_string().as_bytes());
+    }
+}
+
+/// Whether `body` is at least as new as the newest policy already applied.
+pub fn check_rollback(body: &str) -> Result<(), String> {
+    // Only where a key is pinned. Without a pin an attacker writes the policy
+    // *and* its serial, so a floor defends nothing — while still being a file
+    // the watched account could raise to lock every later policy out. Cost
+    // with no benefit is not a trade worth making.
+    if pinned_key().is_none() {
+        return Ok(());
+    }
+    let Some(n) = policy_serial(body) else {
+        return Ok(());
+    };
+    let seen = std::fs::read_to_string(serial_path())
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(0);
+    if n < seen {
+        return Err(format!(
+            "policy serial {n} is older than the {seen} this host already \
+             applied; refusing to roll back"
+        ));
+    }
+    Ok(())
 }
 
 /// Where the detached signature for `url` is fetched from.
@@ -242,5 +378,185 @@ mod tests {
             "https://h/p.toml.sig?host=a&v=2"
         );
         assert_eq!(sig_url("https://h/p.toml#x"), "https://h/p.toml.sig#x");
+    }
+
+    /// The failure this module cannot afford is the silent one. A key that is
+    /// present but misspelled reads exactly like a host that pinned nothing, so
+    /// signature checking switches off and the `cat > cache.toml` attack in the
+    /// module doc works again — on a fleet whose administrator believes it is
+    /// pinned. Being wrong has to be louder than being absent.
+    #[test]
+    fn a_misspelled_public_key_is_reported_rather_than_read_as_unpinned() {
+        let dir = tempfile::tempdir().unwrap();
+        let _data = crate::paths::DataDir::set(dir.path());
+        let (_, pk) = keypair();
+        let sys = dir.path().join("system.toml");
+        std::fs::write(&sys, format!("[remote]\npublik_key = \"{pk}\"\n")).unwrap();
+        let _guard = crate::paths::SystemConfig::set(&sys);
+
+        assert_eq!(pinned_key(), None, "a misspelling is not a key");
+
+        let table: toml::Table = std::fs::read_to_string(&sys).unwrap().parse().unwrap();
+        assert_eq!(
+            suspicious_remote_keys(&table),
+            vec!["publik_key".to_string()],
+            "the misspelling has to be nameable, or nothing can report it"
+        );
+    }
+
+    /// A false positive here is worse than the typo it looks for: a hit makes the
+    /// loader skip the entire machine-wide layer, so over-eager matching disables
+    /// the control instead of protecting it. Correctly spelled keys, and keys a
+    /// later version might plausibly add, must all come back clean.
+    #[test]
+    fn a_correctly_spelled_remote_table_reports_nothing() {
+        let table: toml::Table =
+            "[remote]\nurl = \"https://h/p.toml\"\npublic_key = \"x\"\npoll_interval_secs = 300\n"
+                .parse()
+                .unwrap();
+        assert!(suspicious_remote_keys(&table).is_empty());
+
+        for plausible in [
+            "policy_serial",
+            "timeout_secs",
+            "ca_bundle",
+            "retries",
+            "enabled",
+            "signature_url",
+        ] {
+            let table: toml::Table = format!("[remote]\n{plausible} = \"x\"\n").parse().unwrap();
+            assert!(
+                suspicious_remote_keys(&table).is_empty(),
+                "{plausible} would wrongly disable the whole machine-wide layer"
+            );
+        }
+    }
+
+    /// A signature says who wrote a policy, not which policy it is. Yesterday's
+    /// permissive policy is as authentic as today's strict one, and the cache it
+    /// would be restored into is a file in the watched user's own data directory
+    /// — so without a serial, tightening a fleet's policy can be undone by
+    /// putting back a file the administrator themselves signed.
+    #[test]
+    fn an_authentically_signed_older_policy_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let _data = crate::paths::DataDir::set(dir.path());
+        let (sk, pk) = keypair();
+        let sys = dir.path().join("system.toml");
+        std::fs::write(&sys, format!("[remote]\npublic_key = \"{pk}\"\n")).unwrap();
+        let _guard = crate::paths::SystemConfig::set(&sys);
+
+        let new = "[remote]\npolicy_serial = 7\n[capture]\nprompts = true\n";
+        let old = "[remote]\npolicy_serial = 6\n[capture]\nprompts = false\n";
+        assert_eq!(policy_serial(new), Some(7));
+
+        let sig = crate::paths::cached_remote_config_sig_path();
+        std::fs::write(&sig, sign(&sk, new)).unwrap();
+        std::fs::write(crate::paths::cached_remote_config_path(), new).unwrap();
+        assert_eq!(check_cache(new), Ok(()));
+        record_serial(new);
+
+        // The rollback: both files replaced with an older policy the same key
+        // really did sign.
+        std::fs::write(&sig, sign(&sk, old)).unwrap();
+        assert!(
+            check_cache(old).is_ok(),
+            "the signature itself is genuine, and that is the point"
+        );
+        assert!(
+            check_rollback(old).is_err(),
+            "an older serial than the one already applied must be refused"
+        );
+        assert_eq!(
+            check_rollback(new),
+            Ok(()),
+            "the current serial still applies"
+        );
+    }
+
+    /// A policy with no serial at all is the deployments that exist today, and
+    /// they must keep working — the check only binds once a policy opts in.
+    ///
+    /// Pinned on purpose: without a key the pin gate would short-circuit and
+    /// this would pass without ever reaching the no-serial path it names.
+    #[test]
+    fn a_policy_without_a_serial_is_not_a_rollback() {
+        let dir = tempfile::tempdir().unwrap();
+        let _data = crate::paths::DataDir::set(dir.path());
+        let (_sk, pk) = keypair();
+        let sys = dir.path().join("system.toml");
+        std::fs::write(&sys, format!("[remote]\npublic_key = \"{pk}\"\n")).unwrap();
+        let _guard = crate::paths::SystemConfig::set(&sys);
+
+        assert_eq!(policy_serial("[capture]\nprompts = true\n"), None);
+        assert_eq!(check_rollback("[capture]\nprompts = true\n"), Ok(()));
+    }
+
+    /// Unpinned, the serial defends nothing: whoever writes the policy writes
+    /// its serial too. Binding anyway would hand the watched account a one-line
+    /// way to refuse every future policy, so the floor must stay inert here.
+    #[test]
+    fn without_a_pinned_key_the_floor_does_not_bind() {
+        let dir = tempfile::tempdir().unwrap();
+        let _data = crate::paths::DataDir::set(dir.path());
+        let sys = dir.path().join("system.toml");
+        std::fs::write(&sys, "[capture]\nprompts = true\n").unwrap();
+        let _guard = crate::paths::SystemConfig::set(&sys);
+
+        std::fs::write(dir.path().join("policy-serial"), "99").unwrap();
+        assert_eq!(
+            check_rollback("[remote]\npolicy_serial = 1\n"),
+            Ok(()),
+            "with no key pinned there is nothing to roll back to"
+        );
+    }
+
+    /// The floor is a file the account under monitoring can write, so raising it
+    /// denies the host its fleet policy. That is allowed to be *possible* — argus
+    /// does not out-privilege a root user — but never allowed to be quiet.
+    #[test]
+    fn a_poisoned_floor_is_reported_not_silent() {
+        let dir = tempfile::tempdir().unwrap();
+        let _data = crate::paths::DataDir::set(dir.path());
+        let (sk, pk) = keypair();
+        let sys = dir.path().join("system.toml");
+        std::fs::write(&sys, format!("[remote]\npublic_key = \"{pk}\"\n")).unwrap();
+        let _guard = crate::paths::SystemConfig::set(&sys);
+
+        let body = "[remote]\nurl = \"https://p.example/policy.toml\"\npolicy_serial = 7\n";
+        std::fs::write(crate::paths::cached_remote_config_path(), body).unwrap();
+        std::fs::write(
+            crate::paths::cached_remote_config_sig_path(),
+            sign(&sk, body),
+        )
+        .unwrap();
+
+        std::fs::write(dir.path().join("policy-serial"), u64::MAX.to_string()).unwrap();
+        let findings = crate::integrity::check_config(None);
+        assert!(
+            findings.iter().any(|f| !f.ok),
+            "a host refusing its own fleet policy must not look healthy: {findings:?}"
+        );
+    }
+
+    /// This module is a security control an operator has to know exists in order
+    /// to deploy. It shipped while two documents went on calling it unbuilt, and
+    /// the reader most affected — someone deciding whether to pin a key — is
+    /// exactly the one who stops at the limitations list.
+    #[test]
+    fn no_document_claims_signature_verification_is_unimplemented() {
+        for (name, text) in [
+            ("README.md", include_str!("../README.md")),
+            (
+                "docs/troubleshooting.md",
+                include_str!("../docs/troubleshooting.md"),
+            ),
+        ] {
+            let flat = text.replace('\n', " ");
+            assert!(
+                !flat.contains("no detached-signature verification"),
+                "{name} still says the signing this module implements does not exist"
+            );
+        }
     }
 }

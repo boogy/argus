@@ -1332,7 +1332,7 @@ pub(crate) fn apply(artifact: &Artifact, display: &str, dry_run: bool) -> Result
             source,
             pinned,
         } => {
-            let mut doc = read_json_object(path);
+            let mut doc = read_json_object(path)?;
             let hooks = object_entry(&mut doc, "hooks");
             let cmd = hook_command(source, None, CmdStyle::Shell);
             for ev in *events {
@@ -1839,15 +1839,36 @@ pub(crate) fn verify(artifact: &Artifact) -> std::result::Result<(), String> {
 // JSON helpers
 // ---------------------------------------------------------------------------
 
-fn read_json_object(path: &Path) -> Value {
-    let mut v: Value = std::fs::read_to_string(path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_else(|| json!({}));
-    if !v.is_object() {
-        v = json!({});
+/// A settings file argus is about to merge into, as an object.
+///
+/// A file that is absent, or empty, is an empty object: installing onto a
+/// machine that has no settings yet is the ordinary path. A file that exists
+/// and does *not* parse is an error, and deliberately not an empty object —
+/// merging into `{}` and writing the result back is how an install would
+/// delete a configuration it merely failed to understand. The uninstall path
+/// already refuses a file it cannot parse; this is the same refusal on the
+/// side that writes.
+fn read_json_object(path: &Path) -> Result<Value> {
+    use anyhow::Context as _;
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(json!({})),
+        Err(e) => {
+            return Err(anyhow::Error::new(e).context(format!("cannot read {}", path.display())));
+        }
+    };
+    if text.trim().is_empty() {
+        return Ok(json!({}));
     }
-    v
+    let v: Value = serde_json::from_str(&text)
+        .with_context(|| format!("{} is not valid JSON; leaving it alone", path.display()))?;
+    // A settings file that parses but is an array or a string is no more
+    // mergeable than one that does not parse at all, and overwriting it would
+    // lose exactly as much.
+    if !v.is_object() {
+        anyhow::bail!("{} is not a JSON object; leaving it alone", path.display());
+    }
+    Ok(v)
 }
 
 /// `doc[key]`, coerced to an object, created if absent.
@@ -2053,6 +2074,59 @@ fn dispatch(envelope: Envelope, capture: &CaptureCfg) -> Vec<Event> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A settings file that does not parse is somebody's configuration, not an
+    /// empty one. Reading it as `{}` and writing that back is how an install
+    /// silently deletes everything the user had — and the uninstall path a few
+    /// hundred lines up already refuses to touch a file it cannot parse, which
+    /// is the behaviour this brings the write path into line with.
+    #[test]
+    fn an_unparseable_settings_file_is_refused_rather_than_emptied() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let original = "{ \"env\": { \"FOO\": \"bar\" },\n  // a comment JSON does not allow\n}";
+        std::fs::write(&path, original).unwrap();
+
+        let err = read_json_object(&path).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("settings.json"),
+            "the error has to name the file an operator must go fix: {err:#}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            original,
+            "the file was modified while merely being read"
+        );
+    }
+
+    /// The absent and empty cases stay as they were: an install onto a machine
+    /// with no settings file at all is the ordinary path, not an error.
+    #[test]
+    fn a_missing_settings_file_still_reads_as_an_empty_object() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("does-not-exist.json");
+        assert_eq!(read_json_object(&path).unwrap(), json!({}));
+    }
+
+    /// The other empty case, and the one that actually happens: the file
+    /// exists but holds nothing. A truncate-then-write that died in its
+    /// window leaves exactly this, and `serde_json` refuses an empty string,
+    /// so without the special case argus would refuse to install into a host
+    /// whose settings file a crash had already emptied -- the moment it is
+    /// least welcome to fail.
+    #[test]
+    fn an_existing_but_empty_settings_file_reads_as_an_empty_object() {
+        let dir = tempfile::tempdir().unwrap();
+        for body in ["", "   \n\t "] {
+            let path = dir.path().join("settings.json");
+            std::fs::write(&path, body).unwrap();
+            assert_eq!(
+                read_json_object(&path).unwrap(),
+                json!({}),
+                "an empty file must read as an empty object, not an error"
+            );
+        }
+    }
 
     /// These files belong to the user's coding agent, not to argus. A
     /// truncate-then-write leaves a window where `settings.json` is empty, and

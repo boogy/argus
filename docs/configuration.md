@@ -195,6 +195,7 @@ optional; unset keys keep their default.
 | `remote.url`                | _(unset)_ | HTTPS URL polled for fleet-wide config. |
 | `remote.poll_interval_secs` | `300`     | Poll interval (floor `30`).             |
 | `remote.public_key`         | _(unset)_ | base64 ed25519 key remote policy must verify against. Only honoured from the machine-wide layer — see [Signing it](#signing-it). |
+| `remote.policy_serial`      | _(unset)_ | Monotonic serial for the policy body. Where a key is pinned, a policy declaring one refuses anything older than the highest serial this host has applied. |
 
 ### `[export]`
 

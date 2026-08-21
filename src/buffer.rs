@@ -1191,4 +1191,27 @@ mod tests {
             "the sequence outlived the database it counts"
         );
     }
+
+    /// The `loss` table is the one query that tells an operator whether the rest
+    /// of the database is the whole story, and the docs enumerate its `reason`
+    /// values as if the list were closed. A reason the code emits and the page
+    /// omits is a loss that reads as no loss at all.
+    #[test]
+    fn every_loss_reason_the_code_emits_is_documented() {
+        const EMITTED: &[&str] = &[
+            "buffer_full",
+            "buffer_unreadable",
+            "spool_full",
+            "stdin_truncated",
+            "export_rejected",
+        ];
+        let doc = include_str!("../docs/querying-local-database.md");
+        for reason in EMITTED {
+            assert!(
+                doc.contains(reason),
+                "docs/querying-local-database.md never mentions the `{reason}` \
+                 loss reason, so a reader's query will not branch on it"
+            );
+        }
+    }
 }

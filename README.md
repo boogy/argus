@@ -32,7 +32,7 @@ durable buffering, and batched export with backoff.
 |     | Feature                                   |                                                                                                                                                      |
 | --- | ----------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 🪝  | **Native hook/plugin capture**            | Reads each tool's own hook/plugin payloads — no TLS proxying, no MITM.                                                                               |
-| 🔒  | **Redacted before it leaves the machine** | Built-in secret patterns scrub API keys, tokens, and credentials before anything touches disk or network.                                            |
+| 🔒  | **Redacted before it leaves the machine** | Built-in secret patterns scrub API keys, tokens, and credentials in the daemon, before anything is buffered or exported. The one exception is the hand-off spool, which holds raw payloads on local disk while the daemon is down — see [Privacy](docs/privacy.md). |
 | 📡  | **OTLP/JSON export, offline-first**       | Durable SQLite buffer, batched export with backoff to any OTel-compatible backend.                                                                   |
 | 📂  | **Opt-in file-content capture**           | Records what a `Write`/`Edit`/patch actually changed, with hashing, size caps, and binary/exclude filters.                                           |
 | 🌐  | **Network & MCP visibility**              | Extracts FQDNs/endpoints from tool calls and names the MCP server each call reached.                                                                 |
@@ -120,7 +120,10 @@ operating, extending). Individual pages:
 - Windows has no restart-on-exit supervisor — the Startup-folder script runs the
   daemon at logon and a hook restarts it mid-session. launchd and systemd do
   keep it alive.
-- Remote config is trusted over HTTPS; no detached-signature verification yet.
+- Remote config authenticity is opt-in: a host verifies the ed25519 detached
+  signature only where `[remote] public_key` is pinned in the machine-wide
+  layer. A host without that layer trusts the policy it fetches over HTTPS
+  alone.
 - Bash tool parsing reads redirection targets and six file verbs, not the file
   argument of every program.
 - No Claude Code transcript-path mining for token/model usage stats.

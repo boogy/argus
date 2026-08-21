@@ -296,12 +296,22 @@ pub(crate) fn parse_hook(source: &'static str, p: &Value, capture: &CaptureCfg) 
             } else {
                 "[not captured]".into()
             };
+            // The arguments are the part of a slash command the human typed,
+            // so they belong to `prompts` exactly as the prompt body does.
+            // The command's *name* does not: which command ran is the finding
+            // this event exists for, and it is chosen from a list rather than
+            // typed.
+            let command_args = if capture.prompts {
+                p.get("command_args").cloned().unwrap_or(Value::Null)
+            } else {
+                Value::String("[not captured]".into())
+            };
             vec![mk(EventKind::Session {
                 action: hook.into(),
                 detail: json!({
                     "expansion_type": p.get("expansion_type").cloned().unwrap_or(Value::Null),
                     "command_name": p.get("command_name").cloned().unwrap_or(Value::Null),
-                    "command_args": p.get("command_args").cloned().unwrap_or(Value::Null),
+                    "command_args": command_args,
                     // Which tier defined the command — a project-level one is
                     // repo-controlled, so whoever can push can change it.
                     "command_source": p.get("command_source").cloned().unwrap_or(Value::Null),
@@ -1158,13 +1168,58 @@ mod tests {
         };
         let events = adapters::parse(
             env(json!({"hook_event_name": "UserPromptExpansion",
-                       "command_name": "deploy", "prompt": "secret expansion"})),
+                       "command_name": "deploy", "command_args": "staging --now",
+                       "prompt": "secret expansion"})),
             &off,
         );
         let EventKind::Session { detail, .. } = &events[0].kind else {
             panic!("{:?}", events[0].kind)
         };
         assert_eq!(detail["prompt"], json!("[not captured]"));
+        assert_eq!(detail["command_args"], json!("[not captured]"));
+    }
+
+    /// `/deploy prod --force` is a prompt with a slash in front of it. The flag
+    /// that says not to collect what a human typed has to cover the arguments
+    /// they typed, or it collects the thing it promises not to.
+    #[test]
+    fn command_args_follow_the_prompt_flag() {
+        let payload = serde_json::json!({
+            "hook_event_name": "UserPromptExpansion",
+            "expansion_type": "slash_command",
+            "command_name": "deploy",
+            "command_args": "prod --force --token hunter2",
+            "command_source": "project",
+            "prompt": "expanded body",
+        });
+        let off = CaptureCfg {
+            prompts: false,
+            ..CaptureCfg::default()
+        };
+        let events = adapters::parse(env(payload.clone()), &off);
+        let EventKind::Session { detail, .. } = &events[0].kind else {
+            panic!("{:?}", events[0].kind)
+        };
+        assert_eq!(detail["prompt"], json!("[not captured]"));
+        assert_eq!(
+            detail["command_args"],
+            json!("[not captured]"),
+            "the arguments are as much what the human typed as the prompt is"
+        );
+        assert_eq!(
+            detail["command_name"],
+            json!("deploy"),
+            "which command ran is the finding, and is not the human's words"
+        );
+
+        let events = adapters::parse(env(payload), &CaptureCfg::default());
+        let EventKind::Session { detail, .. } = &events[0].kind else {
+            panic!("{:?}", events[0].kind)
+        };
+        assert_eq!(
+            detail["command_args"],
+            json!("prod --force --token hunter2")
+        );
     }
 
     /// The batch is worth recording for the grouping alone; its calls' inputs
