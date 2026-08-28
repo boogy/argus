@@ -181,13 +181,64 @@ jobs:
           if-no-files-found: error
 
   # ---------------------------------------------------------------------------
+  # One archive that runs on both Mac architectures, fused from the two darwin
+  # builds with `lipo`. A consumer that ships a single macOS artifact — an MDM
+  # pkg most of all — otherwise has to fuse the two itself, or pick one arch and
+  # be wrong on half the fleet.
+  #
+  # The per-arch archives stay published: Homebrew resolves a url per platform,
+  # so handing it a universal binary would double what every user downloads.
+  # Fusing here rather than in the build job keeps that job one-target-per-run.
+  # ---------------------------------------------------------------------------
+  universal:
+    name: Fuse universal-apple-darwin
+    needs: [setup, build]
+    runs-on: macos-latest
+    steps:
+      - name: Download the darwin archives
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: archives-*-apple-darwin
+          merge-multiple: true
+          path: dist
+
+      # lipo copies each slice verbatim, so the ad-hoc signature the linker put
+      # on the arm64 build survives the fuse — which is what lets the result run
+      # on Apple Silicon at all.
+      - name: Fuse with lipo
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          name="argus-${version}-universal-apple-darwin"
+          for arch in aarch64 x86_64; do
+            tar -xzf "argus-${version}-${arch}-apple-darwin.tar.gz"
+          done
+          # Only the binary differs between the two; take the docs from either.
+          cp -R "argus-${version}-aarch64-apple-darwin" "$name"
+          lipo -create -output "$name/argus" \
+            "argus-${version}-aarch64-apple-darwin/argus" \
+            "argus-${version}-x86_64-apple-darwin/argus"
+          lipo -archs "$name/argus"
+          "./$name/argus" --version
+          tar -czf "${name}.tar.gz" "$name"
+          ls -l *.tar.gz
+
+      - name: Upload archive
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: archives-universal-apple-darwin
+          path: dist/argus-*-universal-apple-darwin.tar.gz
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
   # Assemble the GitHub Release from every platform archive: release notes
   # from CHANGELOG.md, one checksums.txt, a cosign keyless signature of it, then
   # the release itself. Provenance is attested over the archives + checksums.
   # ---------------------------------------------------------------------------
   release:
     name: GitHub Release
-    needs: [setup, build]
+    needs: [setup, build, universal]
     runs-on: ubuntu-latest
     permissions:
       contents: write # create the GitHub Release + upload artifacts
