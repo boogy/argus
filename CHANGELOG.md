@@ -5,6 +5,20 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.1] - 2026-08-28
+
+Maintenance. No behavior change: a fused macOS archive joins the release
+artifacts, and dependencies — direct and transitive — are current.
+
+### 🔧 CI / Build
+* publish a universal-apple-darwin archive (#13) ([e2721a9](https://github.com/boogy/argus/commit/e2721a9c8de1fb2422b1e68f6b9ce305140f73b2))
+
+### 📦 Dependencies
+* bump the cargo-minor-patch group with 2 updates (#12) ([88b0858](https://github.com/boogy/argus/commit/88b0858e5ab3afe32dbe7e0c38cfd4b485f98d0c))
+* refresh transitive dependency lock (`cargo update`)
+
+**Full Changelog**: https://github.com/boogy/argus/compare/v0.5.0...v0.5.1
+
 ## [0.5.0] - 2026-08-21
 
 Corner cases. 0.4.0 made a fleet install once; this release is about what
