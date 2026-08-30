@@ -219,7 +219,15 @@ jobs:
           lipo -create -output "$name/argus" \
             "argus-${version}-aarch64-apple-darwin/argus" \
             "argus-${version}-x86_64-apple-darwin/argus"
-          lipo -archs "$name/argus"
+          # `lipo -create` given one input succeeds and writes a thin binary, so
+          # a missing slice would publish under the universal name unnoticed.
+          archs="$(lipo -archs "$name/argus")"
+          for want in arm64 x86_64; do
+            grep -qw "$want" <<<"$archs" || {
+              echo "fuse is not universal: got '$archs', want $want" >&2
+              exit 1
+            }
+          done
           "./$name/argus" --version
           tar -czf "${name}.tar.gz" "$name"
           ls -l *.tar.gz
