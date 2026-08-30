@@ -60,3 +60,49 @@ jobs:
 
       - name: Test
         run: cargo test
+
+  # The musl targets are built only by the release workflow, which triggers on a
+  # pushed tag: without this job a lock refresh that breaks the target C build —
+  # rusqlite's bundled SQLite, aws-lc-sys — is first discovered on a tag that
+  # already exists. `cargo check` runs build scripts, which is where that C is
+  # compiled, so it catches the break without a full release build.
+  musl:
+    name: musl (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-latest
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+        with:
+          toolchain: stable
+          target: ${{ matrix.target }}
+          cache: false
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: ci-${{ matrix.target }}
+
+      - name: Install musl toolchain
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+
+      - name: Check
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
+          CC_aarch64_unknown_linux_musl: musl-gcc
+        run: |
+          set -euo pipefail
+          cargo check --locked --all-targets --target "${{ matrix.target }}"
