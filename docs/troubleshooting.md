@@ -38,8 +38,10 @@ must still be able to fire:
 - The binary each hook command names is resolved and must be executable.
 - Files argus owns must be non-empty and still contain the commands they
   were installed with.
-- Codex's `config.toml` `notify` argv and `[otel]` block are verified
-  alongside `hooks.json`. The `[otel]` block is held to the endpoint this
+- Codex's `config.toml` `[otel]` block is verified alongside `hooks.json`.
+  `notify` is not: Codex runs a single `notify` program, argus no longer
+  claims it, and another tool holding it (ChatGPT's Computer Use does) is
+  not a finding. The `[otel]` block is held to the endpoint this
   install actually listens on, not merely to looking like ours: a
   `config.toml` still naming a previous install's port is wired to a
   receiver nothing answers on, and reporting that as intact would be worse
@@ -243,8 +245,7 @@ files are deleted, and the count is exported as an `event.type=loss`,
 
 Confirm `argus install` actually wrote entries — check
 `~/.claude/settings.json` (`hooks.*`),
-`~/.config/opencode/plugin/argus.ts`, `~/.codex/config.toml` (`notify`,
-`[otel]`), `~/.codex/hooks.json`, `~/.copilot/hooks/argus.json`, or
+`~/.config/opencode/plugin/argus.ts`, `~/.codex/config.toml` (`[otel]`), `~/.codex/hooks.json`, `~/.copilot/hooks/argus.json`, or
 `~/.pi/agent/extensions/argus.ts`.
 
 Re-run `argus install` (idempotent) if entries are missing — it also
@@ -259,10 +260,13 @@ until reviewed.
 
 ## Codex config not touched
 
-Install never overwrites an existing `notify` or `[otel]` block — it warns
-on stderr and leaves it alone so it can't silently break another
-integration. Remove the conflicting block manually (or point it at argus
-yourself) if you want Codex wired.
+Install never overwrites an existing `[otel]` block — it warns on stderr and
+leaves it alone so it can't silently break another integration. Remove the
+conflicting block manually if you want Codex's OTLP stream wired.
+
+`notify` is left to other tools entirely. Install removes only the
+`notify = ["…/argus", "hook", "--source", "codex"]` an older argus wrote; turn
+completion now arrives through the `Stop` hook.
 
 ## Known limitations
 

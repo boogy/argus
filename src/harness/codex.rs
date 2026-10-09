@@ -1,6 +1,6 @@
 use super::{
     Artifact, ConfigDir, Detection, Harness, HookEvent, HookShape, KillSwitch, ManagedDir, Probes,
-    Required, Scope, TomlEditOp, install_path,
+    Required, Scope, TomlEditOp,
 };
 use crate::config::CaptureCfg;
 use crate::detect::{BinaryProbe, Platform};
@@ -69,9 +69,10 @@ const MANAGED_DIRS: &[ManagedDir] = &[
 /// recognised on uninstall so hosts wired by an older argus clean up.
 const LEGACY_ENDPOINT: &str = "http://127.0.0.1:4327";
 
-/// Everything after the program path in the `notify` argv array. `check`
-/// compares these element-wise, so a `notify` repointed at another program
-/// is caught rather than passing a loose substring test.
+/// Everything after the program path in the `notify` argv array older argus
+/// versions wrote. `notify` is no longer written — see
+/// [`super::TomlEditOp::retired_argv`] — and this is what recognises the
+/// leftover so install and uninstall can remove it, and only it.
 const NOTIFY_TAIL: &[&str] = &["hook", "--source", "codex"];
 
 /// The machine-wide layer, which is a different shape from the user one and
@@ -93,8 +94,8 @@ const NOTIFY_TAIL: &[&str] = &["hook", "--source", "codex"];
 ///    reports the two as conflicting, so exactly one is written per platform.
 /// 3. `requirements.toml` — `allow_managed_hooks_only = true`.
 ///
-/// What is deliberately *not* written is the user layer's `notify` and
-/// `[otel]`. Both carry this install's receiver token, and the daemon, socket
+/// What is deliberately *not* written is the user layer's `[otel]`. It
+/// carries this install's receiver token, and the daemon, socket
 /// and OTLP port are per-user (see the multi-user note in the README): a token
 /// in a world-readable machine-wide file is a credential handed to every
 /// account on the host, in exchange for wiring that could only ever be right
@@ -135,7 +136,7 @@ fn managed_artifacts(d: &Detection, platform: Platform) -> Vec<Artifact> {
                     needle: hooks_dir.to_string_lossy().into_owned(),
                     present: true,
                 }],
-                argv_tail: None,
+                retired_argv: None,
             }],
         },
         Artifact::TomlEdit {
@@ -157,7 +158,7 @@ fn managed_artifacts(d: &Detection, platform: Platform) -> Vec<Artifact> {
                     needle: "true".into(),
                     present: true,
                 }],
-                argv_tail: None,
+                retired_argv: None,
             }],
         },
     ]
@@ -210,14 +211,6 @@ impl Harness for Codex {
         // Sourced from config so Codex's OTLP target and the daemon's actual
         // listen address can't drift apart.
         let endpoint = format!("http://{}", crate::config::load().codex.otlp_listen);
-        // `notify` is an argv array executed without a shell, so the program
-        // path is a distinct element and must NOT be shell-quoted.
-        let mut notify = toml_edit::Array::new();
-        notify.push(install_path());
-        for arg in NOTIFY_TAIL {
-            notify.push(*arg);
-        }
-
         let mut otel = toml_edit::Table::new();
         otel["environment"] = toml_edit::value("prod");
         let mut otlp_http = toml_edit::InlineTable::new();
@@ -276,11 +269,11 @@ impl Harness for Codex {
                 edits: vec![
                     TomlEditOp {
                         key: "notify",
-                        value: toml_edit::value(notify),
+                        value: toml_edit::Item::None,
                         only_if_absent: true,
-                        ours_markers: markers.clone(),
+                        ours_markers: vec![],
                         must_carry: vec![],
-                        argv_tail: Some(NOTIFY_TAIL),
+                        retired_argv: Some(NOTIFY_TAIL),
                     },
                     TomlEditOp {
                         key: "otel",
@@ -288,7 +281,7 @@ impl Harness for Codex {
                         only_if_absent: true,
                         ours_markers: markers,
                         must_carry,
-                        argv_tail: None,
+                        retired_argv: None,
                     },
                 ],
             },

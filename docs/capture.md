@@ -278,7 +278,7 @@ unreadable file costs an attribute, never an event.
 The read happens as close to the agent as possible, since that's the only
 place its environment exists — the daemon was started from somewhere else
 entirely, and its own environment describes whoever started it. For Claude
-Code, Copilot CLI and Codex's `notify`, that's the hook shim; for opencode
+Code, Copilot CLI and Codex's hooks, that's the hook shim; for opencode
 and pi it's the plugin itself, which writes its own envelope over the
 socket and falls back to the shim only otherwise. The two allowlists are
 pinned to each other by a test, so one can't drift from the other.
@@ -288,7 +288,7 @@ fleet config switches it off everywhere without reinstalling a single hook.
 
 **One channel can't carry it.** Codex's `[otel]` export posts to the daemon
 over HTTP from Codex's own process, so those records arrive with no
-identity attached, though the same session's `notify` events do carry one.
+identity attached, though the same session's hook events do carry one.
 Nothing can be inferred for the HTTP path without labelling an agent's
 telemetry with whatever credentials the daemon's own environment happens to
 hold — worse than the gap.
