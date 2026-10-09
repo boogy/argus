@@ -5,6 +5,34 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.2] - 2026-10-09
+
+Coexistence. Codex's `notify` takes a single program, and argus no longer
+competes for it, so another tool holding it is not reported as tampering.
+
+### 🐛 Fixes
+* **codex:** stop claiming the single `notify` slot (#21). ChatGPT's Computer
+  Use rewrites `notify` on every launch, and `check` reported that as
+  `notify no longer invokes argus` on hosts doing nothing wrong. argus no
+  longer writes `notify`; turn completion arrives through the `Stop` hook,
+  with the same turn id plus the last assistant message. Install and
+  uninstall remove only the `notify` an older argus wrote. Queries for
+  Codex `session` events with action `turn-complete` should look for `Stop`.
+
+### 🔧 CI / Build
+* fail the fuse on a thin binary, gate musl before the tag (#14) ([b6e5eca](https://github.com/boogy/argus/commit/b6e5eca8da0295bd6437e13633fec25d4983b1ad))
+
+### 📦 Dependencies
+* raise `Cargo.toml` floors to the latest compatible releases — tokio 1.53.2, uuid 1.27.0, libc 0.2.190, toml 1.1.8, toml_edit 0.25.17 and others (#21)
+* bump the cargo-minor-patch group with 5 updates (#19) ([26aab83](https://github.com/boogy/argus/commit/26aab834578ddeb0cd29d694ec66dbc2ba6bfbd8))
+* bump the cargo-minor-patch group with 2 updates (#17) ([2692ae0](https://github.com/boogy/argus/commit/2692ae02c92972bea0b2f6e73937bceb872e9bb5))
+* bump dirs from 6.0.0 to 7.0.0 (#18) ([749b1ba](https://github.com/boogy/argus/commit/749b1baddc9464e6ff9548e4a250d8989bf97dd1))
+* bump actions-rust-lang/setup-rust-toolchain (#16) ([303412e](https://github.com/boogy/argus/commit/303412ec994970b87a3a256cafa0ae6996b7e84f))
+* bump softprops/action-gh-release (#15) ([da6501e](https://github.com/boogy/argus/commit/da6501e1968f5d86d1f224adae9febdb4f4a0971))
+* refresh transitive dependency lock (`cargo update`)
+
+**Full Changelog**: https://github.com/boogy/argus/compare/v0.5.1...v0.5.2
+
 ## [0.5.1] - 2026-08-28
 
 Maintenance. No behavior change: a fused macOS archive joins the release
