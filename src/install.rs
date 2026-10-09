@@ -392,7 +392,9 @@ mod tests {
             codex.contains(&crate::config::load().codex.otlp_listen),
             "codex must be pointed at the endpoint this install listens on: {codex}"
         );
-        assert!(codex.contains("notify"));
+        // Codex runs one `notify` program; argus leaves it to whoever else
+        // wants it and takes the turn-end signal from the `Stop` hook.
+        assert!(!codex.contains("notify"), "{codex}");
     }
 
     #[test]

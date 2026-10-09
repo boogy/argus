@@ -155,8 +155,8 @@ install, not an instant. Hence the order, which is asserted by a test.
 
 Two things are deliberately **not** written into Codex's managed layer:
 
-- **`notify` and `[otel]`** — these carry this install's receiver token and
-  per-user OTLP port. A machine-wide file is world-readable, so writing them
+- **`[otel]`** — it carries this install's receiver token and per-user OTLP
+  port. A machine-wide file is world-readable, so writing them
   would hand every account on the host a credential that's only correct for
   one of them.
 - **A `feature_requirements` pin** — the field exists, but its inner schema

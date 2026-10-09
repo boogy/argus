@@ -149,12 +149,27 @@ pub struct TomlEditOp {
     /// refuses, captures nothing, and matching a legacy marker would report
     /// that as wired. `check` uses these instead when the list is non-empty.
     pub must_carry: Vec<Required>,
-    /// Set when the value is an argv array whose first element is the argus
-    /// binary (Codex's `notify`). `check` then confirms the trailing arguments
-    /// still match *and* that element 0 still names a runnable program — the
-    /// substring markers alone would pass on a value pointing at a binary that
-    /// no longer exists.
-    pub argv_tail: Option<&'static [&'static str]>,
+    /// Set for a key argus used to own and no longer writes: an argv array
+    /// whose trailing arguments are exactly these (Codex's `notify`). Install
+    /// and uninstall remove a value of that shape — the leftover of an older
+    /// argus — and leave any other value alone; `check` does not look at the
+    /// key at all.
+    ///
+    /// Codex runs one `notify` program, so owning it meant evicting whatever
+    /// else wanted it (ChatGPT's Computer Use rewrites it on every launch),
+    /// and `check` then reported a legitimate tool as tampering. The turn-end
+    /// signal it carried arrives through the `Stop` hook instead.
+    pub retired_argv: Option<&'static [&'static str]>,
+}
+
+/// Whether `item` is an argv array ending in exactly `tail` — what an older
+/// argus wrote, whatever path its binary was at.
+fn argv_ends_with(item: Option<&toml_edit::Item>, tail: &[&str]) -> bool {
+    let Some(arr) = item.and_then(toml_edit::Item::as_array) else {
+        return false;
+    };
+    let got: Vec<&str> = arr.iter().filter_map(|v| v.as_str()).collect();
+    got.len() == tail.len() + 1 && got[1..] == *tail
 }
 
 /// One thing `check` demands of an existing value.
@@ -1402,6 +1417,13 @@ pub(crate) fn apply(artifact: &Artifact, display: &str, dry_run: bool) -> Result
                 .and_then(|s| s.parse::<toml_edit::DocumentMut>().ok())
                 .unwrap_or_default();
             for e in edits {
+                if let Some(tail) = e.retired_argv {
+                    if argv_ends_with(doc.get(e.key), tail) {
+                        doc.remove(e.key);
+                        println!("{display}: removed the {} argus no longer uses", e.key);
+                    }
+                    continue;
+                }
                 if e.only_if_absent && doc.contains_key(e.key) {
                     eprintln!("{display}: existing {} preserved; not overwriting", e.key);
                     continue;
@@ -1413,7 +1435,11 @@ pub(crate) fn apply(artifact: &Artifact, display: &str, dry_run: bool) -> Result
                 return Ok(());
             }
             write_atomic(path, doc.to_string().as_bytes())?;
-            let keys: Vec<&str> = edits.iter().map(|e| e.key).collect();
+            let keys: Vec<&str> = edits
+                .iter()
+                .filter(|e| e.retired_argv.is_none())
+                .map(|e| e.key)
+                .collect();
             println!("wired {display} {} in {}", keys.join("+"), path.display());
         }
     }
@@ -1556,10 +1582,13 @@ pub(crate) fn revert(artifact: &Artifact) -> Result<()> {
                 return Ok(());
             };
             for e in edits {
-                let ours = doc.get(e.key).is_some_and(|item| {
-                    let s = item.to_string();
-                    e.ours_markers.iter().any(|m| s.contains(m.as_str()))
-                });
+                let ours = match e.retired_argv {
+                    Some(tail) => argv_ends_with(doc.get(e.key), tail),
+                    None => doc.get(e.key).is_some_and(|item| {
+                        let s = item.to_string();
+                        e.ours_markers.iter().any(|m| s.contains(m.as_str()))
+                    }),
+                };
                 if ours {
                     doc.remove(e.key);
                 }
@@ -1782,52 +1811,33 @@ pub(crate) fn verify(artifact: &Artifact) -> std::result::Result<(), String> {
                 return Err(format!("{} is not valid TOML", path.display()));
             };
             for e in edits {
+                if e.retired_argv.is_some() {
+                    continue;
+                }
                 let Some(item) = doc.get(e.key) else {
                     return Err(format!("{} missing from {}", e.key, path.display()));
                 };
-                match e.argv_tail {
-                    // An argv array is checked element-wise: the trailing
-                    // arguments must be exactly ours, and element 0 must still
-                    // name a binary that can run.
-                    Some(tail) => {
-                        let Some(arr) = item.as_array() else {
-                            return Err(format!("{} is no longer an argv array", e.key));
-                        };
-                        let got: Vec<&str> = arr.iter().filter_map(|v| v.as_str()).collect();
-                        if got.len() != tail.len() + 1 || got[1..] != *tail {
-                            return Err(format!("{} no longer invokes argus", e.key));
-                        }
-                        if resolve_program(got[0]).is_none() {
-                            return Err(format!(
-                                "{} points at a missing or non-executable binary: {}",
-                                e.key, got[0]
-                            ));
-                        }
+                let s = item.to_string();
+                if e.must_carry.is_empty() {
+                    if !e.ours_markers.iter().any(|m| s.contains(m.as_str())) {
+                        return Err(format!("{} no longer points at argus", e.key));
                     }
-                    None => {
-                        let s = item.to_string();
-                        if e.must_carry.is_empty() {
-                            if !e.ours_markers.iter().any(|m| s.contains(m.as_str())) {
-                                return Err(format!("{} no longer points at argus", e.key));
-                            }
-                        } else if let Some(r) = e
-                            .must_carry
-                            .iter()
-                            .find(|r| s.contains(r.needle.as_str()) != r.present)
-                        {
-                            let verb = if r.present {
-                                "does not carry"
-                            } else {
-                                "still carries"
-                            };
-                            return Err(format!(
-                                "{} {verb} {} — this tool is wired to a receiver that will not \
-                                 accept it, so nothing it exports is being recorded. Re-run \
-                                 `argus install`.",
-                                e.key, r.what
-                            ));
-                        }
-                    }
+                } else if let Some(r) = e
+                    .must_carry
+                    .iter()
+                    .find(|r| s.contains(r.needle.as_str()) != r.present)
+                {
+                    let verb = if r.present {
+                        "does not carry"
+                    } else {
+                        "still carries"
+                    };
+                    return Err(format!(
+                        "{} {verb} {} — this tool is wired to a receiver that will not \
+                         accept it, so nothing it exports is being recorded. Re-run \
+                         `argus install`.",
+                        e.key, r.what
+                    ));
                 }
             }
             Ok(())
@@ -3444,70 +3454,85 @@ mod tests {
 
     #[test]
     fn verify_flags_codex_toml_edits_that_stopped_pointing_at_argus() {
-        const TAIL: &[&str] = &["hook", "--source", "codex"];
         let dir = tempfile::tempdir().unwrap();
-        let exe = fake_argus(dir.path(), "argus");
         let path = dir.path().join("config.toml");
         let artifact = Artifact::TomlEdit {
             path: path.clone(),
-            edits: vec![
-                TomlEditOp {
-                    key: "notify",
-                    // `value` is install-only; verification reads what is on disk.
-                    value: toml_edit::Item::None,
-                    only_if_absent: true,
-                    ours_markers: vec!["argus".into()],
-                    must_carry: vec![],
-                    argv_tail: Some(TAIL),
-                },
-                TomlEditOp {
-                    key: "otel",
-                    value: toml_edit::Item::None,
-                    only_if_absent: true,
-                    ours_markers: vec!["127.0.0.1".into()],
-                    must_carry: vec![],
-                    argv_tail: None,
-                },
-            ],
+            edits: vec![TomlEditOp {
+                key: "otel",
+                // `value` is install-only; verification reads what is on disk.
+                value: toml_edit::Item::None,
+                only_if_absent: true,
+                ours_markers: vec!["127.0.0.1".into()],
+                must_carry: vec![],
+                retired_argv: None,
+            }],
         };
-        // TOML literal strings, so a Windows path's backslashes stay literal.
-        let healthy = format!(
-            "notify = ['{}', 'hook', '--source', 'codex']\n\
-             [otel]\nexporter = {{ otlp-http = {{ endpoint = 'http://127.0.0.1:4327' }} }}\n",
-            exe.display()
-        );
-        std::fs::write(&path, &healthy).unwrap();
+        let healthy = "[otel]\nexporter = { otlp-http = { endpoint = 'http://127.0.0.1:4327' } }\n";
+        std::fs::write(&path, healthy).unwrap();
         assert_eq!(verify(&artifact), Ok(()), "healthy config must verify");
 
-        // Previously a TomlEdit was never checked, so every one of these
-        // passed and a half-installed Codex looked healthy forever.
-        let mut doc: toml_edit::DocumentMut = healthy.parse().unwrap();
-        doc.remove("otel");
-        std::fs::write(&path, doc.to_string()).unwrap();
+        // Previously a TomlEdit was never checked, so this passed and a
+        // half-installed Codex looked healthy forever.
+        std::fs::write(&path, "").unwrap();
         assert!(verify(&artifact).unwrap_err().contains("otel missing from"));
-
-        std::fs::write(
-            &path,
-            healthy.replace("'hook', '--source', 'codex'", "'--version'"),
-        )
-        .unwrap();
-        assert!(
-            verify(&artifact)
-                .unwrap_err()
-                .contains("notify no longer invokes argus")
-        );
-
-        std::fs::write(&path, &healthy).unwrap();
-        std::fs::remove_file(&exe).unwrap();
-        let err = verify(&artifact).unwrap_err();
-        assert!(err.contains("notify points at a missing"), "{err}");
     }
 
-    /// A Codex wired by an older argus points at the fixed port that the
-    /// per-install one replaced. It is still recognisably ours — `uninstall`
-    /// must keep removing it — but nothing listens there any more, so `check`
-    /// reporting it as wired would be the same silent capture stop the whole
-    /// integrity check exists to catch.
+    /// Codex runs one `notify` program, and ChatGPT's Computer Use claims it
+    /// on every launch. argus no longer competes for it: another program's
+    /// `notify` is never a finding and never touched, and the one an older
+    /// argus wrote is cleaned up.
+    #[test]
+    fn a_retired_notify_is_never_checked_and_only_our_leftover_is_removed() {
+        const TAIL: &[&str] = &["hook", "--source", "codex"];
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let artifact = Artifact::TomlEdit {
+            path: path.clone(),
+            edits: vec![TomlEditOp {
+                key: "notify",
+                value: toml_edit::Item::None,
+                only_if_absent: true,
+                ours_markers: vec![],
+                must_carry: vec![],
+                retired_argv: Some(TAIL),
+            }],
+        };
+        let foreign = "notify = ['/Applications/Other.app/bin/client', 'turn-ended']\n";
+        std::fs::write(&path, foreign).unwrap();
+        assert_eq!(
+            verify(&artifact),
+            Ok(()),
+            "another tool's notify is not tampering"
+        );
+        apply(&artifact, "codex", false).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), foreign);
+        revert(&artifact).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), foreign);
+
+        // Absent is healthy too: nothing is written in its place.
+        std::fs::write(&path, "").unwrap();
+        assert_eq!(verify(&artifact), Ok(()));
+        apply(&artifact, "codex", false).unwrap();
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("notify"));
+
+        // What an older argus wrote goes, on install and on uninstall alike.
+        let legacy = "notify = ['/usr/local/bin/argus', 'hook', '--source', 'codex']\nkeep = 1\n";
+        let steps: [fn(&Artifact); 2] = [
+            |a| apply(a, "codex", false).unwrap(),
+            |a| revert(a).unwrap(),
+        ];
+        for step in steps {
+            std::fs::write(&path, legacy).unwrap();
+            step(&artifact);
+            let left = std::fs::read_to_string(&path).unwrap();
+            assert!(
+                !left.contains("notify") && left.contains("keep = 1"),
+                "{left}"
+            );
+        }
+    }
+
     #[test]
     fn verify_rejects_a_codex_wired_to_an_endpoint_nothing_listens_on() {
         let dir = tempfile::tempdir().unwrap();
@@ -3525,7 +3550,7 @@ mod tests {
                     needle: "http://127.0.0.1:41234".into(),
                     present: true,
                 }],
-                argv_tail: None,
+                retired_argv: None,
             }],
         };
 
@@ -3563,7 +3588,7 @@ mod tests {
                 only_if_absent: true,
                 ours_markers: vec!["http://127.0.0.1:41234".into()],
                 must_carry: required,
-                argv_tail: None,
+                retired_argv: None,
             }],
         };
         let config = |token: &str| {

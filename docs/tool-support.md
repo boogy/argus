@@ -115,10 +115,10 @@ part of its event a reviewer would actually look for:
 - Copilot's `error.stack` is deliberately dropped: it is unbounded and
   describes the host tool's own file layout, not the session.
 
-**Codex** is wired three ways at once: its hooks system
-(`~/.codex/hooks.json`, Claude-compatible payloads — note new hooks need
-one-time trust via `/hooks` inside Codex), the `notify` hook for turn
-completion on older versions, and OTLP logs (`[otel]` in `config.toml`),
+**Codex** is wired two ways at once: its hooks system
+(`~/.codex/hooks.json`, Claude-compatible payloads, including `Stop` for turn
+completion — note new hooks need one-time trust via `/hooks` inside Codex),
+and OTLP logs (`[otel]` in `config.toml`),
 which carry the prompt, each tool decision and result, the session start and
 the model in use. The token counts and cost of a turn are not among them,
 which is why the usage row above is a dash: nothing Codex exports today

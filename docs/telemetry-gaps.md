@@ -330,9 +330,8 @@ whether it arrives as a number, a boolean or a string — Codex's own stream
 sends `success` as `"true"`, so a consumer that trusts the declared type of an
 attribute drops fields on the build that spells them differently. `success =
 false` now makes the result the `error` leg; it used to be a `post` with the
-failure buried in `input`, where no "what failed" query looks. The `notify`
-payload's `turn-id` joins the turn-complete notification to the calls of that
-turn.
+failure buried in `input`, where no "what failed" query looks. The `Stop`
+hook's `turn_id` joins the end of a turn to the calls of that turn.
 
 Copilot is the real gap: no documented payload carries a call id, a turn id or
 a timestamp — the envelope has `sessionId`, `cwd`, `transcriptPath` and the
@@ -472,7 +471,7 @@ review did not ask:
 - **Cloud identity** (`capture.cloud_identity`, on by default) — "as whom": the
   assumed role, subscription, project or cluster the agent held, read wherever
   the envelope is built inside the agent's own environment — the shim for
-  Claude Code, Copilot and Codex's `notify`, the plugin itself for opencode and
+  Claude Code, Copilot and Codex's hooks, the plugin itself for opencode and
   pi. One channel cannot carry it: Codex's `[otel]` export posts over HTTP from
   Codex's own process, so those records arrive with none. See
   [Cloud identity](capture.md#cloud-identity) for what is read by value and what
