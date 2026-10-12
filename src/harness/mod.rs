@@ -2056,6 +2056,15 @@ pub fn parse(envelope: Envelope, capture: &CaptureCfg) -> Vec<Event> {
         // agent that lost these was holding prod credentials" is the half of a
         // gap report that decides how much it matters.
         e.cloud_identity = cloud_identity.clone();
+        // A command that names its own AWS profile outranks the environment's
+        // for that one call — see `cloudid::apply_command_profiles`. Here and
+        // not in the shim, because only a parsed tool input has a command.
+        if capture.cloud_identity
+            && let crate::event::EventKind::ToolUse { input, .. } = &e.kind
+        {
+            let commands = crate::adapters::net::commands_in(input);
+            crate::cloudid::apply_command_profiles(&mut e.cloud_identity, &commands);
+        }
         // Unconditional, unlike the capture knobs above: this is not something
         // the agent said, it is a note about the machine the agent ran on, and
         // a capture policy that could switch it off would be a capture policy
@@ -3053,6 +3062,66 @@ mod tests {
                 e.cloud_identity
             );
         }
+    }
+
+    /// The profile a tool call's command asked for is stamped on that call,
+    /// over the environment's — and only on that call. Two profiles so the
+    /// assertion needs no `~/.aws/config`: both are named, neither resolved.
+    #[test]
+    fn a_tool_call_carries_the_aws_profile_its_command_named() {
+        let env = |payload| Envelope {
+            env_overrides: Vec::new(),
+            cloud_identity: crate::cloudid::from_vars([
+                ("AWS_PROFILE", "dev"),
+                ("AWS_REGION", "eu-west-1"),
+            ]),
+            source: "claude-code".into(),
+            received_at: chrono::Utc::now(),
+            truncated: false,
+            dropped: 0,
+            event: None,
+            payload,
+        };
+        let call = parse(
+            env(serde_json::json!({
+                "hook_event_name": "PreToolUse",
+                "session_id": "s1",
+                "tool_name": "Bash",
+                "tool_input": { "command": "aws-vault exec prod -- aws s3 ls --profile staging" },
+            })),
+            &CaptureCfg::default(),
+        );
+        let id = &call.last().expect("a tool event").cloud_identity;
+        assert_eq!(
+            id.attributes.get("aws.profile").map(String::as_str),
+            Some("prod,staging")
+        );
+        assert_eq!(
+            id.attributes
+                .get("aws.credentials_source")
+                .map(String::as_str),
+            Some("command")
+        );
+        assert_eq!(
+            id.attributes.get("aws.region"),
+            None,
+            "the environment's: {id:?}"
+        );
+
+        let prompt = parse(
+            env(serde_json::json!({
+                "hook_event_name": "UserPromptSubmit",
+                "session_id": "s1",
+                "prompt": "run aws --profile prod s3 ls",
+            })),
+            &CaptureCfg::default(),
+        );
+        let id = &prompt.last().unwrap().cloud_identity;
+        assert_eq!(
+            id.attributes.get("aws.profile").map(String::as_str),
+            Some("dev"),
+            "a prompt is not a command"
+        );
     }
 
     /// Two independent gaps on one envelope are two independent findings; the

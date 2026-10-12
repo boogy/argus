@@ -37,8 +37,20 @@ writeFileSync(
   "[default]\n" +
     // Loses to AWS_ROLE_ARN: the variable is what this process was told.
     "role_arn = arn:aws:iam::999999999999:role/from-the-file\n" +
+    "sso_start_url = https://acme.awsapps.com/start\n" +
     "sso_account_id = 123456789012\n" +
     "sso_role_name = AdministratorAccess\n",
+);
+// The login that makes the profile a working credential rather than a
+// configured one. Without it the profile's account is not reported at all.
+mkdirSync(join(dir, ".aws", "sso", "cache"), { recursive: true });
+writeFileSync(
+  join(dir, ".aws", "sso", "cache", "acme.json"),
+  JSON.stringify({
+    startUrl: "https://acme.awsapps.com/start",
+    accessToken: "aoaSSOaccessTokenEXAMPLE",
+    expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+  }),
 );
 process.env.CLOUDSDK_CONFIG = join(dir, "gcloud");
 mkdirSync(process.env.CLOUDSDK_CONFIG);
@@ -188,12 +200,15 @@ for (const e of received) {
   if (id?.attributes?.["aws.sso_role_name"] !== "AdministratorAccess") {
     problems.push(`${e.payload.event}: no permission set from the shared config`);
   }
+  if (id?.attributes?.["aws.credentials_source"] !== "sso") {
+    problems.push(`${e.payload.event}: the live SSO login was not recognised`);
+  }
   if (
     id?.attributes?.["gcp.account"] !== "agent@acme-prod.iam.gserviceaccount.com"
   ) {
     problems.push(`${e.payload.event}: no account from the ADC document`);
   }
-  for (const secret of ["wJalrXUtnFEMI", "MIIEvQIBADANBgkqEXAMPLE"]) {
+  for (const secret of ["wJalrXUtnFEMI", "MIIEvQIBADANBgkqEXAMPLE", "aoaSSOaccessTokenEXAMPLE"]) {
     if (JSON.stringify(e).includes(secret)) {
       problems.push(`${e.payload.event}: a credential value reached the wire`);
     }

@@ -230,6 +230,8 @@ cloud.aws.role_arn        = arn:aws:iam::123456789012:role/prod-admin
 cloud.aws.account_id      = 123456789012
 cloud.aws.sso_role_name   = AdministratorAccess
 cloud.aws.region          = eu-west-1
+cloud.aws.credentials_source    = sso        (env | web_identity | container | sso | credential_process | command)
+cloud.aws.credentials_expire_at = 2026-10-12T20:00:00Z
 cloud.azure.subscription_id, cloud.azure.tenant_id, cloud.azure.client_id
 cloud.gcp.project, cloud.gcp.account, cloud.gcp.credentials_file
 cloud.k8s.api_host, cloud.k8s.kubeconfig, cloud.k8s.context
@@ -260,11 +262,51 @@ not which role — the role lives in `~/.aws/config` under `[profile prod]`.
 So the same two files an SDK beside the agent would resolve are read as well:
 
 - `~/.aws/config` (or `AWS_CONFIG_FILE`), the section the environment
-  selects, defaulting to `[default]` exactly as the SDKs do → `role_arn`,
-  `role_session_name`, `sso_account_id`, `sso_role_name`, `region`.
+  selects (`AWS_PROFILE`, or `AWS_VAULT` under `aws-vault exec`), defaulting
+  to `[default]` exactly as the SDKs do → `role_arn`, `role_session_name`,
+  `sso_account_id`, `sso_role_name`, `region`.
 - gcloud's application-default credentials — `GOOGLE_APPLICATION_CREDENTIALS`,
   else `CLOUDSDK_CONFIG`, else the well-known path → `client_email`,
   `project_id`, `quota_project_id`, `type` (service account, user, federated).
+
+**Only working AWS credentials.** A profile is not a login: a `[default]`
+that names an account says nothing about whether the agent could act in it.
+So the shared-config settings above are only reported alongside a credential
+argus can confirm is live, named in `cloud.aws.credentials_source`:
+
+- `env` — `AWS_ACCESS_KEY_ID` with `AWS_SECRET_ACCESS_KEY` in scope (the
+  secret by name only), unless `AWS_CREDENTIAL_EXPIRATION` says they lapsed.
+  This is `aws-vault exec`. Only a *named* profile is read beside them, never
+  `[default]`.
+- `web_identity`, `container` — the token-file and container-endpoint
+  variables.
+- `sso` — the profile's IAM Identity Center start URL (its own
+  `sso_start_url`, or its `[sso-session]`'s) has an unexpired login in
+  `~/.aws/sso/cache`. Each cache entry is parsed for `startUrl` and
+  `expiresAt` only; the access and refresh tokens beside them are skipped by
+  the parser and never become a value.
+
+- `credential_process` — a profile the environment *named* (`AWS_PROFILE`,
+  `AWS_VAULT`) gets its keys from a program, typically
+  `aws-vault export`. Nothing on disk can confirm those, so this is the weaker
+  claim "configured to get credentials without asking anyone", and it is
+  never made for `[default]`, which nobody chose.
+
+Anything else — static keys in `~/.aws/credentials`, an assumed role's CLI
+cache — cannot be confirmed without opening a secret, so the profile is not
+reported.
+
+**The profile a command asked for.** On a tool call, a command that selects a
+profile outranks the environment for that one event: `aws --profile prod …`,
+`aws-vault exec prod -- …` (and `export`, `login`), or `AWS_PROFILE=prod …` /
+`export AWS_PROFILE=prod`. The environment's `aws.*` attributes are replaced by
+`aws.profile`, that profile's `~/.aws/config` settings, and
+`aws.credentials_source = command`. It records what the agent asked for, not
+that the call succeeded — the tool result says that. `AWS_PROFILE=` loses to
+env keys, as it does in the SDK. A command naming several profiles names them
+all (`aws.profile = prod,staging`) and resolves none. The variables themselves
+(`AWS_PROFILE`, `AWS_REGION`, …) still are: they are what the process was
+told, working or not.
 
 Same rule as the environment: an explicit list of identifying fields, no
 credential. The ADC document's `private_key` and `refresh_token` aren't on
