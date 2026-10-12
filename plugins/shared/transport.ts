@@ -11,7 +11,7 @@
 // shim's frame format (newline-delimited Envelope JSON). Fallback: spawn the
 // shim binary, which handles spooling and daemon autospawn.
 import { spawn } from "node:child_process";
-import { closeSync, openSync, readSync } from "node:fs";
+import { closeSync, openSync, readdirSync, readSync } from "node:fs";
 import { createConnection, type Socket } from "node:net";
 
 let sock: Socket | null = null;
@@ -139,12 +139,15 @@ function sendViaSpawn(source: string, payload: string): void {
 const IDENTIFIERS: [string, string][] = [
   ["AWS_PROFILE", "aws.profile"],
   ["AWS_DEFAULT_PROFILE", "aws.profile"],
+  ["AWS_VAULT", "aws.profile"],
   ["AWS_REGION", "aws.region"],
   ["AWS_DEFAULT_REGION", "aws.region"],
   ["AWS_ROLE_ARN", "aws.role_arn"],
   ["AWS_ROLE_SESSION_NAME", "aws.role_session_name"],
   ["AWS_ACCOUNT_ID", "aws.account_id"],
   ["AWS_ACCESS_KEY_ID", "aws.access_key_id"],
+  ["AWS_CREDENTIAL_EXPIRATION", "aws.credentials_expire_at"],
+  ["AWS_SESSION_EXPIRATION", "aws.credentials_expire_at"],
   ["AWS_WEB_IDENTITY_TOKEN_FILE", "aws.web_identity_token_file"],
   ["AWS_CONTAINER_CREDENTIALS_FULL_URI", "aws.container_creds_uri"],
   ["AWS_CONTAINER_CREDENTIALS_RELATIVE_URI", "aws.container_creds_uri"],
@@ -230,8 +233,9 @@ function readCapped(path: string): string | null {
   }
 }
 
-function awsProfileAttrs(text: string, profile: string): [string, string][] {
-  const wanted = profile === "default" ? "default" : `profile ${profile}`;
+// Mirrors `ini_section` in src/cloudid.rs: one section's non-blank settings,
+// in file order.
+function iniSection(text: string, wanted: string): [string, string][] {
   const found: [string, string][] = [];
   let inSection = false;
   for (const raw of text.split("\n")) {
@@ -246,11 +250,76 @@ function awsProfileAttrs(text: string, profile: string): [string, string][] {
     if (eq < 0) continue;
     const key = line.slice(0, eq).trim();
     const value = line.slice(eq + 1).trim();
-    if (!value) continue;
+    if (value) found.push([key, value]);
+  }
+  return found;
+}
+
+function profileSection(profile: string): string {
+  return profile === "default" ? "default" : `profile ${profile}`;
+}
+
+function awsProfileAttrs(text: string, profile: string): [string, string][] {
+  const found: [string, string][] = [];
+  for (const [key, value] of iniSection(text, profileSection(profile))) {
     const hit = AWS_PROFILE_KEYS.find(([k]) => k === key);
     if (hit && !found.some(([a]) => a === hit[1])) found.push([hit[1], value]);
   }
   return found;
+}
+
+function ssoStartUrl(text: string, profile: string): string | undefined {
+  const first = (section: [string, string][], key: string) =>
+    section.find(([k]) => k === key)?.[1];
+  const section = iniSection(text, profileSection(profile));
+  const session = first(section, "sso_session");
+  return session
+    ? first(iniSection(text, `sso-session ${session}`), "sso_start_url")
+    : first(section, "sso_start_url");
+}
+
+// RFC 3339, plus the `…UTC` spelling older CLIs wrote. Milliseconds since the
+// epoch, or null.
+function parseExpiry(raw: string): number | null {
+  if (!/^\d{4}-\d{2}-\d{2}T/.test(raw)) return null;
+  const at = Date.parse(raw.endsWith("UTC") ? `${raw.slice(0, -3)}Z` : raw);
+  return Number.isNaN(at) ? null : at;
+}
+
+// Mirrors `sso_login_expiry`: matched on each entry's own `startUrl`, and only
+// `startUrl` and `expiresAt` are read off the parsed entry.
+const MAX_SSO_CACHE_ENTRIES = 64;
+function ssoLoginExpiry(cacheDir: string, startUrl: string, now: number): number | null {
+  let best: number | null = null;
+  let names: string[];
+  try {
+    names = readdirSync(cacheDir).slice(0, MAX_SSO_CACHE_ENTRIES);
+  } catch {
+    return null;
+  }
+  for (const name of names) {
+    if (!name.endsWith(".json")) continue;
+    const text = readCapped(`${cacheDir}/${name}`);
+    if (text === null) continue;
+    let entry: { startUrl?: unknown; expiresAt?: unknown };
+    try {
+      entry = JSON.parse(text);
+    } catch {
+      continue;
+    }
+    if (entry?.startUrl !== startUrl || typeof entry.expiresAt !== "string") continue;
+    const at = parseExpiry(entry.expiresAt);
+    if (at !== null && at > now && (best === null || at > best)) best = at;
+  }
+  return best;
+}
+
+function envCredentialsSource(id: CloudIdentity): string | null {
+  if ("aws.access_key_id" in id.attributes && id.credentials.includes("AWS_SECRET_ACCESS_KEY"))
+    return "env";
+  if ("aws.web_identity_token_file" in id.attributes) return "web_identity";
+  if ("aws.container_creds_uri" in id.attributes) return "container";
+  return null;
 }
 
 function gcpAdcAttrs(text: string): [string, string][] {
@@ -295,19 +364,52 @@ function gcpAdcPath(home: string): string {
 }
 
 // The environment always wins: a variable is what this process was told, a file
-// is only what an SDK would resolve from it.
-function enrichFromFiles(id: CloudIdentity): void {
+// is only what an SDK would resolve from it. AWS settings from the shared config
+// are only reported beside a credential the agent could sign with — see
+// `enrich_aws` in src/cloudid.rs, which this mirrors.
+function enrichFromFiles(id: CloudIdentity, now: number): void {
   const home = homeDir();
-  const awsConfig = readCapped(awsConfigPath(home));
-  if (awsConfig !== null) {
-    const profile = id.attributes["aws.profile"] ?? "default";
-    for (const [attribute, value] of awsProfileAttrs(awsConfig, profile))
-      if (!(attribute in id.attributes)) id.attributes[attribute] = value;
-  }
+  enrichAws(id, readCapped(awsConfigPath(home)), `${home}/.aws/sso/cache`, now);
   const adc = readCapped(gcpAdcPath(home));
   if (adc !== null)
     for (const [attribute, value] of gcpAdcAttrs(adc))
       if (!(attribute in id.attributes)) id.attributes[attribute] = value;
+}
+
+function enrichAws(id: CloudIdentity, config: string | null, ssoCache: string, now: number): void {
+  const fill = (attrs: [string, string][]) => {
+    for (const [attribute, value] of attrs)
+      if (!(attribute in id.attributes)) id.attributes[attribute] = value;
+  };
+  const named = id.attributes["aws.profile"];
+  const source = envCredentialsSource(id);
+  if (source) {
+    const raw = id.attributes["aws.credentials_expire_at"];
+    const expires = raw ? parseExpiry(raw) : null;
+    if (expires !== null && expires <= now) return;
+    id.attributes["aws.credentials_source"] = source;
+    if (named && config !== null) fill(awsProfileAttrs(config, named));
+    return;
+  }
+  if (config === null) return;
+  const profile = named ?? "default";
+  const url = ssoStartUrl(config, profile);
+  const expires = url ? ssoLoginExpiry(ssoCache, url, now) : null;
+  if (expires !== null) {
+    fill(awsProfileAttrs(config, profile));
+    id.attributes["aws.credentials_source"] = "sso";
+    if (!("aws.credentials_expire_at" in id.attributes))
+      id.attributes["aws.credentials_expire_at"] = new Date(expires)
+        .toISOString()
+        .replace(/\.\d{3}Z$/, "Z");
+    return;
+  }
+  // On-demand keys (aws-vault's `export`): nothing on disk to confirm, so only
+  // for a profile the environment named.
+  if (named && iniSection(config, profileSection(profile)).some(([k]) => k === "credential_process")) {
+    fill(awsProfileAttrs(config, profile));
+    id.attributes["aws.credentials_source"] = "credential_process";
+  }
 }
 
 type CloudIdentity = {
@@ -315,12 +417,16 @@ type CloudIdentity = {
   credentials: string[];
 };
 let identity: CloudIdentity | null = null;
+let identityExpires: number | null = null;
 
 // Computed once per host process: a plugin host is long-lived and its
 // environment was fixed when the agent started it, so recomputing per event
 // would walk the whole environment thousands of times for the same answer.
+// Except once the credential it found lapses — then it is recomputed, so a
+// session that outlives its login stops claiming it.
 function cloudIdentity(): CloudIdentity {
-  if (identity) return identity;
+  const now = Date.now();
+  if (identity && (identityExpires === null || now < identityExpires)) return identity;
   const env = process.env;
   const id: CloudIdentity = { attributes: {}, credentials: [] };
   const claimed = new Set(IDENTIFIERS.map(([name]) => name));
@@ -344,10 +450,13 @@ function cloudIdentity(): CloudIdentity {
   // a filesystem error thrown here would drop the event rather than lose an
   // attribute. Reading the files is best-effort; reporting the event is not.
   try {
-    enrichFromFiles(id);
+    enrichFromFiles(id, now);
   } catch {
     // an identity from the environment alone is still an identity
   }
+  const expires = id.attributes["aws.credentials_expire_at"];
+  identityExpires =
+    id.attributes["aws.credentials_source"] && expires ? parseExpiry(expires) : null;
   identity = id;
   return id;
 }

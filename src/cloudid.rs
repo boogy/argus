@@ -39,6 +39,7 @@
 //! opened at all. The reads are bounded and silent on failure, because they
 //! happen in the hook shim while the agent waits.
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -50,6 +51,8 @@ const IDENTIFIERS: &[(&str, &str)] = &[
     // ---- AWS -------------------------------------------------------------
     ("AWS_PROFILE", "aws.profile"),
     ("AWS_DEFAULT_PROFILE", "aws.profile"),
+    // `aws-vault exec prod` names the profile here and nowhere else.
+    ("AWS_VAULT", "aws.profile"),
     ("AWS_REGION", "aws.region"),
     ("AWS_DEFAULT_REGION", "aws.region"),
     ("AWS_ROLE_ARN", "aws.role_arn"),
@@ -60,6 +63,11 @@ const IDENTIFIERS: &[(&str, &str)] = &[
     // provider's own log — and it authenticates nothing without the secret,
     // which this module never reads.
     ("AWS_ACCESS_KEY_ID", "aws.access_key_id"),
+    // When the session keys above stop working — a timestamp, not a secret.
+    // `aws-vault exec` and `aws configure export-credentials` set the first;
+    // older aws-vault the second.
+    ("AWS_CREDENTIAL_EXPIRATION", "aws.credentials_expire_at"),
+    ("AWS_SESSION_EXPIRATION", "aws.credentials_expire_at"),
     // A path, not a token. Whether the agent was using web identity
     // federation at all is the fact; the file's contents are not read.
     ("AWS_WEB_IDENTITY_TOKEN_FILE", "aws.web_identity_token_file"),
@@ -254,21 +262,17 @@ fn read_capped(path: &Path) -> Option<String> {
     Some(String::from_utf8_lossy(&buf).into_owned())
 }
 
-/// Pull one profile's identifying settings out of an AWS shared config.
+/// The `key = value` settings of one section of an AWS shared config, in
+/// file order, blank values dropped.
 ///
 /// A deliberately small INI reader rather than a dependency: the file's own
 /// format is `[profile name]` for every profile but `[default]`, nested
 /// settings are indented under a parent key, and both `#` and `;` start a
-/// comment. Unknown keys — including every nested one — are simply not looked
-/// up, so the parse cannot be widened by what a file happens to contain.
-fn aws_profile_attrs(text: &str, profile: &str) -> Vec<(&'static str, String)> {
-    let wanted = if profile == "default" {
-        "default".to_string()
-    } else {
-        format!("profile {profile}")
-    };
+/// comment. Callers look up named keys only — including never a nested one —
+/// so the parse cannot be widened by what a file happens to contain.
+fn ini_section<'a>(text: &'a str, wanted: &str) -> Vec<(&'a str, &'a str)> {
     let mut in_section = false;
-    let mut found: Vec<(&'static str, String)> = Vec::new();
+    let mut found = Vec::new();
     for line in text.lines() {
         let line = line.trim();
         if line.starts_with('#') || line.starts_with(';') {
@@ -287,9 +291,25 @@ fn aws_profile_attrs(text: &str, profile: &str) -> Vec<(&'static str, String)> {
             continue;
         };
         let (key, value) = (key.trim(), value.trim());
-        if value.is_empty() {
-            continue;
+        if !value.is_empty() {
+            found.push((key, value));
         }
+    }
+    found
+}
+
+fn profile_section(profile: &str) -> String {
+    if profile == "default" {
+        "default".to_string()
+    } else {
+        format!("profile {profile}")
+    }
+}
+
+/// Pull one profile's identifying settings out of an AWS shared config.
+fn aws_profile_attrs(text: &str, profile: &str) -> Vec<(&'static str, String)> {
+    let mut found: Vec<(&'static str, String)> = Vec::new();
+    for (key, value) in ini_section(text, &profile_section(profile)) {
         if let Some((_, attribute)) = AWS_PROFILE_KEYS.iter().find(|(k, _)| *k == key)
             && !found.iter().any(|(a, _)| *a == *attribute)
         {
@@ -299,6 +319,94 @@ fn aws_profile_attrs(text: &str, profile: &str) -> Vec<(&'static str, String)> {
         }
     }
     found
+}
+
+/// The IAM Identity Center start URL a profile logs in through, if it is an
+/// SSO profile at all: its own `sso_start_url` (legacy), or the one of the
+/// `[sso-session name]` its `sso_session` points at.
+fn sso_start_url(text: &str, profile: &str) -> Option<String> {
+    let first = |section: &[(&str, &str)], key: &str| {
+        section
+            .iter()
+            .find(|(k, _)| *k == key)
+            .map(|(_, v)| v.to_string())
+    };
+    let section = ini_section(text, &profile_section(profile));
+    match first(&section, "sso_session") {
+        Some(session) => first(
+            &ini_section(text, &format!("sso-session {session}")),
+            "sso_start_url",
+        ),
+        None => first(&section, "sso_start_url"),
+    }
+}
+
+/// The two fields of an SSO token cache entry this module needs. Every other
+/// field — `accessToken`, `refreshToken`, `clientSecret` — is not named here,
+/// so serde skips over it without ever building a value for it.
+#[derive(Deserialize)]
+struct SsoCacheEntry {
+    #[serde(rename = "startUrl")]
+    start_url: Option<String>,
+    #[serde(rename = "expiresAt")]
+    expires_at: Option<String>,
+}
+
+/// Ceiling on the files looked at in the SSO cache. A developer has one entry
+/// per start URL and a client registration or two; this only bounds the walk.
+const MAX_SSO_CACHE_ENTRIES: usize = 64;
+
+/// When the cached SSO login for `start_url` stops working, if one exists and
+/// has not already.
+///
+/// The cache files are named by a SHA-1 of the session name or the URL; the
+/// directory is walked and each entry matched on its own `startUrl` instead,
+/// which needs no hash and finds both spellings. Only the access token's
+/// expiry is checked: a lapsed one that an `sso-session` could still refresh
+/// silently reads as not working until the next AWS call refreshes the file.
+fn sso_login_expiry(
+    cache_dir: &Path,
+    start_url: &str,
+    now: DateTime<Utc>,
+) -> Option<DateTime<Utc>> {
+    std::fs::read_dir(cache_dir)
+        .ok()?
+        .filter_map(Result::ok)
+        .take(MAX_SSO_CACHE_ENTRIES)
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "json"))
+        .filter_map(|p| serde_json::from_str::<SsoCacheEntry>(&read_capped(&p)?).ok())
+        .filter(|e| e.start_url.as_deref() == Some(start_url))
+        .filter_map(|e| parse_expiry(&e.expires_at?))
+        .filter(|at| *at > now)
+        .max()
+}
+
+/// RFC 3339, plus the `2019-01-01T00:00:00UTC` spelling older CLIs wrote.
+fn parse_expiry(raw: &str) -> Option<DateTime<Utc>> {
+    let raw = raw
+        .strip_suffix("UTC")
+        .map_or(raw.to_string(), |r| format!("{r}Z"));
+    DateTime::parse_from_rfc3339(&raw)
+        .ok()
+        .map(|t| t.with_timezone(&Utc))
+}
+
+/// How the agent's environment hands an SDK AWS credentials directly, if it
+/// does — the first stops of the SDK's chain, ahead of any profile. Read off
+/// what [`from_vars`] already collected: the secret by name only.
+fn env_credentials_source(id: &CloudIdentity) -> Option<&'static str> {
+    if id.attributes.contains_key("aws.access_key_id")
+        && id.credentials.iter().any(|c| c == "AWS_SECRET_ACCESS_KEY")
+    {
+        Some("env")
+    } else if id.attributes.contains_key("aws.web_identity_token_file") {
+        Some("web_identity")
+    } else if id.attributes.contains_key("aws.container_creds_uri") {
+        Some("container")
+    } else {
+        None
+    }
 }
 
 /// Pull the identifying fields out of an ADC document.
@@ -323,21 +431,21 @@ fn gcp_adc_attrs(text: &str) -> Vec<(&'static str, String)> {
 /// The environment always wins: a variable is what the agent's own process was
 /// told, while a file is what an SDK *would* resolve from it. Where both
 /// answer, the first is the stronger claim.
-fn enrich_from_files(id: &mut CloudIdentity, aws_config: Option<&Path>, gcp_adc: Option<&Path>) {
-    if let Some(path) = aws_config {
-        // `default` when nothing named a profile, because that is the profile
-        // an SDK in this environment would use.
-        let profile = id
-            .attributes
-            .get("aws.profile")
-            .cloned()
-            .unwrap_or_else(|| "default".into());
-        if let Some(text) = read_capped(path) {
-            for (attribute, value) in aws_profile_attrs(&text, &profile) {
-                id.attributes.entry(attribute.to_string()).or_insert(value);
-            }
-        }
-    }
+///
+/// AWS settings from the shared config are only reported alongside a
+/// credential the agent could actually sign with, recorded as
+/// `aws.credentials_source`. A profile is not a credential: `[default]` naming
+/// an account says nothing about whether the agent held a login to it, and
+/// reporting it anyway puts every developer with a configured profile in every
+/// account it names.
+fn enrich_from_files(
+    id: &mut CloudIdentity,
+    aws_config: Option<&Path>,
+    sso_cache: Option<&Path>,
+    gcp_adc: Option<&Path>,
+    now: DateTime<Utc>,
+) {
+    enrich_aws(id, aws_config, sso_cache, now);
     if let Some(path) = gcp_adc
         && let Some(text) = read_capped(path)
     {
@@ -345,6 +453,242 @@ fn enrich_from_files(id: &mut CloudIdentity, aws_config: Option<&Path>, gcp_adc:
             id.attributes.entry(attribute.to_string()).or_insert(value);
         }
     }
+}
+
+fn enrich_aws(
+    id: &mut CloudIdentity,
+    aws_config: Option<&Path>,
+    sso_cache: Option<&Path>,
+    now: DateTime<Utc>,
+) {
+    let config = aws_config.and_then(read_capped);
+    let named = id.attributes.get("aws.profile").cloned();
+    let fill = |id: &mut CloudIdentity, attrs: Vec<(&'static str, String)>| {
+        for (attribute, value) in attrs {
+            id.attributes.entry(attribute.to_string()).or_insert(value);
+        }
+    };
+
+    if let Some(source) = env_credentials_source(id) {
+        // Present but lapsed is not working, and the SDK will not fall back to
+        // a profile behind it either: the env keys win the chain and fail.
+        let lapsed = id
+            .attributes
+            .get("aws.credentials_expire_at")
+            .and_then(|raw| parse_expiry(raw))
+            .is_some_and(|at| at <= now);
+        if lapsed {
+            return;
+        }
+        id.attributes
+            .insert("aws.credentials_source".into(), source.into());
+        // A *named* profile says which role these keys were minted for —
+        // `aws-vault exec prod` sets `AWS_VAULT=prod`. `[default]` says no
+        // such thing about keys that came from somewhere else.
+        if let (Some(profile), Some(text)) = (named, config.as_deref()) {
+            fill(id, aws_profile_attrs(text, &profile));
+        }
+        return;
+    }
+
+    // `default` when nothing named a profile, because that is the profile an
+    // SDK in this environment would use.
+    let profile = named.clone().unwrap_or_else(|| "default".into());
+    let Some(text) = config.as_deref() else {
+        return;
+    };
+    if let Some(expires) = sso_cache
+        .zip(sso_start_url(text, &profile))
+        .and_then(|(cache, url)| sso_login_expiry(cache, &url, now))
+    {
+        fill(id, aws_profile_attrs(text, &profile));
+        id.attributes
+            .insert("aws.credentials_source".into(), "sso".into());
+        id.attributes
+            .entry("aws.credentials_expire_at".into())
+            .or_insert_with(|| expires.to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
+        return;
+    }
+    // A `credential_process` (aws-vault's `export`, most often) mints keys on
+    // demand, so there is nothing on disk to confirm — the claim is weaker:
+    // "this profile gets credentials without asking anyone". Only for a
+    // profile the environment *named*: that someone chose it for this
+    // session is the evidence, and `[default]` carries none.
+    if named.is_some()
+        && ini_section(text, &profile_section(&profile))
+            .iter()
+            .any(|(k, _)| *k == "credential_process")
+    {
+        fill(id, aws_profile_attrs(text, &profile));
+        id.attributes
+            .insert("aws.credentials_source".into(), "credential_process".into());
+    }
+    // Static keys in `~/.aws/credentials`, an assumed role's CLI cache: none
+    // can be confirmed without opening a secret, so none is claimed.
+}
+
+/// How a shell command chose an AWS profile for itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProfileVia {
+    /// `aws --profile prod`, `aws-vault exec prod`: outranks every variable.
+    Explicit,
+    /// `AWS_PROFILE=prod terraform plan`, `export AWS_PROFILE=prod`: loses to
+    /// env keys, exactly as `AWS_PROFILE` does in the agent's own environment.
+    Variable,
+}
+
+/// `aws-vault` flags that take a separate value, so the profile is not
+/// mistaken for one. `--flag=value` needs no entry.
+// ponytail: the common flags only; an unlisted one shifts the profile by one
+// token, so add it here when a real command shows it.
+const AWS_VAULT_VALUE_FLAGS: &[&str] = &[
+    "-d",
+    "--duration",
+    "-t",
+    "--mfa-token",
+    "--region",
+    "--prompt",
+    "--backend",
+    "--keychain",
+    "--config",
+];
+
+/// The AWS profiles a shell command selects, in order.
+///
+/// The environment says which profile the agent's process *could* use; a
+/// command that names one says which profile this call *did* ask for — the
+/// only evidence there is for a profile whose credentials come from a
+/// `credential_process`, an aws-vault keychain or anything else with no file
+/// to check. Same restraint as [`crate::adapters::net::command_hosts`]: three
+/// spellings, each unambiguous, and nothing guessed from the rest.
+fn command_profiles(command: &str) -> Vec<(String, ProfileVia)> {
+    let mut out = Vec::new();
+    let mut seg: Vec<&str> = Vec::new();
+    for raw in command.split_whitespace() {
+        let token = raw.trim_matches(|c: char| "'\"`".contains(c));
+        if crate::adapters::net::COMMAND_SEPARATORS.contains(&token) {
+            segment_profiles(&seg, &mut out);
+            seg.clear();
+        } else {
+            seg.push(token);
+        }
+    }
+    segment_profiles(&seg, &mut out);
+    out
+}
+
+fn segment_profiles(seg: &[&str], out: &mut Vec<(String, ProfileVia)>) {
+    let mut rest = seg.iter().copied();
+    let mut push = |p: &str, via| {
+        if !p.is_empty() {
+            out.push((p.to_string(), via));
+        }
+    };
+    // Leading assignments and wrappers, up to the program itself.
+    let program = loop {
+        let Some(token) = rest.next() else { return };
+        if let Some(p) = token.strip_prefix("AWS_PROFILE=") {
+            push(p, ProfileVia::Variable);
+            continue;
+        }
+        let bare = token
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or(token)
+            .trim_end_matches(".exe");
+        if token.contains('=') || ["sudo", "env", "time", "export"].contains(&bare) {
+            continue;
+        }
+        break bare;
+    };
+    let args: Vec<&str> = rest.collect();
+    match program {
+        "aws" => {
+            let mut it = args.iter();
+            while let Some(a) = it.next() {
+                if let Some(p) = a.strip_prefix("--profile=") {
+                    push(p, ProfileVia::Explicit);
+                } else if *a == "--profile"
+                    && let Some(p) = it.next()
+                {
+                    push(p, ProfileVia::Explicit);
+                }
+            }
+        }
+        "aws-vault" => {
+            // `aws-vault [global flags] exec|export|login [flags] PROFILE [-- cmd]`.
+            let Some(sub) = args
+                .iter()
+                .position(|a| ["exec", "export", "login"].contains(a))
+            else {
+                return;
+            };
+            let mut it = args[sub + 1..].iter();
+            while let Some(a) = it.next() {
+                if *a == "--" {
+                    break;
+                }
+                if AWS_VAULT_VALUE_FLAGS.contains(a) {
+                    it.next();
+                } else if !a.starts_with('-') {
+                    push(a, ProfileVia::Explicit);
+                    break;
+                }
+            }
+            // Whatever runs after `--` is a command of its own, and may name a
+            // profile too.
+            if let Some(dash) = args.iter().position(|a| *a == "--") {
+                segment_profiles(&args[dash + 1..], out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Re-point one tool call's AWS identity at the profile its command named.
+///
+/// The environment's AWS attributes describe a different credential from the
+/// one the call asked for, so they are replaced rather than merged: an event
+/// that said "env keys for staging" and "--profile prod" at once would answer
+/// the incident question both ways. Several distinct profiles in one command
+/// are all named, but none is resolved — which account a given half of the
+/// pipeline acted in is not something the record can say.
+///
+/// `aws.credentials_source = command` claims what the agent asked for, not that
+/// the call succeeded; the tool result beside it says that.
+pub fn apply_command_profiles(id: &mut CloudIdentity, commands: &[String]) {
+    apply_command_profiles_from(id, commands, &aws_config_path(&crate::install::home()));
+}
+
+fn apply_command_profiles_from(id: &mut CloudIdentity, commands: &[String], aws_config: &Path) {
+    let env_keys = id
+        .attributes
+        .get("aws.credentials_source")
+        .map(String::as_str)
+        == Some("env");
+    let mut chosen: Vec<String> = Vec::new();
+    for (profile, via) in commands.iter().flat_map(|c| command_profiles(c)) {
+        if via == ProfileVia::Variable && env_keys {
+            continue;
+        }
+        if !chosen.contains(&profile) {
+            chosen.push(profile);
+        }
+    }
+    if chosen.is_empty() {
+        return;
+    }
+    id.attributes.retain(|k, _| !k.starts_with("aws."));
+    if let [profile] = chosen.as_slice()
+        && let Some(text) = read_capped(aws_config)
+    {
+        for (attribute, value) in aws_profile_attrs(&text, profile) {
+            id.attributes.insert(attribute.to_string(), value);
+        }
+    }
+    id.attributes.insert("aws.profile".into(), chosen.join(","));
+    id.attributes
+        .insert("aws.credentials_source".into(), "command".into());
 }
 
 /// Where the AWS SDKs look for the shared config, in their own order.
@@ -396,7 +740,10 @@ pub fn current() -> CloudIdentity {
     enrich_from_files(
         &mut id,
         Some(&aws_config_path(&home)),
+        // Fixed by the SDKs: `AWS_CONFIG_FILE` does not move it.
+        Some(&home.join(".aws").join("sso").join("cache")),
         Some(&gcp_adc_path(&home)),
+        Utc::now(),
     );
     id
 }
@@ -633,10 +980,12 @@ mod tests {
     const SHARED_CONFIG: &str = "\
 [default]
 region = eu-west-1
+sso_session = acme
 
 # the profile the agent is using
 [profile prod]
 role_arn = arn:aws:iam::123456789012:role/prod-admin
+sso_start_url = https://prod.awsapps.com/start
 sso_account_id = 123456789012
 sso_role_name = AdministratorAccess
 region = us-east-1
@@ -646,7 +995,22 @@ s3 =
 
 [profile staging]
 role_arn = arn:aws:iam::999999999999:role/staging
+
+[profile vaulted]
+credential_process = aws-vault export --format=json vaulted
+sso_account_id = 555555555555
+region = eu-central-2
+
+[sso-session acme]
+sso_start_url = https://acme.awsapps.com/start
 ";
+
+    /// The clock every liveness test is read against.
+    fn now() -> DateTime<Utc> {
+        "2026-10-12T12:00:00Z".parse().unwrap()
+    }
+
+    const SSO_ACCESS_TOKEN: &str = "aoaAAAAAGdsSSO-access-token-EXAMPLE";
 
     fn config_file(dir: &std::path::Path, text: &str) -> PathBuf {
         let path = dir.join("config");
@@ -654,29 +1018,62 @@ role_arn = arn:aws:iam::999999999999:role/staging
         path
     }
 
+    /// An SSO cache holding one login per `(start_url, expires_at)`, plus the
+    /// client registration the CLI keeps beside them, which has no `startUrl`.
+    fn sso_cache(dir: &std::path::Path, logins: &[(&str, &str)]) -> PathBuf {
+        let cache = dir.join("sso-cache");
+        std::fs::create_dir_all(&cache).unwrap();
+        for (i, (url, expires)) in logins.iter().enumerate() {
+            let entry = serde_json::json!({
+                "startUrl": url,
+                "region": "eu-west-1",
+                "accessToken": SSO_ACCESS_TOKEN,
+                "refreshToken": "aorAAAAAGrefresh-EXAMPLE",
+                "expiresAt": expires,
+            });
+            std::fs::write(cache.join(format!("{i:040}.json")), entry.to_string()).unwrap();
+        }
+        std::fs::write(
+            cache.join("botocore-client-id-eu-west-1.json"),
+            r#"{"clientId":"id","clientSecret":"client-secret-EXAMPLE","expiresAt":"2099-01-01T00:00:00Z"}"#,
+        )
+        .unwrap();
+        cache
+    }
+
+    fn enrich_aws_only(id: &mut CloudIdentity, dir: &std::path::Path, logins: &[(&str, &str)]) {
+        let config = config_file(dir, SHARED_CONFIG);
+        let cache = sso_cache(dir, logins);
+        enrich_from_files(id, Some(&config), Some(&cache), None, now());
+    }
+
+    fn attr<'a>(id: &'a CloudIdentity, key: &str) -> Option<&'a str> {
+        id.attributes.get(key).map(String::as_str)
+    }
+
     #[test]
     fn a_profile_names_the_role_the_variable_did_not() {
         let dir = tempfile::tempdir().unwrap();
         let mut id = ids(&[("AWS_PROFILE", "prod")]);
-        enrich_from_files(&mut id, Some(&config_file(dir.path(), SHARED_CONFIG)), None);
+        enrich_aws_only(
+            &mut id,
+            dir.path(),
+            &[("https://prod.awsapps.com/start", "2026-10-12T20:00:00Z")],
+        );
         assert_eq!(
-            id.attributes.get("aws.role_arn").map(String::as_str),
+            attr(&id, "aws.role_arn"),
             Some("arn:aws:iam::123456789012:role/prod-admin"),
             "{:?}",
             id.attributes
         );
-        assert_eq!(
-            id.attributes.get("aws.account_id").map(String::as_str),
-            Some("123456789012")
-        );
-        assert_eq!(
-            id.attributes.get("aws.sso_role_name").map(String::as_str),
-            Some("AdministratorAccess")
-        );
+        assert_eq!(attr(&id, "aws.account_id"), Some("123456789012"));
+        assert_eq!(attr(&id, "aws.sso_role_name"), Some("AdministratorAccess"));
         // The profile the agent named, not the one above it or the one below.
+        assert_eq!(attr(&id, "aws.region"), Some("us-east-1"));
+        assert_eq!(attr(&id, "aws.credentials_source"), Some("sso"));
         assert_eq!(
-            id.attributes.get("aws.region").map(String::as_str),
-            Some("us-east-1")
+            attr(&id, "aws.credentials_expire_at"),
+            Some("2026-10-12T20:00:00Z")
         );
     }
 
@@ -684,18 +1081,280 @@ role_arn = arn:aws:iam::999999999999:role/staging
     fn no_profile_named_means_the_one_an_sdk_would_use() {
         let dir = tempfile::tempdir().unwrap();
         let mut id = CloudIdentity::default();
-        enrich_from_files(&mut id, Some(&config_file(dir.path(), SHARED_CONFIG)), None);
+        // `[default]` logs in through its `sso-session`, not a URL of its own.
+        enrich_aws_only(
+            &mut id,
+            dir.path(),
+            &[("https://acme.awsapps.com/start", "2026-10-12T13:00:00Z")],
+        );
         assert_eq!(
-            id.attributes.get("aws.region").map(String::as_str),
+            attr(&id, "aws.region"),
             Some("eu-west-1"),
             "an unset AWS_PROFILE is the default profile, not no profile"
         );
         assert_eq!(
-            id.attributes.get("aws.role_arn"),
+            attr(&id, "aws.role_arn"),
             None,
             "a role from some other profile: {:?}",
             id.attributes
         );
+        assert_eq!(attr(&id, "aws.credentials_source"), Some("sso"));
+    }
+
+    /// The case this gate exists for: a developer whose `[default]` names an
+    /// account, with no login to it, was reported as acting in that account
+    /// on every event.
+    #[test]
+    fn a_configured_profile_without_a_login_is_not_an_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        for logins in [
+            // never logged in
+            &[][..],
+            // logged in, and it lapsed
+            &[("https://acme.awsapps.com/start", "2026-10-12T11:59:59Z")][..],
+            // logged in, to a different start URL
+            &[("https://other.awsapps.com/start", "2026-10-12T20:00:00Z")][..],
+        ] {
+            let dir = tempfile::tempdir_in(dir.path()).unwrap();
+            let mut id = CloudIdentity::default();
+            enrich_aws_only(&mut id, dir.path(), logins);
+            assert!(id.is_empty(), "{logins:?} -> {:?}", id.attributes);
+        }
+        // `staging` assumes a role through no login this module can see.
+        let mut id = ids(&[("AWS_PROFILE", "staging")]);
+        enrich_aws_only(
+            &mut id,
+            dir.path(),
+            &[("https://acme.awsapps.com/start", "2026-10-12T20:00:00Z")],
+        );
+        assert_eq!(
+            id.attributes.len(),
+            1,
+            "only the variable itself: {:?}",
+            id.attributes
+        );
+    }
+
+    #[test]
+    fn a_named_credential_process_profile_is_reported_as_such() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut id = ids(&[("AWS_PROFILE", "vaulted")]);
+        enrich_aws_only(&mut id, dir.path(), &[]);
+        assert_eq!(
+            attr(&id, "aws.credentials_source"),
+            Some("credential_process")
+        );
+        assert_eq!(attr(&id, "aws.account_id"), Some("555555555555"));
+        assert_eq!(attr(&id, "aws.credentials_expire_at"), None);
+
+        // The same profile as `[default]` names nobody's choice, so it is not.
+        let config = config_file(
+            dir.path(),
+            "[default]\ncredential_process = aws-vault export --format=json vaulted\n\
+             sso_account_id = 555555555555\n",
+        );
+        let mut id = CloudIdentity::default();
+        enrich_from_files(&mut id, Some(&config), None, None, now());
+        assert!(id.is_empty(), "{:?}", id.attributes);
+    }
+
+    #[test]
+    fn a_command_names_the_profile_it_asked_for() {
+        use ProfileVia::*;
+        let p = |c: &str| command_profiles(c);
+        let one = |name: &str, via| vec![(name.to_string(), via)];
+        assert_eq!(p("aws s3 ls --profile prod"), one("prod", Explicit));
+        assert_eq!(
+            p("/usr/local/bin/aws --profile=prod sts get-caller-identity"),
+            one("prod", Explicit)
+        );
+        assert_eq!(p("aws-vault exec prod -- aws s3 ls"), one("prod", Explicit));
+        assert_eq!(
+            p("aws-vault exec --duration 1h prod -- terraform plan"),
+            one("prod", Explicit)
+        );
+        assert_eq!(
+            p("aws-vault --backend file exec -d=2h prod"),
+            one("prod", Explicit)
+        );
+        assert_eq!(p("AWS_PROFILE=prod terraform apply"), one("prod", Variable));
+        assert_eq!(
+            p("export AWS_PROFILE=prod && aws s3 ls"),
+            one("prod", Variable)
+        );
+        assert_eq!(
+            p("cd infra && 'AWS_PROFILE=prod' aws s3 ls"),
+            one("prod", Variable)
+        );
+        assert_eq!(
+            p("aws-vault exec prod -- aws s3 ls --profile staging"),
+            vec![("prod".into(), Explicit), ("staging".into(), Explicit)]
+        );
+        // Words, not selections.
+        for c in [
+            "aws s3 ls",
+            "echo --profile prod",
+            "grep AWS_PROFILE=prod .envrc",
+            "aws-vault list",
+            "aws --profile",
+            "AWS_PROFILE= aws s3 ls",
+        ] {
+            assert_eq!(p(c), vec![], "{c}");
+        }
+    }
+
+    #[test]
+    fn the_command_profile_replaces_the_environments() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config_file(dir.path(), SHARED_CONFIG);
+        let cmds = |c: &str| vec![c.to_string()];
+
+        // Env keys for staging, and a call that asked for prod instead.
+        let mut id = ids(&[
+            ("AWS_VAULT", "staging"),
+            ("AWS_ACCESS_KEY_ID", "ASIAIOSFODNN7EXAMPLE"),
+            ("AWS_SECRET_ACCESS_KEY", "wJalrXUtnFEMI"),
+        ]);
+        enrich_from_files(&mut id, Some(&config), None, None, now());
+        apply_command_profiles_from(&mut id, &cmds("aws --profile prod s3 ls"), &config);
+        assert_eq!(attr(&id, "aws.credentials_source"), Some("command"));
+        assert_eq!(attr(&id, "aws.profile"), Some("prod"));
+        assert_eq!(attr(&id, "aws.account_id"), Some("123456789012"));
+        assert_eq!(
+            attr(&id, "aws.access_key_id"),
+            None,
+            "staging's key: {:?}",
+            id.attributes
+        );
+        // The secret's name stays: it was still in scope.
+        assert!(
+            id.credentials
+                .contains(&"AWS_SECRET_ACCESS_KEY".to_string())
+        );
+
+        // `AWS_PROFILE=` loses to env keys in the SDK, so it loses here.
+        let mut id = ids(&[
+            ("AWS_ACCESS_KEY_ID", "ASIAIOSFODNN7EXAMPLE"),
+            ("AWS_SECRET_ACCESS_KEY", "wJalrXUtnFEMI"),
+        ]);
+        enrich_from_files(&mut id, Some(&config), None, None, now());
+        apply_command_profiles_from(&mut id, &cmds("AWS_PROFILE=prod aws s3 ls"), &config);
+        assert_eq!(attr(&id, "aws.credentials_source"), Some("env"));
+
+        // …but wins over a profile that was only configured.
+        let mut id = CloudIdentity::default();
+        apply_command_profiles_from(
+            &mut id,
+            &cmds("AWS_PROFILE=vaulted terraform plan"),
+            &config,
+        );
+        assert_eq!(attr(&id, "aws.account_id"), Some("555555555555"));
+        assert_eq!(attr(&id, "aws.region"), Some("eu-central-2"));
+
+        // Two profiles: both named, neither resolved.
+        let mut id = CloudIdentity::default();
+        apply_command_profiles_from(
+            &mut id,
+            &cmds("aws-vault exec prod -- aws s3 ls --profile staging"),
+            &config,
+        );
+        assert_eq!(attr(&id, "aws.profile"), Some("prod,staging"));
+        assert_eq!(attr(&id, "aws.account_id"), None);
+
+        // No profile in the command: the environment's identity stands.
+        let mut id = ids(&[("AWS_REGION", "eu-west-1")]);
+        apply_command_profiles_from(&mut id, &cmds("aws s3 ls"), &config);
+        assert_eq!(id, ids(&[("AWS_REGION", "eu-west-1")]));
+    }
+
+    #[test]
+    fn the_sso_token_stays_in_the_cache_it_came_from() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut id = ids(&[("AWS_PROFILE", "prod")]);
+        enrich_aws_only(
+            &mut id,
+            dir.path(),
+            &[("https://prod.awsapps.com/start", "2026-10-12T20:00:00Z")],
+        );
+        let rendered = serde_json::to_string(&id).unwrap();
+        for leaked in [
+            SSO_ACCESS_TOKEN,
+            "aorAAAAAGrefresh-EXAMPLE",
+            "client-secret-EXAMPLE",
+        ] {
+            assert!(
+                !rendered.contains(leaked),
+                "{leaked} reached the wire: {rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn aws_vault_keys_are_working_until_they_expire() {
+        let vault = |expires: &str| {
+            ids(&[
+                ("AWS_VAULT", "staging"),
+                ("AWS_ACCESS_KEY_ID", "ASIAIOSFODNN7EXAMPLE"),
+                ("AWS_SECRET_ACCESS_KEY", "wJalrXUtnFEMI"),
+                ("AWS_SESSION_TOKEN", "FwoGZXIvYXdzEDESAMPLE"),
+                ("AWS_CREDENTIAL_EXPIRATION", expires),
+            ])
+        };
+        let dir = tempfile::tempdir().unwrap();
+
+        let mut id = vault("2026-10-12T12:30:00Z");
+        enrich_aws_only(&mut id, dir.path(), &[]);
+        assert_eq!(attr(&id, "aws.credentials_source"), Some("env"));
+        // The profile aws-vault named says which role the keys belong to.
+        assert_eq!(
+            attr(&id, "aws.role_arn"),
+            Some("arn:aws:iam::999999999999:role/staging")
+        );
+        assert_eq!(
+            attr(&id, "aws.credentials_expire_at"),
+            Some("2026-10-12T12:30:00Z")
+        );
+
+        let mut id = vault("2026-10-12T11:30:00Z");
+        enrich_aws_only(&mut id, dir.path(), &[]);
+        assert_eq!(
+            attr(&id, "aws.credentials_source"),
+            None,
+            "{:?}",
+            id.attributes
+        );
+        assert_eq!(
+            attr(&id, "aws.role_arn"),
+            None,
+            "a lapsed session's role: {:?}",
+            id.attributes
+        );
+    }
+
+    #[test]
+    fn env_keys_do_not_borrow_the_default_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut id = ids(&[
+            ("AWS_ACCESS_KEY_ID", "AKIAIOSFODNN7EXAMPLE"),
+            ("AWS_SECRET_ACCESS_KEY", "wJalrXUtnFEMI"),
+        ]);
+        // A live `[default]` login too: the SDK still signs with the env keys.
+        enrich_aws_only(
+            &mut id,
+            dir.path(),
+            &[("https://acme.awsapps.com/start", "2026-10-12T20:00:00Z")],
+        );
+        assert_eq!(attr(&id, "aws.credentials_source"), Some("env"));
+        assert_eq!(attr(&id, "aws.region"), None, "{:?}", id.attributes);
+    }
+
+    #[test]
+    fn an_expiry_in_either_spelling_parses() {
+        let want: DateTime<Utc> = "2019-01-01T00:00:00Z".parse().unwrap();
+        assert_eq!(parse_expiry("2019-01-01T00:00:00Z"), Some(want));
+        assert_eq!(parse_expiry("2019-01-01T00:00:00UTC"), Some(want));
+        assert_eq!(parse_expiry("2019-01-01T01:00:00+01:00"), Some(want));
+        assert_eq!(parse_expiry("next tuesday"), None);
     }
 
     #[test]
@@ -708,7 +1367,11 @@ role_arn = arn:aws:iam::999999999999:role/staging
                 "arn:aws:iam::123456789012:role/actually-assumed",
             ),
         ]);
-        enrich_from_files(&mut id, Some(&config_file(dir.path(), SHARED_CONFIG)), None);
+        enrich_aws_only(
+            &mut id,
+            dir.path(),
+            &[("https://prod.awsapps.com/start", "2026-10-12T20:00:00Z")],
+        );
         assert_eq!(
             id.attributes.get("aws.role_arn").map(String::as_str),
             Some("arn:aws:iam::123456789012:role/actually-assumed"),
@@ -737,7 +1400,7 @@ role_arn = arn:aws:iam::999999999999:role/staging
         std::fs::write(&path, &adc).unwrap();
 
         let mut id = CloudIdentity::default();
-        enrich_from_files(&mut id, None, Some(&path));
+        enrich_from_files(&mut id, None, None, Some(&path), now());
         assert_eq!(
             id.attributes.get("gcp.account").map(String::as_str),
             Some("agent@acme-prod.iam.gserviceaccount.com")
@@ -776,27 +1439,52 @@ role_arn = arn:aws:iam::999999999999:role/staging
         enrich_from_files(
             &mut id,
             Some(&dir.path().join("no-such-config")),
+            Some(&dir.path().join("no-such-sso-cache")),
             Some(&dir.path().join("no-such-adc.json")),
+            now(),
         );
         assert!(id.is_empty(), "{id:?}");
 
         // A file far past the cap is read only up to it — a role hiding beyond
         // that boundary is a missing attribute, never an unbounded read.
-        let mut huge = "[default]\n".to_string();
+        let mut huge = "[default]\nsso_start_url = https://acme.awsapps.com/start\n".to_string();
         while huge.len() < (MAX_IDENTITY_FILE_BYTES as usize) + 4096 {
             huge.push_str("# padding padding padding padding padding padding\n");
         }
         huge.push_str("role_arn = arn:aws:iam::123456789012:role/beyond-the-cap\n");
         let mut id = CloudIdentity::default();
-        enrich_from_files(&mut id, Some(&config_file(dir.path(), &huge)), None);
-        assert!(id.is_empty(), "read past the cap: {id:?}");
+        let cache = sso_cache(
+            dir.path(),
+            &[("https://acme.awsapps.com/start", "2026-10-12T20:00:00Z")],
+        );
+        enrich_from_files(
+            &mut id,
+            Some(&config_file(dir.path(), &huge)),
+            Some(&cache),
+            None,
+            now(),
+        );
+        assert_eq!(attr(&id, "aws.credentials_source"), Some("sso"), "{id:?}");
+        assert_eq!(attr(&id, "aws.role_arn"), None, "read past the cap: {id:?}");
 
         // Not JSON at all, and not even UTF-8.
         let path = dir.path().join("junk.json");
         std::fs::write(&path, [0xff, 0xfe, 0x00, 0x01]).unwrap();
         let mut id = CloudIdentity::default();
-        enrich_from_files(&mut id, None, Some(&path));
+        enrich_from_files(&mut id, None, None, Some(&path), now());
         assert!(id.is_empty(), "{id:?}");
+        // …and the same junk where an SSO login should be.
+        std::fs::write(dir.path().join("sso-cache").join("junk.json"), [0xff, 0xfe]).unwrap();
+        let mut id = CloudIdentity::default();
+        let config = config_file(dir.path(), SHARED_CONFIG);
+        enrich_from_files(
+            &mut id,
+            Some(&config),
+            Some(&dir.path().join("sso-cache")),
+            None,
+            now(),
+        );
+        assert_eq!(attr(&id, "aws.credentials_source"), Some("sso"), "{id:?}");
     }
 
     #[test]
@@ -805,14 +1493,32 @@ role_arn = arn:aws:iam::999999999999:role/staging
         std::fs::create_dir_all(dir.path().join(".aws")).unwrap();
         std::fs::write(
             dir.path().join(".aws").join("config"),
-            "[default]\nrole_arn = arn:aws:iam::123456789012:role/from-the-home-directory\n",
+            "[default]\nrole_arn = arn:aws:iam::123456789012:role/from-the-home-directory\n\
+             sso_start_url = https://home.awsapps.com/start\n",
+        )
+        .unwrap();
+        let cache = dir.path().join(".aws").join("sso").join("cache");
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(
+            cache.join("home.json"),
+            r#"{"startUrl":"https://home.awsapps.com/start","expiresAt":"2099-01-01T00:00:00Z"}"#,
         )
         .unwrap();
         unsafe {
             std::env::set_var("ARGUS_HOME", dir.path());
-            std::env::remove_var("AWS_CONFIG_FILE");
-            std::env::remove_var("AWS_PROFILE");
-            std::env::remove_var("AWS_ROLE_ARN");
+            for var in [
+                "AWS_CONFIG_FILE",
+                "AWS_PROFILE",
+                "AWS_DEFAULT_PROFILE",
+                "AWS_VAULT",
+                "AWS_ROLE_ARN",
+                "AWS_ACCESS_KEY_ID",
+                "AWS_WEB_IDENTITY_TOKEN_FILE",
+                "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+                "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+            ] {
+                std::env::remove_var(var);
+            }
         }
         let id = current();
         unsafe {

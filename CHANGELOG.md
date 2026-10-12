@@ -5,6 +5,45 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-10-12
+
+Cloud identity that means something. An AWS account on an event now says the
+agent held a credential to it, not that a profile somewhere named it.
+
+### ⚠️ Behavior change
+* **cloudid:** settings read from `~/.aws/config` (`aws.account_id`,
+  `aws.role_arn`, `aws.sso_role_name`, `aws.region`, …) are reported only
+  beside a credential argus can confirm. A `[default]` profile with no live
+  login no longer puts its account on every event. Dashboards grouping on
+  `cloud.aws.account_id` will see fewer, truer rows; filter on
+  `cloud.aws.credentials_source` to tell how each was established.
+
+### ✨ Features
+* **cloudid:** `aws.credentials_source` — `env` (access key + secret in scope,
+  e.g. `aws-vault exec`), `web_identity`, `container`, `sso` (an unexpired
+  login in `~/.aws/sso/cache` for the profile's start URL), `credential_process`
+  (a profile the environment named that mints keys on demand, e.g.
+  `aws-vault export`; never `[default]`), or `command`.
+* **cloudid:** `aws.credentials_expire_at` — when the credential lapses, from
+  `AWS_CREDENTIAL_EXPIRATION` / `AWS_SESSION_EXPIRATION` or the SSO cache.
+  Env keys past it are not reported as working.
+* **cloudid:** `AWS_VAULT` names the profile, so `aws-vault exec prod` resolves
+  prod's role and account.
+* **cloudid:** the profile a tool call's command asked for — `aws --profile X`,
+  `aws-vault exec|export|login X`, `AWS_PROFILE=X …` — replaces the
+  environment's AWS identity for that event (`credentials_source = command`).
+  This is the only signal for aws-vault-managed and `credential_process`
+  credentials the agent did not inherit. Several profiles in one command are
+  all named and none resolved.
+* **plugins:** opencode and pi apply the same rules, and recompute their
+  cached identity once the credential it found expires.
+
+### 🔒 Security
+* SSO cache entries are parsed for `startUrl` and `expiresAt` only; access and
+  refresh tokens are skipped by the parser and never become a value.
+
+**Full Changelog**: https://github.com/boogy/argus/compare/v0.5.2...v0.6.0
+
 ## [0.5.2] - 2026-10-09
 
 Coexistence. Codex's `notify` takes a single program, and argus no longer
