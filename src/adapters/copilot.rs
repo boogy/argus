@@ -264,6 +264,7 @@ mod tests {
 
     fn env(event: &str, payload: serde_json::Value) -> Envelope {
         Envelope {
+            ai_env: Default::default(),
             env_overrides: Vec::new(),
             cloud_identity: Default::default(),
             source: "copilot".into(),
@@ -667,6 +668,7 @@ mod tests {
     #[test]
     fn pascal_case_payload_without_event_hint_still_parses() {
         let envp = Envelope {
+            ai_env: Default::default(),
             env_overrides: Vec::new(),
             cloud_identity: Default::default(),
             source: "copilot".into(),

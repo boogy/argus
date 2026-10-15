@@ -1,4 +1,5 @@
 pub mod adapters;
+pub mod aiid;
 pub mod buffer;
 pub mod cloudid;
 pub mod config;

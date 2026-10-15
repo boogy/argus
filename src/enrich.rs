@@ -44,6 +44,7 @@ pub fn enrich(
             // the one field in the event nobody looked at.
             crate::filecap::capture(&mut e, capture, paths);
             resolve_mcp_endpoint(&mut e, redactor, capture);
+            crate::aiid::resolve(&mut e.meta.ai_identity);
             crate::adapters::cap_event(redactor.scrub_event(e), capture)
         })
         .collect()
@@ -132,6 +133,7 @@ mod tests {
 
     fn prompt_through_pipeline(text: &str, capture: &CaptureCfg) -> String {
         let envelope = Envelope {
+            ai_env: Default::default(),
             env_overrides: Vec::new(),
             cloud_identity: Default::default(),
             source: "claude-code".into(),
@@ -230,6 +232,7 @@ mod tests {
         let mut capture = capture(65536, TruncateMode::HeadTail);
         capture.file_contents.enabled = true;
         let envelope = Envelope {
+            ai_env: Default::default(),
             env_overrides: Vec::new(),
             cloud_identity: Default::default(),
             source: "claude-code".into(),
@@ -297,6 +300,7 @@ mod tests {
     /// resolves from is the one `harness::parse` really stamps.
     fn mcp_call_through_pipeline(dir: &tempfile::TempDir, capture: &CaptureCfg) -> Event {
         let envelope = Envelope {
+            ai_env: Default::default(),
             env_overrides: Vec::new(),
             cloud_identity: Default::default(),
             source: "claude-code".into(),

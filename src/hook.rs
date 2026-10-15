@@ -76,6 +76,9 @@ pub fn deliver(source: &str, event: Option<&str>, raw: &str, truncated: bool) {
     let payload =
         serde_json::from_str(raw).unwrap_or_else(|_| serde_json::Value::String(raw.to_string()));
     let envelope = Envelope {
+        // The config directory and the authentication switches of the
+        // agent. The daemon reads the account from disk. Refer to `aiid`.
+        ai_env: crate::aiid::env_hints(),
         // Read here because here is the only place it exists: this process was
         // spawned by the host agent and holds the agent's environment, where
         // the daemon holds whoever started the daemon. Collected
@@ -205,6 +208,7 @@ mod tests {
         }
 
         let envelope = Envelope {
+            ai_env: Default::default(),
             env_overrides: Vec::new(),
             cloud_identity: Default::default(),
             source: "claude-code".to_string(),

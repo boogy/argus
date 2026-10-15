@@ -1988,6 +1988,7 @@ pub fn parse(envelope: Envelope, capture: &CaptureCfg) -> Vec<Event> {
     let (truncated, dropped) = (envelope.truncated, envelope.dropped);
     let source = envelope.source.clone();
     let env_overrides = envelope.env_overrides.clone();
+    let ai_env = envelope.ai_env.clone();
     // Policy is applied here rather than in the shim: the shim reads no config
     // and reinstalling on every host is not how a fleet turns a capture off.
     let cloud_identity = if capture.cloud_identity {
@@ -2070,6 +2071,15 @@ pub fn parse(envelope: Envelope, capture: &CaptureCfg) -> Vec<Event> {
         // a capture policy that could switch it off would be a capture policy
         // the redirect could switch off.
         e.meta.env_overrides = env_overrides.clone();
+        // Only a session start gets an identity. This step uses only the
+        // environment. `enrich` reads the file on the blocking pool.
+        if capture.ai_identity
+            && let crate::event::EventKind::Session { action, .. } = &e.kind
+            && let Some(id) =
+                crate::aiid::at_session_start(&e.source, action, &ai_env, &crate::install::home())
+        {
+            e.meta.ai_identity = id;
+        }
     }
     events
 }
@@ -2839,6 +2849,7 @@ mod tests {
     #[test]
     fn an_override_in_the_agents_environment_reaches_every_event_it_produced() {
         let env = Envelope {
+            ai_env: Default::default(),
             env_overrides: vec!["ARGUS_DATA_DIR".into()],
             cloud_identity: Default::default(),
             source: "claude-code".into(),
@@ -2869,6 +2880,7 @@ mod tests {
     #[test]
     fn a_truncated_payload_announces_itself_ahead_of_the_event_it_spoils() {
         let mut env = Envelope {
+            ai_env: Default::default(),
             env_overrides: Vec::new(),
             cloud_identity: Default::default(),
             source: "claude-code".into(),
@@ -2919,6 +2931,7 @@ mod tests {
     #[test]
     fn an_mcp_call_carries_the_server_it_went_to() {
         let env = |source: &str, payload: serde_json::Value| Envelope {
+            ai_env: Default::default(),
             env_overrides: Vec::new(),
             cloud_identity: Default::default(),
             source: source.into(),
@@ -2976,6 +2989,7 @@ mod tests {
     #[test]
     fn a_spool_trim_becomes_a_gap_the_collector_can_see() {
         let mut env = Envelope {
+            ai_env: Default::default(),
             env_overrides: Vec::new(),
             cloud_identity: Default::default(),
             source: "claude-code".into(),
@@ -3012,9 +3026,46 @@ mod tests {
     /// config question, and config lives in the daemon — so a fleet that does
     /// not want it turns one key off centrally rather than reinstalling the
     /// hooks on every host.
+    /// The shim sends the config directory of the agent. `enrich` reads the
+    /// account from it. Only a session start gets an identity.
+    #[test]
+    fn a_session_start_gets_the_location_of_its_account() {
+        let mut ai_env = std::collections::BTreeMap::new();
+        ai_env.insert("CLAUDE_CONFIG_DIR".to_string(), "/cfg".to_string());
+        let env = |hook: &str| Envelope {
+            ai_env: ai_env.clone(),
+            env_overrides: Vec::new(),
+            cloud_identity: Default::default(),
+            source: "claude-code".into(),
+            received_at: chrono::Utc::now(),
+            truncated: false,
+            dropped: 0,
+            event: None,
+            payload: serde_json::json!({"hook_event_name": hook, "session_id": "s1", "prompt": "hi"}),
+        };
+        let start = parse(env("SessionStart"), &CaptureCfg::default());
+        assert_eq!(
+            start[0].meta.ai_identity.pending,
+            Some(crate::aiid::Pending::Claude("/cfg/.claude.json".into()))
+        );
+        let prompt = parse(env("UserPromptSubmit"), &CaptureCfg::default());
+        assert!(prompt[0].meta.ai_identity.is_empty());
+        let off = CaptureCfg {
+            ai_identity: false,
+            ..CaptureCfg::default()
+        };
+        assert!(
+            parse(env("SessionStart"), &off)[0]
+                .meta
+                .ai_identity
+                .is_empty()
+        );
+    }
+
     #[test]
     fn a_fleet_that_declines_cloud_identity_gets_none_of_it() {
         let env = Envelope {
+            ai_env: Default::default(),
             env_overrides: Vec::new(),
             cloud_identity: crate::cloudid::from_vars([
                 ("AWS_ROLE_ARN", "arn:aws:iam::123456789012:role/prod-admin"),
@@ -3070,6 +3121,7 @@ mod tests {
     #[test]
     fn a_tool_call_carries_the_aws_profile_its_command_named() {
         let env = |payload| Envelope {
+            ai_env: Default::default(),
             env_overrides: Vec::new(),
             cloud_identity: crate::cloudid::from_vars([
                 ("AWS_PROFILE", "dev"),
@@ -3129,6 +3181,7 @@ mod tests {
     #[test]
     fn a_cut_payload_that_also_trimmed_the_spool_reports_both() {
         let env = Envelope {
+            ai_env: Default::default(),
             env_overrides: Vec::new(),
             cloud_identity: Default::default(),
             source: "claude-code".into(),

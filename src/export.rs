@@ -136,6 +136,23 @@ fn record(e: &Event) -> Value {
             &e.cloud_identity.credentials.join(","),
         ));
     }
+    // Attributes, for the same reason as the cloud identity: a SIEM query
+    // filters the sessions by account. The `ai.` prefix prevents a collision
+    // with a resource attribute.
+    let ai = &e.meta.ai_identity;
+    for (k, v) in [
+        ("ai.account.email", &ai.email),
+        ("ai.account.id", &ai.account_id),
+        ("ai.account.login", &ai.login),
+        ("ai.account.host", &ai.host),
+        ("ai.org.id", &ai.org_id),
+        ("ai.org.name", &ai.org_name),
+        ("ai.auth_mode", &ai.auth_mode),
+    ] {
+        if let Some(v) = v {
+            attrs.push(attr(k, v));
+        }
+    }
     let event_type = match &e.kind {
         EventKind::Prompt { .. } => "prompt",
         EventKind::PromptTransformed {
@@ -847,6 +864,53 @@ mod tests {
                 "a credential value was exported to the collector"
             );
         }
+    }
+
+    /// A SIEM must find all sessions of an account with an attribute
+    /// filter, not with a full-text search.
+    #[test]
+    fn the_ai_account_is_an_attribute() {
+        let mut e = Event::new(
+            "claude-code",
+            Some("s1".into()),
+            None,
+            EventKind::Session {
+                action: "SessionStart".into(),
+                detail: serde_json::Value::Null,
+            },
+        );
+        e.meta.ai_identity = crate::aiid::AiIdentity {
+            email: Some("john.doe@example.com".into()),
+            account_id: Some("acc".into()),
+            org_id: Some("org".into()),
+            org_name: Some("Example Corp".into()),
+            auth_mode: Some("oauth".into()),
+            ..Default::default()
+        };
+        let body = to_otlp_body(std::slice::from_ref(&e), &Resource::default());
+        let attrs = body["resourceLogs"][0]["scopeLogs"][0]["logRecords"][0]["attributes"]
+            .as_array()
+            .unwrap()
+            .clone();
+        let get = |k: &str| {
+            attrs
+                .iter()
+                .find(|a| a["key"] == k)
+                .and_then(|a| a["value"]["stringValue"].as_str().map(String::from))
+        };
+        assert_eq!(
+            get("ai.account.email").as_deref(),
+            Some("john.doe@example.com")
+        );
+        assert_eq!(get("ai.account.id").as_deref(), Some("acc"));
+        assert_eq!(get("ai.org.id").as_deref(), Some("org"));
+        assert_eq!(get("ai.org.name").as_deref(), Some("Example Corp"));
+        assert_eq!(get("ai.auth_mode").as_deref(), Some("oauth"));
+        assert_eq!(
+            get("ai.account.login"),
+            None,
+            "argus exported an attribute that has no value"
+        );
     }
 
     /// An agent on a laptop with no cloud environment is the common case, and

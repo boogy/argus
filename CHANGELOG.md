@@ -5,6 +5,40 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-10-15
+
+The AI-provider account of the agent. An event now tells which Claude,
+Codex or Copilot account the agent used, not only which OS user ran it.
+
+### ✨ Features
+* **aiid:** Claude Code `SessionStart` events have `ai.account.email`,
+  `ai.account.id`, `ai.org.id`, `ai.org.name` and `ai.auth_mode`. The daemon
+  reads them from `oauthAccount` in `.claude.json`, one time for each session.
+  argus uses `$CLAUDE_CONFIG_DIR` if the agent sets it.
+* **aiid:** `ai.auth_mode` is `oauth`, `api_key`, `bedrock`, `vertex` or
+  `foundry`. If a provider switch or an API key is set, the agent does not use
+  the login on disk. In this case, argus records only `ai.auth_mode`.
+* **codex:** all Codex OTLP events have `ai.account.email`, `ai.account.id`
+  and `ai.auth_mode`, from the attributes that Codex sends. argus reads no
+  Codex file.
+* **copilot:** Copilot CLI `sessionStart` events have `ai.account.login` and
+  `ai.account.host`, from `last_logged_in_user` in `config.json`.
+* **config:** `capture.ai_identity` turns this off. The default is on.
+
+### 🔒 Security
+* The shim sends `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` and
+  `CLAUDE_CODE_OAUTH_TOKEN` to the daemon as `"set"` only. It does not send
+  their values.
+* argus does not read `~/.codex/auth.json`, or the opencode and pi auth files.
+  These files contain tokens.
+
+### Known limits
+* Codex sends no organization.
+* A Codex session with only a `--project` or `--managed` install sends no
+  OTLP. Thus it has no identity.
+
+**Full Changelog**: https://github.com/boogy/argus/compare/v0.6.0...v0.7.0
+
 ## [0.6.0] - 2026-10-12
 
 Cloud identity that means something. An AWS account on an event now says the
