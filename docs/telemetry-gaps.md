@@ -368,6 +368,15 @@ in `body`), and parent PID/tty for correlating simultaneous sessions.
 the per-event process spawn behind `host`/`username` is gone. Tool
 version, monitor version in the body, and PID/tty remain open.
 
+argus records the AI-provider account as `ai.*` attributes for Claude Code,
+Codex and Copilot. Refer to [AI account identity](capture.md#ai-account-identity).
+These gaps stay open:
+
+- opencode and pi. Each tool keeps its identity in the same file as its tokens.
+- The Codex organization. It is only in the `id_token`.
+- Codex sessions with only a `--project` or `--managed` install. These
+  installs do not configure the OTLP stream.
+
 ### 15. Codex OTLP: unmapped event names land in `raw`
 
 Only `codex.user_prompt`, `codex.tool_decision`, `codex.tool_result`,

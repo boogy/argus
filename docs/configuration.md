@@ -220,6 +220,7 @@ optional; unset keys keep their default.
 | `capture.truncate_mode`      | `head`      | What survives the cap: `head`, `head_tail`, or `drop`. See [notes](#notes-on-specific-keys).                                                                                                      |
 | `capture.file_contents.*`    | off         | Capture the contents of files a tool touched. Off by default — see [File-content capture](capture.md#file-content-capture).                                                                       |
 | `capture.cloud_identity`     | `true`      | Record the agent's cloud identity (role, account, credentials in scope) as `cloud.*` attributes — see [Cloud identity](capture.md#cloud-identity). `false` → attribute omitted.                   |
+| `capture.ai_identity`        | `true`      | Record the AI-provider account of the agent as `ai.*` attributes. Refer to [AI account identity](capture.md#ai-account-identity). `false` → argus omits the attributes.                    |
 | `capture.mcp_endpoints`      | `false`     | Resolve MCP server names to their endpoint and export as `mcp.endpoint`. Off by default (those config files sit next to credentials) — see [Where the server is](capture.md#where-the-server-is). |
 
 ### `[redaction]`

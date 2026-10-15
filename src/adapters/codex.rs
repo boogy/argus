@@ -79,6 +79,19 @@ pub fn parse(env: &Envelope, capture: &CaptureCfg) -> Vec<Event> {
         ),
         turn_id: attr_str(&attrs, &["turn_id", "turn.id"]),
         model: attr_str(&attrs, &["model", "gen_ai.request.model"]),
+        // Codex sends the account on each log record. Thus argus does not
+        // read `auth.json`, which contains the tokens. With an API key, Codex
+        // sends only `auth_mode`.
+        ai_identity: if capture.ai_identity {
+            crate::aiid::AiIdentity {
+                email: attr_str(&attrs, &["user.email"]),
+                account_id: attr_str(&attrs, &["user.account_id"]),
+                auth_mode: attr_str(&attrs, &["auth_mode"]),
+                ..Default::default()
+            }
+        } else {
+            Default::default()
+        },
         ..Default::default()
     };
     let mk = |kind| {
@@ -413,6 +426,7 @@ async fn handle_conn_inner(mut stream: tokio::net::TcpStream, tx: Ingress, token
     if ok && let Ok(v) = serde_json::from_slice::<Value>(&buf[headers_end..body_end]) {
         for record in flatten_otlp_records(&v) {
             tx.send(Envelope {
+                ai_env: Default::default(),
                 // Empty, and it cannot be otherwise: this arrived over HTTP
                 // from Codex's own process, so the only environment reachable
                 // here is the daemon's — whoever started the daemon, not the
@@ -550,6 +564,7 @@ mod tests {
 
     fn env(payload: serde_json::Value) -> Envelope {
         Envelope {
+            ai_env: Default::default(),
             env_overrides: Vec::new(),
             cloud_identity: Default::default(),
             source: "codex".into(),
@@ -575,6 +590,32 @@ mod tests {
         assert!(matches!(&events[0].kind, EventKind::Prompt { text } if text == "fix the tests"));
         assert_eq!(events[0].meta.turn_id.as_deref(), Some("t1"));
         assert_eq!(events[0].meta.model.as_deref(), Some("gpt-5-codex"));
+    }
+
+    /// Codex sends the account on each record. argus must keep it.
+    #[test]
+    fn argus_keeps_the_codex_otlp_account_if_the_config_permits_it() {
+        let record = json!({
+            "event_name": "codex.conversation_starts",
+            "attributes": {"conversation.id": "c1", "user.email": "john.doe@example.com",
+                           "user.account_id": "acc-1", "auth_mode": "Chatgpt"}
+        });
+        let events = adapters::parse(env(record.clone()), &CaptureCfg::default());
+        let id = &events[0].meta.ai_identity;
+        assert_eq!(id.email.as_deref(), Some("john.doe@example.com"));
+        assert_eq!(id.account_id.as_deref(), Some("acc-1"));
+        assert_eq!(id.auth_mode.as_deref(), Some("Chatgpt"));
+
+        let off = CaptureCfg {
+            ai_identity: false,
+            ..CaptureCfg::default()
+        };
+        assert!(
+            adapters::parse(env(record), &off)[0]
+                .meta
+                .ai_identity
+                .is_empty()
+        );
     }
 
     #[test]

@@ -54,6 +54,12 @@ pub struct Envelope {
     /// [`crate::paths::overrides_in_force`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub env_overrides: Vec<String>,
+    /// A small set of variables from the environment of the agent. They
+    /// tell where the account is and which authentication method the agent
+    /// uses. Refer to [`crate::aiid::env_hints`]. The shim reads them, for
+    /// the same reason as `cloud_identity`.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub ai_env: std::collections::BTreeMap<String, String>,
     pub payload: serde_json::Value,
 }
 
@@ -120,6 +126,9 @@ pub struct Meta {
     /// makes a non-empty one worth an alert.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub env_overrides: Vec<String>,
+    /// The AI-provider account of the agent. Refer to [`crate::aiid`].
+    #[serde(default, skip_serializing_if = "crate::aiid::AiIdentity::is_empty")]
+    pub ai_identity: crate::aiid::AiIdentity,
 }
 
 impl Meta {
@@ -855,6 +864,7 @@ mod tests {
     #[test]
     fn envelope_roundtrips() {
         let env = Envelope {
+            ai_env: Default::default(),
             env_overrides: Vec::new(),
             cloud_identity: Default::default(),
             source: "opencode".into(),

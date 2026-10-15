@@ -752,6 +752,7 @@ mod tests {
 
     fn envelope(n: u32) -> Envelope {
         Envelope {
+            ai_env: Default::default(),
             env_overrides: Vec::new(),
             cloud_identity: Default::default(),
             source: "claude-code".into(),

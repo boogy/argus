@@ -37,6 +37,8 @@ fn meta_of(p: &Value) -> Meta {
         mcp_server: None,
         // Resolved from config files in `enrich`, behind its own opt-in.
         mcp_endpoint: None,
+        // `enrich` reads it from disk at a session start. Refer to `crate::aiid`.
+        ai_identity: Default::default(),
     }
 }
 
@@ -378,6 +380,7 @@ mod tests {
 
     fn env(payload: serde_json::Value) -> Envelope {
         Envelope {
+            ai_env: Default::default(),
             env_overrides: Vec::new(),
             cloud_identity: Default::default(),
             source: "claude-code".into(),

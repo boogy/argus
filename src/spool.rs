@@ -255,6 +255,7 @@ mod tests {
     fn append_then_drain_returns_envelope_and_empties_spool() {
         let _dir = setup();
         let env = Envelope {
+            ai_env: Default::default(),
             env_overrides: Vec::new(),
             cloud_identity: Default::default(),
             source: "codex".into(),
@@ -280,6 +281,7 @@ mod tests {
     fn a_truncation_survives_the_spool() {
         let _dir = setup();
         let env = Envelope {
+            ai_env: Default::default(),
             env_overrides: Vec::new(),
             cloud_identity: Default::default(),
             source: "codex".into(),
@@ -303,6 +305,7 @@ mod tests {
         let _dir = setup();
         for i in 0..5u32 {
             let env = Envelope {
+                ai_env: Default::default(),
                 env_overrides: Vec::new(),
                 cloud_identity: Default::default(),
                 source: "codex".into(),
@@ -339,6 +342,7 @@ mod tests {
         let _dir = setup();
         for i in 0..5u32 {
             let env = Envelope {
+                ai_env: Default::default(),
                 env_overrides: Vec::new(),
                 cloud_identity: Default::default(),
                 source: "codex".into(),
@@ -369,6 +373,7 @@ mod tests {
 
     fn env(n: u32) -> Envelope {
         Envelope {
+            ai_env: Default::default(),
             env_overrides: Vec::new(),
             cloud_identity: Default::default(),
             source: "codex".into(),
@@ -493,6 +498,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let _dir = setup();
         let env = Envelope {
+            ai_env: Default::default(),
             env_overrides: Vec::new(),
             cloud_identity: Default::default(),
             source: "codex".into(),

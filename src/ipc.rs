@@ -705,6 +705,7 @@ mod tests {
 
     fn envelope_of(text: &str) -> Envelope {
         Envelope {
+            ai_env: Default::default(),
             env_overrides: Vec::new(),
             cloud_identity: Default::default(),
             source: "claude-code".into(),
@@ -853,6 +854,7 @@ mod tests {
         tokio::spawn(listener.accept_loop(tx));
 
         let env = Envelope {
+            ai_env: Default::default(),
             env_overrides: Vec::new(),
             cloud_identity: Default::default(),
             source: "claude-code".into(),
@@ -893,6 +895,7 @@ mod tests {
         tokio::spawn(listener.accept_loop(tx));
 
         let env = Envelope {
+            ai_env: Default::default(),
             env_overrides: Vec::new(),
             cloud_identity: Default::default(),
             source: "claude-code".into(),
@@ -947,6 +950,7 @@ mod tests {
         PEAK_FRAME_BYTES.store(0, Relaxed);
 
         let env = Envelope {
+            ai_env: Default::default(),
             env_overrides: Vec::new(),
             cloud_identity: Default::default(),
             source: "claude-code".into(),
@@ -1012,6 +1016,7 @@ mod tests {
         tokio::spawn(listener.accept_loop(tx));
 
         let env = Envelope {
+            ai_env: Default::default(),
             env_overrides: Vec::new(),
             cloud_identity: Default::default(),
             source: "opencode".into(),

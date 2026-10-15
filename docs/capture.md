@@ -1,8 +1,9 @@
 # Capture and enrichment
 
-The four opt-in and always-on enrichment stages that turn a bare tool call
-into an investigable record: file contents, network connections, MCP server
-identity, and the cloud credentials the agent was holding.
+The opt-in and always-on enrichment stages that turn a bare tool call into an
+investigable record: file contents, network connections, MCP server identity,
+the cloud credentials the agent was holding, and the AI-provider account of
+the agent.
 
 ## File-content capture
 
@@ -334,6 +335,72 @@ identity attached, though the same session's hook events do carry one.
 Nothing can be inferred for the HTTP path without labelling an agent's
 telemetry with whatever credentials the daemon's own environment happens to
 hold — worse than the gap.
+
+## AI account identity
+
+argus records the AI-provider account of the agent. Use this data to find a
+session that uses a personal account or a personal API key. The default is on
+(`capture.ai_identity`).
+
+```
+ai.account.email  = john.doe@example.com
+ai.account.id     = 11111111-2222-…         (Claude account UUID, Codex account ID)
+ai.org.id         = 33333333-4444-…         (Claude only)
+ai.org.name       = Example Corp            (Claude only)
+ai.account.login  = johndoe                 (Copilot only)
+ai.account.host   = https://github.com      (Copilot only)
+ai.auth_mode      = oauth | api_key | bedrock | vertex | foundry   (Claude; Codex sends its own value)
+```
+
+| Tool        | Source                                                                                     | Events           |
+| ----------- | ------------------------------------------------------------------------------------------ | ---------------- |
+| Claude Code | `oauthAccount` in `$CLAUDE_CONFIG_DIR/.claude.json`. If the variable is not set, `~/.claude.json` | `SessionStart`   |
+| Codex       | The Codex OTLP attributes `user.email`, `user.account_id` and `auth_mode`. argus reads no file  | All OTLP events  |
+| Copilot CLI | `last_logged_in_user` in `$COPILOT_HOME/config.json`. If the variable is not set, `~/.copilot/config.json` | `sessionStart`   |
+
+Data that argus reads, and data that it does not read:
+
+- **Claude Code.** The daemon reads the file one time at each session start.
+  The hook shim does not read it, because the file can be large and the shim
+  has a 250 ms limit. The shim sends these variables to the daemon:
+  - The config-directory variable, with its value.
+  - The `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX` and
+    `CLAUDE_CODE_USE_FOUNDRY` switches, with their values.
+  - `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` and `CLAUDE_CODE_OAUTH_TOKEN`,
+    as `"set"` only. The shim does not send their values.
+
+  If a provider switch or an API key is set, the agent does not use the login
+  on disk. In this case, argus records only `ai.auth_mode`. The OAuth tokens
+  are in the OS keychain, not in this file.
+- **Codex.** argus copies the attributes from the Codex OTLP stream. A
+  `--project` or `--managed` install does not configure the OTLP stream. Thus
+  a session with only these installs has no identity. With an API key, Codex
+  sends only `auth_mode`. Codex sends no organization. The organization is
+  only in the `id_token` in `~/.codex/auth.json`. That file also contains the
+  access and refresh tokens, thus argus does not open it.
+- **Copilot CLI.** argus records the login and the host only. Copilot sends no
+  email and no organization. Copilot keeps its token in the keychain. If there
+  is no keychain, Copilot writes the token to `copilotTokens` in the same
+  file. argus reads the file, but it does not keep the token.
+- **opencode, pi.** argus does not record an account. Each tool keeps its
+  identity in the same file as its tokens. That identity is an OpenAI account
+  ID at most.
+
+To connect other events to the account, join them on `session.id`. This query
+shows each session and its account:
+
+```
+event.type="session" session.action IN ("SessionStart", "sessionStart", "start")
+| stats latest(ai.account.email) latest(ai.org.name) latest(ai.auth_mode) by source, session.id, host, username
+```
+
+This query shows Claude sessions outside the company organization, or with an
+API key:
+
+```
+event.type="session" session.action="SessionStart" source="claude-code"
+  (ai.org.id!="<your-org-uuid>" OR ai.auth_mode="api_key")
+```
 
 ---
 

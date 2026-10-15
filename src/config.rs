@@ -151,6 +151,11 @@ pub struct CaptureCfg {
     /// credentials. On, every MCP call and permission event also says whether
     /// the server is a local package or somebody else's HTTPS endpoint.
     pub mcp_endpoints: bool,
+    /// Record the AI-provider account of the agent. This is the Claude
+    /// account and organization, the Codex account, or the Copilot GitHub
+    /// login. Refer to [`crate::aiid`] for the data that argus reads. The
+    /// default is on, for the same reason as `cloud_identity`.
+    pub ai_identity: bool,
 }
 impl Default for CaptureCfg {
     fn default() -> Self {
@@ -164,6 +169,7 @@ impl Default for CaptureCfg {
             file_contents: FileContentsCfg::default(),
             cloud_identity: true,
             mcp_endpoints: false,
+            ai_identity: true,
         }
     }
 }
