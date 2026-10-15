@@ -49,7 +49,7 @@ async fn hook_event_flows_to_mock_collector() {
         false,
     );
 
-    let body = rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+    let body = batch_with(&rx, "api.internal.example.com");
     assert!(body.contains("api.internal.example.com"), "fqdn extracted");
     assert!(body.contains("tool.name"), "otlp attributes present");
     assert!(
@@ -69,7 +69,7 @@ async fn hook_event_flows_to_mock_collector() {
         false,
     );
 
-    let body = rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+    let body = batch_with(&rx, "api.copilot-test.example.com");
     assert!(
         body.contains("api.copilot-test.example.com"),
         "copilot fqdn extracted"
@@ -78,4 +78,21 @@ async fn hook_event_flows_to_mock_collector() {
         body.contains("\"tool_use\"") || body.contains("tool.name"),
         "copilot tool event exported"
     );
+}
+
+/// Returns the first exported batch that contains `needle`. The daemon also
+/// exports its own events, for example the health event at start. On a slow
+/// runner, such an event can go in a batch before the hook event arrives.
+/// Thus the test must not use only the first batch.
+fn batch_with(rx: &std::sync::mpsc::Receiver<String>, needle: &str) -> String {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        let body = rx
+            .recv_timeout(left)
+            .unwrap_or_else(|_| panic!("no batch contains {needle}"));
+        if body.contains(needle) {
+            return body;
+        }
+    }
 }
