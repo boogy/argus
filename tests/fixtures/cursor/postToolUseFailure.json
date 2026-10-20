@@ -1,0 +1,29 @@
+{
+  "source": "cursor",
+  "received_at": "2026-01-01T00:00:00Z",
+  "payload": {
+    "conversation_id": "conv-cursor-001",
+    "generation_id": "gen-cursor-001",
+    "model": "auto",
+    "cursor_version": "3.0.0",
+    "workspace_roots": [
+      "/Users/dev/project"
+    ],
+    "user_email": "john.doe@example.com",
+    "transcript_path": null,
+    "hook_event_name": "postToolUseFailure",
+    "tool_name": "Shell",
+    "tool_input": {
+      "command": "cargo test",
+      "cwd": "/Users/dev/project",
+      "timeout": 30000
+    },
+    "tool_use_id": "tool-002",
+    "cwd": "/Users/dev/project",
+    "error_message": "exit status 101",
+    "failure_type": "error",
+    "duration": 1800,
+    "is_interrupt": false,
+    "session_id": "conv-cursor-001"
+  }
+}

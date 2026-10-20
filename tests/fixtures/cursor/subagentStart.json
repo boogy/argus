@@ -1,0 +1,24 @@
+{
+  "source": "cursor",
+  "received_at": "2026-01-01T00:00:00Z",
+  "payload": {
+    "conversation_id": "conv-cursor-001",
+    "generation_id": "gen-cursor-001",
+    "model": "auto",
+    "cursor_version": "3.0.0",
+    "workspace_roots": [
+      "/Users/dev/project"
+    ],
+    "user_email": "john.doe@example.com",
+    "transcript_path": null,
+    "hook_event_name": "subagentStart",
+    "subagent_id": "sub-001",
+    "subagent_type": "explore",
+    "task": "Find the parser tests",
+    "parent_conversation_id": "conv-cursor-001",
+    "tool_call_id": "tool-003",
+    "subagent_model": "auto",
+    "is_parallel_worker": false,
+    "git_branch": "main"
+  }
+}

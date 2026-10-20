@@ -1,0 +1,18 @@
+{
+  "source": "cursor",
+  "received_at": "2026-01-01T00:00:00Z",
+  "payload": {
+    "conversation_id": "conv-cursor-001",
+    "generation_id": "gen-cursor-001",
+    "model": "auto",
+    "cursor_version": "3.0.0",
+    "workspace_roots": [
+      "/Users/dev/project"
+    ],
+    "user_email": "john.doe@example.com",
+    "transcript_path": null,
+    "hook_event_name": "beforeSubmitPrompt",
+    "prompt": "add a unit test for the parser",
+    "attachments": []
+  }
+}

@@ -16,7 +16,7 @@ they touch, which skills/subagents run — captured through each tool's native
 hook/plugin surface (no TLS proxying, no MITM) and exported as OTLP/JSON logs to
 any observability backend (Splunk, Datadog, Grafana, an OTel Collector, ...).
 
-Supports **Claude Code**, **opencode**, **OpenAI Codex**, **GitHub Copilot CLI**, and **pi**.
+Supports **Claude Code**, **opencode**, **OpenAI Codex**, **GitHub Copilot CLI**, **Cursor**, and **pi**.
 
 <p align="center">
   <img src="assets/pipeline.svg" alt="argus pipeline: coding agents emit through each tool's hook or plugin surface into the argus hook shim, which has a 250 ms budget and is the only part on the coding tool's critical path; it hands off to the argus daemon, which captures, redacts, buffers to SQLite with a spool fallback, and exports batched OTLP/JSON to an observability backend" width="900">
@@ -105,7 +105,7 @@ operating, extending). Individual pages:
 | Doc                                                                  | What's in it                                                                                        |
 | -------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
 | [Architecture](docs/architecture.md)                                 | Hook shim → daemon → buffer → export pipeline; the data directory.                                  |
-| [Per-tool fidelity](docs/tool-support.md)                            | Signal-by-signal comparison across all five host tools.                                             |
+| [Per-tool fidelity](docs/tool-support.md)                            | Signal-by-signal comparison across all six host tools.                                             |
 | [Configuration](docs/configuration.md)                               | Remote fleet config, the full `config.toml` key reference, environment variables.                   |
 | [Capture and enrichment](docs/capture.md)                            | File-content capture, network/FQDN extraction, MCP server identity, cloud identity.                 |
 | [Privacy and redaction](docs/privacy.md)                             | Built-in redaction, metadata-only mode, the un-redacted hand-off spool.                             |

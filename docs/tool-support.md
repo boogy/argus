@@ -3,30 +3,30 @@
 Each tool exposes a different amount of detail through its hook/plugin API;
 argus captures everything each surface offers.
 
-| Signal                        |        Claude Code         |       opencode        |          Codex          |        Copilot CLI        |          pi          |
-| ----------------------------- | :------------------------: | :-------------------: | :---------------------: | :-----------------------: | :------------------: |
-| Prompts                       |             Y              |           Y           |            Y            |             Y             |          Y           |
-| Prompt rewritten en route     |             —              |           —           |            —            | Y (userPromptTransformed) |          —           |
-| Assistant messages            |          Y (Stop)          |           Y           |      Y (Stop hook)      |     Y (subagent only)     |          —           |
-| Tool use (pre/post)           |             Y              |           Y           |            Y            |             Y             |          Y           |
-| Tool outputs                  |             Y              |           Y           |            Y            |             Y             |    Y (text parts)    |
-| Tool failures                 |             Y              |           —           | Y (post incl. non-zero) |             Y             |     Y (isError)      |
-| Call id (pairs pre with post) |             Y              |      Y (callID)       |       Y (call_id)       |       — (adjacency)       |          Y           |
-| Tool duration reported        |             Y              |           —           |     Y (duration_ms)     |             —             |          —           |
-| File paths touched            |             Y              |           Y           | Y (incl. shell patches) |             Y             |          Y           |
-| FQDNs + endpoints contacted   |             Y              |           Y           |            Y            |             Y             |          Y           |
-| Skill/command invocations     |             Y              | Y (command.executed)  |            —            |             —             |          —           |
-| Slash-command expansion       |     Y (expanded text)      |           —           |            —            |             —             |          —           |
-| Subagent runs                 |       Y (start+stop)       |           —           |            Y            |      Y (start+stop)       |          —           |
-| Permission requests           |     Y (request+denied)     |   Y (request+reply)   |  Y (decision recorded)  |             Y             |     — (no event)     |
-| Compaction                    | Y (pre+post, token counts) | Y (session.compacted) |            Y            |          Y (pre)          | Y (pre+post, before) |
-| Errors                        |      Y (StopFailure)       |   Y (session.error)   |            —            |     Y (errorOccurred)     |  Y (turn_end stop)   |
-| Config/instructions changes   |             Y              |           —           |            —            |             —             |          —           |
-| Directory scope changes       |        Y (/add-dir)        |           —           |            —            |             —             |          —           |
-| Session lifecycle             |             Y              |           Y           |            Y            |             Y             |          Y           |
-| Model, tokens, cost per turn  |             —              |  Y (message.updated)  |            —            |             —             |     Y (turn_end)     |
-| Interactive shells (pty)      |             —              |  Y (created+exited)   |            —            |             —             |  Y (user_bash `!`)   |
-| File contents                 |         Y (opt-in)         |      Y (opt-in)       |       Y (opt-in)        |        Y (opt-in)         |      Y (opt-in)      |
+| Signal                        |        Claude Code         |       opencode        |          Codex          |        Copilot CLI        |          pi          |         Cursor         |
+| ----------------------------- | :------------------------: | :-------------------: | :---------------------: | :-----------------------: | :------------------: | :--------------------: |
+| Prompts                       |             Y              |           Y           |            Y            |             Y             |          Y           |           Y            |
+| Prompt rewritten en route     |             —              |           —           |            —            | Y (userPromptTransformed) |          —           |           —            |
+| Assistant messages            |          Y (Stop)          |           Y           |      Y (Stop hook)      |     Y (subagent only)     |          —           | Y (afterAgentResponse) |
+| Tool use (pre/post)           |             Y              |           Y           |            Y            |             Y             |          Y           |           Y            |
+| Tool outputs                  |             Y              |           Y           |            Y            |             Y             |    Y (text parts)    |           Y            |
+| Tool failures                 |             Y              |           —           | Y (post incl. non-zero) |             Y             |     Y (isError)      | Y (postToolUseFailure) |
+| Call id (pairs pre with post) |             Y              |      Y (callID)       |       Y (call_id)       |       — (adjacency)       |          Y           |    Y (tool_use_id)     |
+| Tool duration reported        |             Y              |           —           |     Y (duration_ms)     |             —             |          —           |      Y (duration)      |
+| File paths touched            |             Y              |           Y           | Y (incl. shell patches) |             Y             |          Y           |           Y            |
+| FQDNs + endpoints contacted   |             Y              |           Y           |            Y            |             Y             |          Y           |           Y            |
+| Skill/command invocations     |             Y              | Y (command.executed)  |            —            |             —             |          —           |           —            |
+| Slash-command expansion       |     Y (expanded text)      |           —           |            —            |             —             |          —           |           —            |
+| Subagent runs                 |       Y (start+stop)       |           —           |            Y            |      Y (start+stop)       |          —           |     Y (start+stop)     |
+| Permission requests           |     Y (request+denied)     |   Y (request+reply)   |  Y (decision recorded)  |             Y             |     — (no event)     |           —            |
+| Compaction                    | Y (pre+post, token counts) | Y (session.compacted) |            Y            |          Y (pre)          | Y (pre+post, before) |        Y (pre)         |
+| Errors                        |      Y (StopFailure)       |   Y (session.error)   |            —            |     Y (errorOccurred)     |  Y (turn_end stop)   |           —            |
+| Config/instructions changes   |             Y              |           —           |            —            |             —             |          —           |           —            |
+| Directory scope changes       |        Y (/add-dir)        |           —           |            —            |             —             |          —           |           —            |
+| Session lifecycle             |             Y              |           Y           |            Y            |             Y             |          Y           |           Y            |
+| Model, tokens, cost per turn  |             —              |  Y (message.updated)  |            —            |             —             |     Y (turn_end)     | Y (stop, IDE, no cost) |
+| Interactive shells (pty)      |             —              |  Y (created+exited)   |            —            |             —             |  Y (user_bash `!`)   |           —            |
+| File contents                 |         Y (opt-in)         |      Y (opt-in)       |       Y (opt-in)        |        Y (opt-in)         |      Y (opt-in)      |       Y (opt-in)       |
 
 The notes below expand on the rows that need more than one word of context.
 
@@ -68,7 +68,7 @@ two events that happen to be adjacent.
   one subtracted from two timestamps stamped on either side of a socket; the
   other three surfaces report none, and argus does not invent one.
 
-**File contents** is uniform across all five tools because it is the one
+**File contents** is uniform across all six tools because it is the one
 feature that does not read a tool's vocabulary.
 
 - Enrichment runs on every tool event whatever produced it, and picks
@@ -114,6 +114,13 @@ part of its event a reviewer would actually look for:
   `capture.assistant_messages = false` apply to it like any other.
 - Copilot's `error.stack` is deliberately dropped: it is unbounded and
   describes the host tool's own file layout, not the session.
+
+**Cursor** is wired through one `hooks.json` that the IDE agent and the
+`agent` CLI both read. Its payloads carry `tool_use_id` and `duration`, so
+pre/post pairing and tool timing work. Each payload also carries the login
+email, and argus records it at `sessionStart`. `preCompact` is the only
+compaction event, so there is no post record. Some Cursor hooks are not
+wired; see [Cursor hooks not wired](telemetry-gaps.md#cursor-hooks-not-wired).
 
 **Codex** is wired two ways at once: its hooks system
 (`~/.codex/hooks.json`, Claude-compatible payloads, including `Stop` for turn

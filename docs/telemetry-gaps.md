@@ -426,6 +426,45 @@ day pairing stops being a guess; see #11 for what that leaves open.
   permission request on opencode arrived labelled `updated` and a query for
   requests matched nothing. `updated` now maps to `requested`.
 
+## Cursor hooks not wired
+
+Cursor is wired through `hooks.json`. These gaps are known.
+
+- **Tab completion.** `beforeTabFileRead` and `afterTabFileEdit` are not wired
+  by choice.
+- **Other events not wired.**
+  - `afterAgentThought`: it carries reasoning text and fires often.
+  - `beforeReadFile`: its payload has the full file content.
+  - `workspaceOpen`: it is not part of an agent session.
+  - `beforeShellExecution`, `afterShellExecution`, `beforeMCPExecution` and
+    `afterMCPExecution`: `preToolUse` and `postToolUse` already match the Shell
+    and MCP tools. If argus wired both, the IDE would record each call two
+    times.
+- **The `agent` CLI.** In a test with `agent -p` (v2026.10.16), the CLI fired
+  `sessionStart`, `preToolUse`, `postToolUse` and `sessionEnd`. It did not
+  fire `beforeSubmitPrompt`, `stop` or `afterAgentResponse`. A CLI session
+  therefore has no prompt and no assistant response.
+- **The IDE agent.** In a test with the IDE (v3.25.9), Cursor fired
+  `sessionStart`, `beforeSubmitPrompt`, `preToolUse`, `postToolUse`,
+  `afterAgentResponse` and `stop`. Two of three conversations had no
+  `sessionStart`.
+- **Token counts.** Only the IDE `stop` payload has token counts. argus records
+  them as a `Usage` event. Cursor sends no cost and no reasoning tokens, so
+  argus records 0 for them.
+- **Claude Code hooks.** Cursor also runs the hooks in
+  `~/.claude/settings.json`, and sends them Cursor payloads. argus drops a
+  `claude-code` event that has `cursor_version`, because the Cursor hooks
+  record the same event. On a host where only the Claude Code hooks are
+  wired, argus does not record these Cursor events.
+- **No repository.** The Agents window can run with no repository.
+  `workspace_roots` is then empty, so the events have no `cwd`. argus records
+  relative paths as unreadable.
+- **No managed-only switch.** Cursor runs the hooks of every layer
+  (enterprise, team, project and user). A managed install does not stop a
+  user's own hooks. Unit tests cover the managed install. We did not test it
+  live.
+- **Cloud and background agents.** They skip user hooks.
+
 ## Status
 
 Closed:

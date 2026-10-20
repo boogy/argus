@@ -1,0 +1,22 @@
+{
+  "source": "cursor",
+  "received_at": "2026-01-01T00:00:00Z",
+  "payload": {
+    "conversation_id": "conv-cursor-001",
+    "generation_id": "gen-cursor-001",
+    "model": "auto",
+    "cursor_version": "3.0.0",
+    "workspace_roots": [
+      "/Users/dev/project"
+    ],
+    "user_email": "john.doe@example.com",
+    "transcript_path": null,
+    "hook_event_name": "stop",
+    "status": "completed",
+    "loop_count": 0,
+    "input_tokens": 1200,
+    "output_tokens": 300,
+    "cache_read_tokens": 800,
+    "cache_write_tokens": 0
+  }
+}

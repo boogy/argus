@@ -227,7 +227,7 @@ behind them, without writing anything.
 
 | Signal       | What it reads                                                                                                                                                                                                  |
 | ------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `config dir` | `~/.claude`, `~/.codex`, `~/.copilot`, `~/.pi/agent`, `$XDG_CONFIG_HOME/opencode` (`%APPDATA%\opencode` on Windows), honouring `COPILOT_HOME`/`CODEX_HOME`                                                     |
+| `config dir` | `~/.claude`, `~/.codex`, `~/.copilot`, `~/.cursor`, `~/.pi/agent`, `$XDG_CONFIG_HOME/opencode` (`%APPDATA%\opencode` on Windows), honouring `COPILOT_HOME`/`CODEX_HOME`                                                     |
 | `binary`     | the tool's binary on `PATH` **and** in the per-user prefixes a hook's `PATH` often omits (`~/.local/bin`, `~/.npm-global/bin`, `%APPDATA%\npm`, scoop shims, …); on Windows the candidates come from `PATHEXT` |
 | `npm`        | that binary's real path resolving inside `node_modules/<package>/`                                                                                                                                             |
 | `brew`       | …or inside `Cellar/<formula>/`                                                                                                                                                                                 |
@@ -242,8 +242,8 @@ gets wired and then reported as broken forever.
 
 ## Repository-level wiring
 
-`argus install --project <dir>` writes `<dir>/.codex/hooks.json` and nothing
-else, so anyone running Codex inside that checkout is captured without a
+`argus install --project <dir>` writes `<dir>/.codex/hooks.json` and
+`<dir>/.cursor/hooks.json` and nothing else, so anyone running Codex or Cursor inside that checkout is captured without a
 per-machine hook install. `uninstall --project <dir>` reverses it, and
 `check --project <dir>` verifies it alongside the user-level wiring — a
 repository nothing wired is silent rather than broken.
@@ -261,10 +261,10 @@ Three things this is not:
   there, per user, via `/hooks`.
 - **Not enforcement.** Anyone who can push to the repository can also delete
   what it writes. It is a convenience for teams that already ship argus in
-  their image. Project hooks are additive in Codex, so this never competes
+  their image. Project hooks are additive in Codex and Cursor, so this never competes
   with a user-level install; the two both run.
 
-Only Codex is wired this way today. Claude Code has an equivalent project
+Only Codex and Cursor are wired this way today. Claude Code has an equivalent project
 layer (`<repo>/.claude/settings.json`) that is simply not wired yet;
 Copilot's hook file is a machine-level path with no repository equivalent,
 and the opencode plugin is loaded from the user's config directory, not
