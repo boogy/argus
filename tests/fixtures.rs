@@ -111,6 +111,7 @@ fn every_hook_we_parse_is_a_hook_we_subscribe_to() {
             "claude-code" => argus::harness::claude_code::EVENTS,
             "codex" => argus::harness::codex::EVENTS,
             "copilot" => argus::harness::copilot::EVENTS,
+            "cursor" => argus::harness::cursor::EVENTS,
             _ => &[],
         };
         events.iter().map(|e| e.name).collect()

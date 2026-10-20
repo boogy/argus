@@ -104,6 +104,7 @@ see [The policy the layer enforces](#the-policy-the-layer-enforces).
 | ----------- | ------------------------------------------ | ------------------- | ------------------------------ |
 | Claude Code | `/Library/Application Support/ClaudeCode/` | `/etc/claude-code/` | `C:\Program Files\ClaudeCode\` |
 | Codex       | `/etc/codex/`                              | `/etc/codex/`       | `C:\ProgramData\OpenAI\Codex\` |
+| Cursor      | `/Library/Application Support/Cursor/`     | `/etc/cursor/`      | `C:\ProgramData\Cursor\`      |
 
 Both were read out of the shipped binaries rather than from documentation.
 That's how these two surprises were found:
@@ -167,6 +168,12 @@ Two things are deliberately **not** written into Codex's managed layer:
 That gap is covered from the other side: `check` reports
 `[features] hooks = false` wherever someone sets it, machine-wide layer
 included.
+
+**Cursor** gets one file, `hooks.json`, in the enterprise path above. argus
+adds its flat entries and `version: 1`. Cursor runs the hooks of every layer
+(enterprise, team, project and user). It has no switch to run only managed
+hooks. A managed install does not stop a user's own hooks. Unit tests cover
+this install. It was not tested live.
 
 Copilot CLI, opencode and pi have no machine-wide layer wired: Copilot's hook
 file is already a per-user path with no administrator equivalent, and the

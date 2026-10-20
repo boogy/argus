@@ -633,8 +633,9 @@ mod tests {
 
         run_project(repo.path(), false).unwrap();
         let f = crate::harness::check_project(repo.path());
-        assert_eq!(f.len(), 1, "{f:?}");
+        assert_eq!(f.len(), 2, "{f:?}");
         assert!(f[0].ok && f[0].tool.contains("codex"), "{f:?}");
+        assert!(f[1].ok && f[1].tool.contains("cursor"), "{f:?}");
 
         // Same standard as the user-level check: stripping one event's wiring
         // is a finding, not a rounding error.
@@ -987,6 +988,106 @@ mod tests {
         }
         uninstall().unwrap();
         assert!(!path.exists());
+    }
+
+    /// Cursor has one `hooks.json` for argus and the user. Install adds flat
+    /// entries beside the user's own, and uninstall removes only argus's.
+    #[test]
+    fn cursor_hooks_merge_beside_the_users_own_and_uninstall_keeps_them() {
+        let home = fake_home();
+        std::fs::create_dir_all(home.path().join(".cursor")).unwrap();
+        let path = home.path().join(".cursor/hooks.json");
+        std::fs::write(
+            &path,
+            r#"{"version":1,"hooks":{"stop":[{"command":"./my-hook.sh"}]}}"#,
+        )
+        .unwrap();
+        fake_bin(home.path());
+        run(false).unwrap();
+        run(false).unwrap();
+
+        let doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(doc["version"], 1);
+        for ev in crate::harness::cursor::EVENTS {
+            let ours: Vec<_> = doc["hooks"][ev.name]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|h| h[crate::harness::MARKER_KEY] == true)
+                .collect();
+            assert_eq!(ours.len(), 1, "event {}", ev.name);
+            let cmd = ours[0]["command"].as_str().unwrap();
+            assert!(cmd.contains("hook --source cursor"), "{cmd}");
+            assert!(!cmd.contains("--event"), "{cmd}");
+            assert_eq!(ours[0]["timeout"], 10);
+        }
+        assert_eq!(doc["hooks"]["stop"][0]["command"], "./my-hook.sh");
+        let f = crate::integrity::check(home.path())
+            .into_iter()
+            .find(|f| f.tool == "cursor")
+            .unwrap();
+        assert!(f.ok, "{f:?}");
+
+        uninstall().unwrap();
+        let doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            doc,
+            serde_json::json!({"version":1,"hooks":{"stop":[{"command":"./my-hook.sh"}]}})
+        );
+    }
+
+    fn cursor_finding_after(
+        home: &std::path::Path,
+        edit: impl FnOnce(&mut serde_json::Value),
+    ) -> crate::integrity::Finding {
+        let path = home.join(".cursor/hooks.json");
+        let mut doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        edit(&mut doc);
+        std::fs::write(&path, doc.to_string()).unwrap();
+        crate::integrity::check(home)
+            .into_iter()
+            .find(|f| f.tool == "cursor")
+            .unwrap()
+    }
+
+    /// Each edit leaves the argus commands on disk, and Cursor then runs
+    /// none of them, or can block on them.
+    #[test]
+    fn check_detects_cursor_kill_switches_and_altered_entries() {
+        type Edit = fn(&mut serde_json::Value);
+        let cases: [(&str, Edit); 3] = [
+            ("version is 2", |d| d["version"] = serde_json::json!(2)),
+            ("hooks altered: preToolUse", |d| {
+                d["hooks"]["preToolUse"][0]["failClosed"] = serde_json::json!(true)
+            }),
+            ("hooks altered: beforeSubmitPrompt", |d| {
+                d["hooks"]["beforeSubmitPrompt"][0]["matcher"] = serde_json::json!("x")
+            }),
+        ];
+        for (want, edit) in cases {
+            let home = fake_home();
+            std::fs::create_dir_all(home.path().join(".cursor")).unwrap();
+            fake_bin(home.path());
+            run(false).unwrap();
+            let f = cursor_finding_after(home.path(), edit);
+            assert!(!f.ok && f.detail.contains(want), "{want}: {f:?}");
+        }
+
+        let home = fake_home();
+        std::fs::create_dir_all(home.path().join(".cursor")).unwrap();
+        fake_bin(home.path());
+        run(false).unwrap();
+        let path = home.path().join(".cursor/hooks.json");
+        let text = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, format!("{text}}}")).unwrap();
+        let f = crate::integrity::check(home.path())
+            .into_iter()
+            .find(|f| f.tool == "cursor")
+            .unwrap();
+        assert!(!f.ok && f.detail.contains("not valid JSON"), "{f:?}");
     }
 
     #[test]

@@ -24,6 +24,7 @@
 pub mod claude_code;
 pub mod codex;
 pub mod copilot;
+pub mod cursor;
 pub mod opencode;
 pub mod pi;
 
@@ -50,12 +51,7 @@ pub const MARKER_KEY: &str = "_argus";
 /// living under an "argus" path (a repo checked out at `~/src/argus/`).
 fn is_legacy_ours(entry: &Value, source: &str) -> bool {
     let needle = format!(" hook --source {source}");
-    entry["hooks"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|h| h.get("command").and_then(Value::as_str))
-        .any(|c| c.contains(&needle))
+    entry_commands(entry).any(|c| c.contains(&needle))
 }
 
 /// Every harness argus knows how to wire itself into.
@@ -64,6 +60,7 @@ pub const HARNESSES: &[&dyn Harness] = &[
     &opencode::OpenCode,
     &codex::Codex,
     &copilot::Copilot,
+    &cursor::Cursor,
     &pi::Pi,
 ];
 
@@ -127,9 +124,11 @@ impl HookEvent {
 
 /// Layout of a hooks JSON file. Claude Code and Codex share one schema
 /// (`hooks.{Event}[] = [{ hooks: [{type, command, timeout}], matcher? }]`).
+/// Cursor uses `{version: 1, hooks.{event}[] = [{command, timeout}]}`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HookShape {
     CommandArray,
+    Flat,
 }
 
 /// A key-level edit into a shared TOML file, applied with `toml_edit` so
@@ -1373,6 +1372,11 @@ pub(crate) fn apply(artifact: &Artifact, display: &str, dry_run: bool) -> Result
                     None => arr.push(want),
                 }
             }
+            // Cursor ignores a hooks file without `version: 1`. A version
+            // that is already there stays: `check` reports one that is not 1.
+            if *shape == HookShape::Flat && doc.get("version").is_none() {
+                doc["version"] = json!(1);
+            }
             // Set, not merged: these exist to hold one value, and an
             // administrator who wants a different one wants argus not to
             // write this file.
@@ -1498,7 +1502,18 @@ fn hook_entry(shape: HookShape, cmd: &str, ev: &HookEvent) -> Value {
             }
             entry
         }
+        HookShape::Flat => json!({ "command": cmd, "timeout": ev.timeout, MARKER_KEY: true }),
     }
+}
+
+/// The commands in one hook entry, for either shape.
+fn entry_commands(entry: &Value) -> impl Iterator<Item = &str> {
+    entry["hooks"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .chain(std::iter::once(entry))
+        .filter_map(|h| h.get("command").and_then(Value::as_str))
 }
 
 /// Exact inverse of [`install`]: remove what argus added and nothing else.
@@ -1710,11 +1725,7 @@ pub(crate) fn verify(artifact: &Artifact) -> std::result::Result<(), String> {
                     altered.push(ev.name);
                 }
                 for entry in ours {
-                    for h in entry["hooks"].as_array().into_iter().flatten() {
-                        if let Some(c) = h.get("command").and_then(Value::as_str) {
-                            commands.insert(c);
-                        }
-                    }
+                    commands.extend(entry_commands(entry));
                 }
             }
             if !missing.is_empty() {
@@ -1984,6 +1995,11 @@ fn write_atomic(path: &Path, contents: &[u8]) -> Result<()> {
 /// session is lost. Stamping here rather than in each adapter means no adapter
 /// can forget to (telemetry-gaps #8).
 pub fn parse(envelope: Envelope, capture: &CaptureCfg) -> Vec<Event> {
+    // Cursor also runs the Claude Code hooks and sends them its own payload.
+    // Its own hooks record the same event, so this copy is a duplicate.
+    if envelope.source == "claude-code" && envelope.payload.get("cursor_version").is_some() {
+        return Vec::new();
+    }
     let received_at = envelope.received_at;
     let (truncated, dropped) = (envelope.truncated, envelope.dropped);
     let source = envelope.source.clone();
@@ -2654,6 +2670,74 @@ mod tests {
             // Re-running the install is the documented repair.
             install_managed_in(hs, root.path(), Platform::Linux, false).unwrap();
             assert!(check_managed_in(hs, root.path(), Platform::Linux)[0].ok);
+        }
+        unsafe { std::env::remove_var(BIN_ENV) };
+    }
+
+    /// Cursor also runs the Claude Code hooks, with its own payloads. The
+    /// Cursor hooks record the same event, so the copy gives nothing.
+    #[test]
+    fn a_cursor_payload_through_the_claude_code_hooks_is_dropped() {
+        let env = |payload: Value| Envelope {
+            ai_env: Default::default(),
+            env_overrides: Vec::new(),
+            cloud_identity: Default::default(),
+            source: "claude-code".into(),
+            received_at: chrono::Utc::now(),
+            truncated: true,
+            dropped: 0,
+            event: None,
+            payload,
+        };
+        let cfg = CaptureCfg::default();
+        let copy = json!({"hook_event_name": "preToolUse", "cursor_version": "3.0.0",
+                          "conversation_id": "c-1", "tool_name": "Shell"});
+        assert!(parse(env(copy), &cfg).is_empty());
+
+        let own = json!({"hook_event_name": "Stop", "session_id": "s-1"});
+        assert!(!parse(env(own), &cfg).is_empty());
+    }
+
+    /// Cursor has the same file in each layer. A managed install must write
+    /// the flat entries and `version: 1` at the enterprise path, and nothing
+    /// in a home directory.
+    #[test]
+    fn cursors_managed_layer_round_trips_on_every_platform() {
+        let bin = tempfile::tempdir().unwrap();
+        let exe = fake_argus(bin.path(), "argus");
+        unsafe { std::env::set_var(BIN_ENV, &exe) };
+        let hs: &[&dyn Harness] = &[&crate::harness::cursor::Cursor];
+
+        for (p, rel) in [
+            (Platform::MacOS, "Library/Application Support/Cursor"),
+            (Platform::Linux, "etc/cursor"),
+            (Platform::Windows, "ProgramData/Cursor"),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let file = root.path().join(rel).join("hooks.json");
+
+            install_managed_in(hs, root.path(), p, false).unwrap();
+            let doc: Value =
+                serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+            assert_eq!(doc["version"], json!(1), "{p:?}");
+            let entry = &doc["hooks"]["beforeSubmitPrompt"][0];
+            assert_eq!(entry[MARKER_KEY], json!(true), "{p:?}");
+            assert_eq!(entry["timeout"], json!(10), "{p:?}");
+            assert!(
+                entry["command"]
+                    .as_str()
+                    .unwrap()
+                    .contains("hook --source cursor"),
+                "{p:?}: {entry}"
+            );
+            assert!(entry.get("failClosed").is_none() && entry.get("matcher").is_none());
+
+            let checked = check_managed_in(hs, root.path(), p);
+            assert!(checked.iter().all(|f| f.ok), "{p:?}: {checked:?}");
+
+            uninstall_managed_in(hs, root.path(), p).unwrap();
+            let text = std::fs::read_to_string(&file).unwrap();
+            assert!(!text.contains("argus"), "{p:?}: wiring left behind: {text}");
         }
         unsafe { std::env::remove_var(BIN_ENV) };
     }

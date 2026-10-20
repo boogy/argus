@@ -52,7 +52,9 @@ logic:
   `TomlEdit` for key-level edits into shared TOML. Generic
   `install`/`uninstall`/`check` drive all of them, and every
   `JsonHooks` entry is stamped `"_argus": true` so uninstall removes exactly
-  what we added.
+  what we added. `JsonHooks` has two shapes: `CommandArray` (Claude Code,
+  Codex, Copilot) and `Flat` (Cursor: `{version: 1, hooks.{event}[] =
+  [{command, timeout}]}`).
 
   `scope` is `User`, `Project`, or `Managed(Platform)`, and the arms are
   genuinely different files rather than subsets of each other. Return an empty

@@ -1,7 +1,7 @@
 # argus documentation
 
 argus is a local-first monitor for coding-agent tool calls — Claude Code,
-opencode, Codex, Copilot CLI, and pi. It captures prompts, tool use, files
+opencode, Codex, Copilot CLI, Cursor, and pi. It captures prompts, tool use, files
 touched, hosts contacted, MCP servers reached and cloud identity assumed,
 redacts secrets, and exports the result as OTLP/JSON to your observability
 backend.
@@ -25,7 +25,7 @@ tree it links into.
 | Doc                                                       | What's in it                                                                   |
 | --------------------------------------------------------- | ------------------------------------------------------------------------------ |
 | [Architecture](architecture.md)                           | The hook shim → daemon → buffer → export pipeline, and the data directory.     |
-| [Per-tool fidelity](tool-support.md)                      | Signal-by-signal comparison across the five host tools.                        |
+| [Per-tool fidelity](tool-support.md)                      | Signal-by-signal comparison across the six host tools.                        |
 | [Configuration](configuration.md)                         | Every `config.toml` key, remote fleet config, environment variables.           |
 | [Capture and enrichment](capture.md)                      | File contents, network/FQDN extraction, MCP identity, cloud identity.          |
 | [Privacy and redaction](privacy.md)                       | What is scrubbed, metadata-only mode, and the un-redacted spool.               |

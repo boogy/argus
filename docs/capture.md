@@ -185,15 +185,17 @@ the server wins, and they are consulted in this order:
 1. `.mcp.json`, beside the project
 2. `opencode.json`, beside the project
 3. `.codex/config.toml`, beside the project
-4. `~/.claude.json` (including per-project servers `claude mcp add` writes by
+4. `.cursor/mcp.json`, beside the project
+5. `~/.claude.json` (including per-project servers `claude mcp add` writes by
    default)
-5. `~/.claude/settings.json`
-6. `~/.copilot/mcp-config.json`
-7. `~/.config/opencode/opencode.json`
-8. `~/.codex/config.toml`
+6. `~/.claude/settings.json`
+7. `~/.copilot/mcp-config.json`
+8. `~/.config/opencode/opencode.json`
+9. `~/.codex/config.toml`
+10. `~/.cursor/mcp.json`
 
 A project file wins over a user-wide one of the same name, since that's the
-server the call actually reached. All eight are consulted regardless of which
+server the call actually reached. All ten are consulted regardless of which
 tool made the call: a server is configured once and reached from whichever
 agent is open. Reading a file the calling tool doesn't use costs a `stat` and
 can only add a name genuinely configured on this machine.
@@ -343,7 +345,7 @@ session that uses a personal account or a personal API key. The default is on
 (`capture.ai_identity`).
 
 ```
-ai.account.email  = john.doe@example.com
+ai.account.email  = john.doe@example.com   (Claude, Codex, Cursor)
 ai.account.id     = 11111111-2222-…         (Claude account UUID, Codex account ID)
 ai.org.id         = 33333333-4444-…         (Claude only)
 ai.org.name       = Example Corp            (Claude only)
@@ -357,6 +359,7 @@ ai.auth_mode      = oauth | api_key | bedrock | vertex | foundry   (Claude; Code
 | Claude Code | `oauthAccount` in `$CLAUDE_CONFIG_DIR/.claude.json`. If the variable is not set, `~/.claude.json` | `SessionStart`   |
 | Codex       | The Codex OTLP attributes `user.email`, `user.account_id` and `auth_mode`. argus reads no file  | All OTLP events  |
 | Copilot CLI | `last_logged_in_user` in `$COPILOT_HOME/config.json`. If the variable is not set, `~/.copilot/config.json` | `sessionStart`   |
+| Cursor      | `user_email` in the hook payload. argus reads no file                                      | `sessionStart`   |
 
 Data that argus reads, and data that it does not read:
 
@@ -382,6 +385,8 @@ Data that argus reads, and data that it does not read:
   email and no organization. Copilot keeps its token in the keychain. If there
   is no keychain, Copilot writes the token to `copilotTokens` in the same
   file. argus reads the file, but it does not keep the token.
+- **Cursor.** argus records the email only. Cursor puts `user_email` in each
+  payload. argus keeps it from `sessionStart` and from no other event.
 - **opencode, pi.** argus does not record an account. Each tool keeps its
   identity in the same file as its tokens. That identity is an OpenAI account
   ID at most.

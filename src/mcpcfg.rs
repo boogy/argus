@@ -133,7 +133,7 @@ impl Resolver {
 
 /// Every file that can say where an MCP server is, most specific first.
 ///
-/// The list is the union of five tools' conventions rather than a per-source
+/// The list is the union of six tools' conventions rather than a per-source
 /// lookup, and deliberately: the tool that *made* the call is known, but a
 /// server is routinely configured once and reached from whichever agent is
 /// open. Reading a file the calling tool does not use costs a `stat` and can
@@ -145,6 +145,7 @@ fn candidate_files(cwd: Option<&str>) -> Vec<PathBuf> {
         v.push(dir.join(".mcp.json"));
         v.push(dir.join("opencode.json"));
         v.push(dir.join(".codex").join("config.toml"));
+        v.push(dir.join(".cursor").join("mcp.json"));
     }
     let home = crate::install::home();
     v.push(home.join(".claude.json"));
@@ -152,6 +153,7 @@ fn candidate_files(cwd: Option<&str>) -> Vec<PathBuf> {
     v.push(home.join(".copilot").join("mcp-config.json"));
     v.push(home.join(".config").join("opencode").join("opencode.json"));
     v.push(home.join(".codex").join("config.toml"));
+    v.push(home.join(".cursor").join("mcp.json"));
     v
 }
 
@@ -423,7 +425,7 @@ mod tests {
         assert_eq!(cap("short".into()), "short");
     }
 
-    /// Five tools, four config dialects, one question.
+    /// Six tools, four config dialects, one question.
     #[test]
     fn every_dialect_a_host_tool_writes_is_read() {
         let _g = home_lock();
@@ -458,6 +460,14 @@ mod tests {
             "[mcp_servers.cdx]\ncommand = \"cdx-srv\"\nargs = [\"--stdio\"]\n",
         );
         write(
+            &home.path().join(".cursor").join("mcp.json"),
+            &json!({"mcpServers": {"cur": {"url": "https://cursor-user.example/mcp"}}}).to_string(),
+        );
+        write(
+            &proj.path().join(".cursor").join("mcp.json"),
+            &json!({"mcpServers": {"curp": {"command": "curp-srv"}}}).to_string(),
+        );
+        write(
             &proj.path().join(".mcp.json"),
             &json!({"mcpServers": {"scoped": {"url": "https://proj.example/mcp"}}}).to_string(),
         );
@@ -483,6 +493,14 @@ mod tests {
         assert_eq!(
             r.endpoint("cdx", Some(cwd)).as_deref(),
             Some("stdio:cdx-srv --stdio")
+        );
+        assert_eq!(
+            r.endpoint("cur", Some(cwd)).as_deref(),
+            Some("https://cursor-user.example/mcp")
+        );
+        assert_eq!(
+            r.endpoint("curp", Some(cwd)).as_deref(),
+            Some("stdio:curp-srv")
         );
         assert_eq!(
             r.endpoint("scoped", Some(cwd)).as_deref(),

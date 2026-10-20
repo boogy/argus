@@ -70,7 +70,7 @@ builds use `json_extract(body, '$.path')` — they are equivalent.
 | `$.ts`         | RFC3339 UTC timestamp (string; lexicographically sortable) |
 | `$.host`       | hostname                                                   |
 | `$.username`   | OS user                                                    |
-| `$.source`     | `claude-code` \| `opencode` \| `codex` \| `copilot` \| `pi` |
+| `$.source`     | `claude-code` \| `opencode` \| `codex` \| `copilot` \| `cursor` \| `pi` |
 | `$.session_id` | tool-native session id (nullable)                          |
 | `$.cwd`        | working directory (nullable)                               |
 | `$.type`       | event kind, see below                                      |

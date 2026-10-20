@@ -1,6 +1,7 @@
 pub mod claude_code;
 pub mod codex;
 pub mod copilot;
+pub mod cursor;
 pub mod net;
 pub mod opencode;
 pub mod pi;

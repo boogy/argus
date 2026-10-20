@@ -5,6 +5,37 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-10-20
+
+Cursor support. argus records the Cursor agent in the IDE, in the Agents
+window and in the `agent` CLI.
+
+### ✨ Features
+* **cursor:** `argus install` adds argus entries to `hooks.json` in the user,
+  project or managed scope. argus keeps the user's own hooks.
+* **cursor:** argus records prompts, tool use (pre, post and error), file
+  edits, assistant messages, subagents, compaction and the session lifecycle.
+* **cursor:** the IDE `stop` event gives a `Usage` event with the token
+  counts of the turn. Cursor sends no cost.
+* **cursor:** `sessionStart` events have `ai.account.email`, from
+  `user_email`. `capture.ai_identity` turns this off.
+* **cursor:** `argus check` reports a `hooks.json` that is not valid JSON or
+  that has a `version` other than 1.
+* **mcp:** argus reads the MCP servers in `~/.cursor/mcp.json` and
+  `<cwd>/.cursor/mcp.json`.
+
+### 🐛 Fixes
+* Cursor also runs the Claude Code hooks, with Cursor payloads. argus now
+  drops a `claude-code` event that has `cursor_version`. Before, each Cursor
+  event also gave a `raw` `claude-code` event.
+
+### Known limits
+* The `agent` CLI sends no prompt, `stop` or response events.
+* Tab completion events are not recorded.
+* The managed scope is not tested live.
+
+**Full Changelog**: https://github.com/boogy/argus/compare/v0.7.0...v0.8.0
+
 ## [0.7.0] - 2026-10-15
 
 The AI-provider account of the agent. An event now tells which Claude,

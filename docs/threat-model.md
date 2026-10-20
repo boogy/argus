@@ -421,7 +421,7 @@ redirect, so they are proven in the unit suite instead.
 
 ## What is still open
 
-**An unwired agent is invisible.** A developer who installs Cursor, Aider, a
+**An unwired agent is invisible.** A developer who installs Aider, a
 web UI, or any agent argus has no adapter for is not being monitored, and
 nothing in this document changes that. It is not a bypass of argus so much as a
 decision not to use the tools argus watches, and it is endpoint-inventory and

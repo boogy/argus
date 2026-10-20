@@ -1,0 +1,26 @@
+{
+  "source": "cursor",
+  "received_at": "2026-01-01T00:00:00Z",
+  "payload": {
+    "conversation_id": "conv-cursor-001",
+    "generation_id": "gen-cursor-001",
+    "model": "auto",
+    "cursor_version": "3.0.0",
+    "workspace_roots": [
+      "/Users/dev/project"
+    ],
+    "user_email": "john.doe@example.com",
+    "transcript_path": null,
+    "hook_event_name": "subagentStop",
+    "subagent_type": "explore",
+    "status": "completed",
+    "task": "Find the parser tests",
+    "summary": "The tests are in tests/parser.rs.",
+    "duration_ms": 9000,
+    "message_count": 4,
+    "tool_call_count": 2,
+    "loop_count": 1,
+    "modified_files": [],
+    "agent_transcript_path": null
+  }
+}

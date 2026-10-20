@@ -99,6 +99,11 @@ rule keeping only managed hooks changes nothing about its capture, and
 reporting it would fire on every host the managed install has run on —
 argus's own pin reported as argus's own kill switch.
 
+**Cursor**: a `hooks.json` that is not valid JSON, or one whose `version` is
+not `1`. Cursor does not run any hook from such a file. `check` also reports
+an argus entry that was changed, for example with `failClosed` or a `matcher`
+added. `failClosed` can block Cursor. A `matcher` can skip events.
+
 **Codex**: `[features] hooks = false` (and its deprecated `codex_hooks`
 alias) and `allow_managed_hooks_only = true`, which keeps only
 administrator-managed hooks. Both are read from `config.toml` and
@@ -245,7 +250,7 @@ files are deleted, and the count is exported as an `event.type=loss`,
 
 Confirm `argus install` actually wrote entries — check
 `~/.claude/settings.json` (`hooks.*`),
-`~/.config/opencode/plugin/argus.ts`, `~/.codex/config.toml` (`[otel]`), `~/.codex/hooks.json`, `~/.copilot/hooks/argus.json`, or
+`~/.config/opencode/plugin/argus.ts`, `~/.codex/config.toml` (`[otel]`), `~/.codex/hooks.json`, `~/.copilot/hooks/argus.json`, `~/.cursor/hooks.json`, or
 `~/.pi/agent/extensions/argus.ts`.
 
 Re-run `argus install` (idempotent) if entries are missing — it also
